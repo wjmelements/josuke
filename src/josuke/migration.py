@@ -1,35 +1,11 @@
 from eth_utils import to_checksum_address
 from itertools import batched
 
+from .delegate import Delegate, source_map
 from .opcodes import DUP1, LOG3, PUSH0, PUSH1, PUSH20, PUSH4, PUSH32, SHL, SSTORE
 from .selectors import Selector
 
 
-class ContractSource:
-    def __init__(self, path, name):
-        self.path = path
-        self.name = name
-
-    def __repr__(self):
-        return f"{self.path}:{self.name}"
-
-    def __eq__(self, other) -> bool:
-        return self.path == other.path and self.name == other.name
-
-source_map = {}
-
-class Delegate:
-    def __init__(self, address: str, source: ContractSource):
-        self.address = address
-        self.address20 = address[2:].lower()
-        self.source = source
-        source_map[address] = self
-
-    def __repr__(self) -> str:
-        return f"{self.source} (@{self.address})"
-
-    def __eq__(self, other) -> bool:
-        return self.address == other.address and self.source == other.source
 
 # event SelectorDelegated(bytes4 indexed selector, address indexed delegate)
 PUSH_SELECTOR_DELEGATED = f"{PUSH32}7c86091fe23e473af4b780c37525ce8cfa74ec05a4a4e7d4d3e7f0551d86a7ce"
@@ -49,8 +25,8 @@ SET_DELEGATE_SUFFIX = bytes.fromhex(SSTORE)  # bytecode[99:100]
 class SetDelegate:
     def __init__(self, selector: Selector, storage_key: str, delegate: Delegate):
         self.selector = selector
-        self.selector4 = f"{selector[2:]}"
-        self.storage_key32 = storage_key[2:]
+        self.selector4 = selector.removeprefix("0x")
+        self.storage_key32 = storage_key.removeprefix("0x")
         self.delegate = delegate
 
     def __repr__(self) -> str:
@@ -89,7 +65,7 @@ class Migration:
         self.setdelegates = setdelegates
 
     def encode(self) -> bytes:
-        return b''.join(map(setdelegates, lambda setdelegate: setdelegate.encode()))
+        return b''.join(setdelegate.encode() for setdelegate in self.setdelegates)
 
     def __repr__(self) -> str:
         try:

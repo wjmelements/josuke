@@ -6,8 +6,8 @@ class Selector:
     @staticmethod
     def from_abi(abi: dict):
         assert abi["type"] == "function"
-        canonical = f"{abi['name']}({','.join(list(map(lambda arg: arg['type'], abi['inputs'])))})"
-        expressive = f"{abi['name']}({', '.join(list(map(lambda arg: arg['internalType'], abi['inputs'])))})"
+        canonical = f"{abi['name']}({','.join(arg['type'] for arg in abi['inputs'])})"
+        expressive = f"{abi['name']}({', '.join(arg['internalType'] for arg in abi['inputs'])})"
         selector4 = keccak(text=canonical)[:4].hex()
         return Selector("0x" + selector4, expressive)
 
@@ -23,7 +23,7 @@ class Selector:
         return self.selector == other.selector and self.expressive == other.expressive
 
     def __repr__(self) -> str:
-        return 
+        return f"{self.expressive} [{self.selector}]"
 
     def encode(self) -> bytes:
         return bytes.fromhex(self.selector)

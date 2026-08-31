@@ -5,3 +5,8 @@ __pycache__/
 
 # VIM
 *.swp
+
+# Foundry fixture build output
+tests/fixtures/forge-project/out/
+tests/fixtures/forge-project/cache/
+tests/fixtures/forge-project/broadcast/

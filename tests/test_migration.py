@@ -1,8 +1,7 @@
 import pytest
 
+from josuke.delegate import ContractSource, Delegate
 from josuke.migration import (
-    ContractSource,
-    Delegate,
     SetDelegate,
     Migration,
     SET_DELEGATE_SIZE,

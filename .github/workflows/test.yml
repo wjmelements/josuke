@@ -18,6 +18,12 @@ jobs:
         run: make -C evm check
       - name: Install EVM assembler
         run: sudo install $(pwd)/evm/bin/evm $(dirname $(which git))/evm
+      - name: Install Foundry
+        uses: foundry-rs/foundry-toolchain@v1
+        with:
+          version: "1.7.1"
+      - name: Warm the fixture solc
+        run: forge build --root tests/fixtures/forge-project
       - uses: actions/setup-python@v5
         with:
           python-version: "3.14"
