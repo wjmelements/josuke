@@ -10,6 +10,12 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+      - name: Shallow-clone EVM assembler
+        run: git clone --depth 1 --revision 675a73adf72c235681fe87b003bf8c5bab0a5ec3 --recurse-submodules --shallow-submodules --no-tags https://github.com/wjmelements/evm.git
+      - name: Build EVM assembler
+        run: make -C evm check
+      - name: Install EVM assembler
+        run: sudo install $(pwd)/evm/bin/evm $(dirname $(which git))/evm
       - uses: actions/setup-python@v5
         with:
           python-version: "3.14"

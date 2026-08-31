@@ -1,5 +1,3 @@
-import subprocess
-
 from eth_utils import to_checksum_address
 from itertools import batched
 
