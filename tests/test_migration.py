@@ -32,6 +32,7 @@ function_abi = {
 
 def test_SetDelegate_encode_decode():
     selector = Selector.from_abi(function_abi)
+    assert selector.selector == "0x6a11b2a8"
     source = ContractSource("src/lib/UTF8Library.sol", "UTF8Library")
     address = "0x1A4E1a4e1A4E1a4e1a4E1a4e1A4e1A4E1a4E1A4e"
     storage_key = "0x035e8a4aa5c458e1b67ba99aeadf723b02971482f900ce17c7ae150613e85d24"
@@ -88,7 +89,7 @@ def test_SetDelegate_decode_rejects_non_encoded_bytestring():
 
     # the SelectorDelegated event topic differs
     mutated = bytearray(encoded)
-    mutated[70] ^= 0xFF
+    mutated[45] ^= 0xFF
     with pytest.raises(InvalidSetDelegate):
         SetDelegate.decode(bytes(mutated))
 
