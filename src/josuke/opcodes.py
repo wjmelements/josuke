@@ -254,3 +254,11 @@ STATICCALL = "fa"
 REVERT = "fd"
 INVALID = "fe"
 SELFDESTRUCT = "ff"
+
+
+def push(uint: int):
+    if uint == 0:
+        return PUSH0
+    size = (uint.bit_length() + 7) // 8
+    assert size < 33
+    return hex(0x5f + size).removeprefix('0x') + uint.to_bytes(size).hex()
