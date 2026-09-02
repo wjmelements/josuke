@@ -43,7 +43,10 @@ class ProxyStorage:
                     is_match = request["method"] == "eth_getStorageAt" and request["params"][0] == proxy_address
                     if not is_match:
                         continue
-                    assert selector.selector not in self.storage_keys
+                    if selector.selector in self.storage_keys:
+                        # The proxy's dispatch SLOAD comes first; later reads are
+                        # the delegate touching proxy storage itself.
+                        continue
                     slot = int(request["params"][1], 16)
                     self.storage_keys[selector.selector] = f"0x{slot:064x}"
                     self.storage_values[selector.selector] = result["result"]

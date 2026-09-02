@@ -7,6 +7,7 @@ from eth_utils import to_checksum_address
 
 from .deploy import run_deploy
 from .ledger import DEFAULT_LEDGER, load_ledger, parse_address, write_ledger
+from .verify import run_verify
 
 ledger_option = click.option(
     "-f",
@@ -75,3 +76,16 @@ def deploy(ledger_path):
     from Foundry's environment (ETH_KEYSTORE_ACCOUNT, ETH_FROM, ...).
     """
     run_deploy(ledger_path)
+
+
+@main.command()
+@ledger_option
+def verify(ledger_path):
+    """Verify the ledger against $ETH_RPC_URL.
+
+    Checks, per proxy: the `current` facets are built from their recorded commit
+    and live on chain, the proxy dispatches to them; then the `proposed` facets
+    match `facetSrc` and the recorded migration installs them and zeroes any
+    removed selectors. Rebuilds each recorded gitCommit in a temporary worktree.
+    """
+    run_verify(ledger_path)

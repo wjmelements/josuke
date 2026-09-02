@@ -8,6 +8,7 @@ Automated, verifiable upgrades for [ERC-8167](https://eips.ethereum.org/EIPS/eip
 josuke init                     # create an empty josuke.json in the cwd
 josuke add <address> <facet>...   # add facet sources to a proxy, registering it if new
 josuke deploy                    # deploy changed/new facets, record them under `proposed`
+josuke verify                    # check the ledger against the chain in $ETH_RPC_URL
 ```
 
 Pass `-f/--file` to any command to point at a ledger other than `./josuke.json`.
@@ -28,7 +29,16 @@ recorded under `proposed`.
 The result is written back as a fresh `proposed` state (facets + `migration`)
 stamped with the current git commit; `current` is left untouched.
 
-It builds with `forge` and broadcasts with `cast`, reading the environment:
+`verify` checks the recorded state against the chain, rebuilding each recorded
+`gitCommit` in a throwaway `git worktree`. For `current`: every facet's
+`initcodeHash` recomputes from its commit, its `codehash` matches the code at
+the recorded address, and the proxy dispatches each of its selectors to that
+address. For `proposed`: the same hash checks, plus `proposed.facets` is exactly
+what `facetSrc` resolves to, and the on-chain `migration` installs every
+proposed selector and zeroes every selector dropped since `current`. It reports
+all mismatches and exits non-zero if any.
+
+`deploy` builds with `forge` and broadcasts with `cast`, reading the environment:
 
 | Variable | Purpose |
 | --- | --- |

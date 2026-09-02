@@ -120,6 +120,9 @@ def facet_abi(facet: Facet, root: pathlib.Path) -> list:
 
     # A raw-bytecode facet still needs an ABI to know its selectors; take it from
     # a Foundry artifact whose name matches the file.
+    # FIXME: `forge build` won't build the .evm artifact (out/<name>.evm/<name>.json);
+    # per the Makefile in ~/projects/erc8167 it's assembled with `evm` and merged
+    # with the ABI of the matching src/interfaces/<name>.sol. Build it here.
     stem = pathlib.Path(facet.path).stem
     out_dir = root / get_forge_config(root).get("out", "out")
     for artifact in sorted(out_dir.glob("**/*.json")):
@@ -165,9 +168,17 @@ def _prompt_arg(source_id: str, name: str, abi_type: str):
         return raw
 
 
-def facet_initcode(facet: Facet, root: pathlib.Path, recorded_args):
-    """Return (initcode_hex, constructor_args | None) for `facet` at HEAD."""
+def facet_initcode(facet: Facet, root: pathlib.Path, recorded_args, prompt: bool = True):
+    """Return (initcode_hex, constructor_args | None) for `facet` at HEAD.
+
+    With `prompt` false, a constructor arg missing from `recorded_args` is an
+    error instead of an interactive prompt (used when verifying)."""
     if facet.kind == "evm":
+        # FIXME: this treats the .evm file as raw hex, but ERC-8167 ships .evm as
+        # evm-assembler source. Per the Makefile in ~/projects/erc8167, the
+        # initcode is `evm -c <file>` (or `evm <file>` when the name contains
+        # "constructor"), and `forge build` does not produce these artifacts.
+        # Assemble it here (and fall back to raw hex only if that fails).
         raw = (root / facet.path).read_text().strip()
         return raw.removeprefix("0x"), None
 
@@ -178,12 +189,17 @@ def facet_initcode(facet: Facet, root: pathlib.Path, recorded_args):
         return initcode, None
 
     recorded_args = recorded_args or {}
-    args = {
-        arg["name"]: recorded_args.get(arg["name"])
-        if arg["name"] in recorded_args
-        else _prompt_arg(facet.source_id, arg["name"], arg["type"])
-        for arg in inputs
-    }
+
+    def resolve(arg):
+        if arg["name"] in recorded_args:
+            return recorded_args[arg["name"]]
+        if not prompt:
+            raise click.ClickException(
+                f"{facet.source_id}: no recorded value for constructor arg {arg['name']}"
+            )
+        return _prompt_arg(facet.source_id, arg["name"], arg["type"])
+
+    args = {arg["name"]: resolve(arg) for arg in inputs}
     encoded = abi_encode(
         [arg["type"] for arg in inputs],
         [coerce_arg(arg["type"], args[arg["name"]]) for arg in inputs],
@@ -229,10 +245,17 @@ def current_selectors(current: dict, root: pathlib.Path) -> dict:
 
 
 def build_migration(
-    proxy: str, facets: list, proposed_facets: dict, current: dict, root: pathlib.Path
+    proxy: str,
+    facets: list,
+    proposed_facets: dict,
+    current: dict,
+    root: pathlib.Path,
+    storage: ProxyStorage | None = None,
 ):
     """A Migration that points every proposed selector at its facet and zeroes
-    selectors dropped since `current`. Returns None when nothing needs changing."""
+    selectors dropped since `current`. Returns None when nothing needs changing.
+
+    `storage` may be a pre-populated ProxyStorage to avoid re-querying slots."""
     owner = {}  # selector -> Facet
     selectors = {}  # selector -> Selector
     for facet in facets:
@@ -250,8 +273,9 @@ def build_migration(
     installed = current_selectors(current, root)
     removed = {s: installed[s] for s in installed if s not in owner}
 
-    storage = ProxyStorage(proxy)
-    storage.fetch(list({**installed, **selectors}.values()))
+    if storage is None:
+        storage = ProxyStorage(proxy)
+        storage.fetch(list({**installed, **selectors}.values()))
 
     setdelegates = []
     for sel in sorted(owner):

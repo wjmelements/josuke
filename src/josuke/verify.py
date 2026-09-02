@@ -1,0 +1,223 @@
+import pathlib
+import tempfile
+from os import environ
+
+import click
+from eth_utils import to_checksum_address
+
+from .deploy import (
+    build_migration,
+    chain_id,
+    facet_from_source_id,
+    facet_initcode,
+    facet_selectors,
+    keccak_hex,
+    resolve_facets,
+    rpc,
+    _run,
+)
+from .ledger import load_ledger
+from .migration import SET_DELEGATE_SIZE, InvalidSetDelegate, SetDelegate
+from .storage import ProxyStorage
+
+ZERO_ADDRESS = to_checksum_address("0x" + "00" * 20)
+
+
+class Report:
+    """Collects verification failures, each tagged with the proxy under test."""
+
+    def __init__(self):
+        self.failures: list[str] = []
+        self.proxy = ""
+
+    def fail(self, message: str) -> None:
+        self.failures.append(f"{self.proxy} {message}")
+
+
+class SourceTrees:
+    """Detached git worktrees, one per commit, each with a completed `forge build`."""
+
+    def __init__(self, root: pathlib.Path):
+        self.root = root
+        self._tmp = tempfile.TemporaryDirectory(prefix="josuke-verify-")
+        self._trees: dict[str, pathlib.Path] = {}
+
+    def get(self, commit: str) -> pathlib.Path:
+        if commit not in self._trees:
+            tree = pathlib.Path(self._tmp.name) / commit
+            _run(["git", "worktree", "add", "--detach", str(tree), commit], self.root)
+            self._trees[commit] = tree  # recorded before build so a build failure still cleans up
+            if (tree / ".gitmodules").exists():
+                _run(["git", "submodule", "update", "--init", "--recursive"], tree)
+            _run(["forge", "build"], tree)
+            # FIXME: `forge build` does not produce the .evm facet artifacts
+            # (out/<name>.evm/<name>.json). Assemble them per the Makefile rule in
+            # ~/projects/erc8167 so verify can recompute .evm facet bytecode.
+        return self._trees[commit]
+
+    def close(self) -> None:
+        for tree in self._trees.values():
+            _run(["git", "worktree", "remove", "--force", str(tree)], self.root)
+        self._tmp.cleanup()
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *exc):
+        self.close()
+
+
+def _onchain_codehash(address: str) -> str:
+    return keccak_hex(rpc("eth_getCode", [address, "latest"]))
+
+
+def _slot_address(raw: str | None) -> str | None:
+    """The delegate address held in a 32-byte storage word, or None if empty."""
+    if not raw or int(raw, 16) == 0:
+        return None
+    return to_checksum_address("0x" + raw.removeprefix("0x").rjust(64, "0")[-40:])
+
+
+def verify_facets(state: dict, label: str, tree: pathlib.Path, report: Report) -> None:
+    """Each recorded facet is built from `state`'s commit and live on chain."""
+    for source_id, rec in state["facets"].items():
+        facet = facet_from_source_id(source_id)
+        initcode, _ = facet_initcode(facet, tree, rec.get("constructorArgs"), prompt=False)
+        got = keccak_hex(initcode)
+        if got != rec["initcodeHash"]:
+            report.fail(f"{label} {source_id}: initcodeHash {got} != recorded {rec['initcodeHash']}")
+
+        address = rec.get("address")
+        if address is None:
+            report.fail(f"{label} {source_id}: no recorded address; cannot check deployed code")
+            continue
+        got = _onchain_codehash(address)
+        if got != rec["codehash"]:
+            report.fail(f"{label} {source_id} @{address}: codehash {got} != recorded {rec['codehash']}")
+
+
+def _selector_owners(state: dict, tree: pathlib.Path) -> tuple[dict, list]:
+    """(selector -> (source_id, address), [Selector]) for a deployment state."""
+    owners, selectors = {}, []
+    for source_id, rec in state["facets"].items():
+        for selector in facet_selectors(facet_from_source_id(source_id), tree):
+            owners[selector.selector] = (source_id, rec.get("address"))
+            selectors.append(selector)
+    return owners, selectors
+
+
+def verify_dispatch(current: dict, storage: ProxyStorage, tree: pathlib.Path, report: Report) -> None:
+    """The proxy routes every `current` selector to its recorded facet address."""
+    owners, _ = _selector_owners(current, tree)
+    for selector, (source_id, address) in sorted(owners.items()):
+        routed = _slot_address(storage.storage_values.get(selector))
+        if address is None:
+            if routed is not None:
+                report.fail(f"current dispatch {selector} ({source_id}): routes to {routed}, nothing recorded")
+            continue
+        if routed != to_checksum_address(address):
+            report.fail(f"current dispatch {selector} ({source_id}): routes to {routed}, expected {address}")
+
+
+def verify_proposed_set(facet_src: list, proposed: dict, tree: pathlib.Path, report: Report) -> None:
+    """`proposed.facets` is exactly what `facetSrc` resolves to at its commit."""
+    resolved = {facet.source_id for facet in resolve_facets(facet_src, tree)}
+    recorded = set(proposed["facets"])
+    for source_id in sorted(resolved - recorded):
+        report.fail(f"proposed: {source_id} resolves from facetSrc but is missing from proposed.facets")
+    for source_id in sorted(recorded - resolved):
+        report.fail(f"proposed: proposed.facets has {source_id}, not matched by facetSrc")
+
+
+def verify_migration(
+    proxy: str, proposed: dict, current: dict, storage: ProxyStorage, tree: pathlib.Path, report: Report
+) -> None:
+    """The on-chain migration installs every proposed selector and zeroes removals."""
+    address = proposed["migration"]["address"]
+    facets = [facet_from_source_id(source_id) for source_id in proposed["facets"]]
+    expected = build_migration(proxy, facets, proposed["facets"], current, tree, storage=storage)
+    if expected is None:
+        report.fail(f"proposed.migration @{address}: recorded, but recomputation needs no migration")
+        return
+
+    onchain = bytes.fromhex(rpc("eth_getCode", [address, "latest"]).removeprefix("0x"))
+    if len(onchain) % SET_DELEGATE_SIZE:
+        report.fail(f"proposed.migration @{address}: {len(onchain)} bytes is not a whole number of SetDelegates")
+        return
+
+    got = {}
+    for i in range(0, len(onchain), SET_DELEGATE_SIZE):
+        try:
+            fragment = SetDelegate.decode(onchain[i : i + SET_DELEGATE_SIZE])
+        except (InvalidSetDelegate, KeyError):
+            report.fail(f"proposed.migration @{address}: fragment at byte {i} is not a recognized SetDelegate")
+            continue
+        got[fragment.selector] = fragment
+
+    want = {sd.selector: sd for sd in expected.setdelegates}
+    for selector, sd in sorted(want.items()):
+        removal = sd.delegate.address == ZERO_ADDRESS
+        action = "zero" if removal else f"install {sd.delegate.address} for"
+        if selector not in got:
+            report.fail(f"proposed.migration: does not {action} selector {selector}")
+        elif got[selector].delegate.address != sd.delegate.address:
+            report.fail(
+                f"proposed.migration: selector {selector} -> {got[selector].delegate.address}, "
+                f"expected {sd.delegate.address}"
+            )
+        elif got[selector].storage_key32 != sd.storage_key32:
+            report.fail(f"proposed.migration: selector {selector} writes the wrong storage slot")
+    for selector in sorted(got.keys() - want.keys()):
+        report.fail(f"proposed.migration: unexpected entry for selector {selector}")
+
+
+def run_verify(ledger_path):
+    if "ETH_RPC_URL" not in environ:
+        raise click.ClickException("ETH_RPC_URL is not set")
+
+    root = pathlib.Path.cwd()
+    ledger = load_ledger(ledger_path)
+    chain = chain_id()
+    report = Report()
+
+    with SourceTrees(root) as trees:
+        for entry in ledger:
+            report.proxy = proxy = to_checksum_address(entry["address"])
+            history = entry.get("deployments", {}).get(chain)
+            if not history:
+                click.echo(f"{proxy}: nothing recorded on chain {chain}")
+                continue
+
+            current = history.get("current")
+            proposed = history.get("proposed")
+
+            selectors = {}  # selector -> Selector, deduped across current + proposed
+            if current:
+                _, current_sels = _selector_owners(current, trees.get(current["gitCommit"]))
+                selectors.update((s.selector, s) for s in current_sels)
+            if proposed:
+                _, proposed_sels = _selector_owners(proposed, trees.get(proposed["gitCommit"]))
+                selectors.update((s.selector, s) for s in proposed_sels)
+
+            storage = ProxyStorage(proxy)
+            if selectors:
+                storage.fetch(list(selectors.values()))
+
+            if current:
+                tree = trees.get(current["gitCommit"])
+                verify_facets(current, "current", tree, report)
+                verify_dispatch(current, storage, tree, report)
+
+            if proposed:
+                tree = trees.get(proposed["gitCommit"])
+                verify_facets(proposed, "proposed", tree, report)
+                verify_proposed_set(entry["facetSrc"], proposed, tree, report)
+                if "migration" in proposed:
+                    verify_migration(proxy, proposed, current or {}, storage, tree, report)
+
+    if report.failures:
+        raise click.ClickException(
+            f"{len(report.failures)} verification failure(s):\n"
+            + "\n".join(f"  - {failure}" for failure in report.failures)
+        )
+    click.echo(f"verified chain {chain}: {len(ledger)} proxy entr{'y' if len(ledger) == 1 else 'ies'}")
