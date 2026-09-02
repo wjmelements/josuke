@@ -187,6 +187,41 @@ def test_run_deploy_carries_unchanged_and_redeploys_changed(stub_chain, monkeypa
     assert stub_chain["deployed"] == ["b.evm".encode().hex()]  # only the stale one
 
 
+def test_run_deploy_all_redeploys_unchanged_facets(stub_chain, monkeypatch, tmp_path):
+    _resolve_to(monkeypatch, ["a.evm", "b.evm"])
+    unchanged = {
+        "address": "0x" + "ab" * 20,
+        "codehash": "0x" + "11" * 32,
+        "initcodeHash": keccak_hex("a.evm".encode().hex()),
+    }
+    path = _write(
+        tmp_path,
+        [
+            {
+                "address": PROXY,
+                "facetSrc": ["*.evm"],
+                "deployments": {
+                    "314": {
+                        "current": {
+                            "gitCommit": "e" * 40,
+                            "facets": {"a.evm": unchanged, "b.evm": unchanged},
+                        }
+                    }
+                },
+            }
+        ],
+    )
+
+    deploy.run_deploy(path, redeploy_all=True)
+
+    proposed = json.loads(path.read_text())[0]["deployments"]["314"]["proposed"]
+    assert proposed["facets"]["a.evm"]["address"] == "0x" + f"{1:040x}"
+    assert proposed["facets"]["b.evm"]["address"] == "0x" + f"{2:040x}"
+    assert sorted(stub_chain["deployed"]) == sorted(
+        [s.encode().hex() for s in ("a.evm", "b.evm")]
+    )
+
+
 def test_run_deploy_is_idempotent_before_promotion(stub_chain, monkeypatch, tmp_path):
     _resolve_to(monkeypatch, ["a.evm", "b.evm"])
     path = _write(tmp_path, [{"address": PROXY, "facetSrc": ["*.evm"]}])

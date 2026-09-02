@@ -69,13 +69,19 @@ def add(address, facets, ledger_path):
 
 @main.command()
 @ledger_option
-def deploy(ledger_path):
+@click.option(
+    "--all",
+    "all_",
+    is_flag=True,
+    help="Redeploy every facet, even ones whose bytecode is unchanged.",
+)
+def deploy(ledger_path, all_):
     """Deploy changed and new facets to $ETH_RPC_URL, recording them under `proposed`.
 
     Uses `forge` to build and `cast` to broadcast; the signing wallet is taken
     from Foundry's environment (ETH_KEYSTORE_ACCOUNT, ETH_FROM, ...).
     """
-    run_deploy(ledger_path)
+    run_deploy(ledger_path, redeploy_all=all_)
 
 
 @main.command()

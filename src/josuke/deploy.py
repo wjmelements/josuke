@@ -314,7 +314,7 @@ def deploy_migration(migration: Migration, prior: dict, root: pathlib.Path) -> d
 # -- orchestration ------------------------------------------------------
 
 
-def run_deploy(ledger_path):
+def run_deploy(ledger_path, redeploy_all: bool = False):
     if "ETH_RPC_URL" not in environ:
         raise click.ClickException("ETH_RPC_URL is not set")
 
@@ -351,12 +351,13 @@ def run_deploy(ledger_path):
             # `proposed` run (keeps re-runs before promotion idempotent).
             live = current_facets.get(facet.source_id)
             staged = prior_proposed_facets.get(facet.source_id)
-            if live and live.get("initcodeHash") == initcode_hash:
-                proposed_facets[facet.source_id] = live
-                continue
-            if staged and staged.get("initcodeHash") == initcode_hash and staged.get("address"):
-                proposed_facets[facet.source_id] = staged
-                continue
+            if not redeploy_all:
+                if live and live.get("initcodeHash") == initcode_hash:
+                    proposed_facets[facet.source_id] = live
+                    continue
+                if staged and staged.get("initcodeHash") == initcode_hash and staged.get("address"):
+                    proposed_facets[facet.source_id] = staged
+                    continue
 
             click.echo(f"deploying {facet.source_id}")
             address = deploy_initcode(initcode, root)

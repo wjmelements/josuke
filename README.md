@@ -12,6 +12,8 @@ josuke verify                    # check the ledger against the chain in $ETH_RP
 ```
 
 Pass `-f/--file` to any command to point at a ledger other than `./josuke.json`.
+Pass `--all` to `deploy` to redeploy every facet, even ones whose bytecode is
+unchanged.
 
 For each proxy, `deploy` resolves `facetSrc`, builds each facet's init bytecode
 from `HEAD` (reusing recorded `constructorArgs`, prompting for any that are
