@@ -4,6 +4,8 @@ from os import environ
 from requests import post
 from subprocess import run
 
+from .evm import execute
+
 class ContractSource:
     def __init__(self, path: str, name: str, config={}, root: str = "."):
         self.path = path
@@ -82,12 +84,4 @@ class Delegate:
             constructor_args = abi_encode([a["type"] for a in abi_inputs], values).hex()
             initcode += constructor_args
 
-        expected_bytecode = run(
-            ["evm", "-x"],
-            input=initcode,
-            text=True,
-            capture_output=True,
-            check=True,
-        ).stdout.strip()
-
-        return self.deployed_bytecode == expected_bytecode
+        return self.deployed_bytecode == execute(initcode)

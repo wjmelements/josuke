@@ -22,6 +22,7 @@ from josuke.delegate import (
     UnconfiguredParameter,
     source_map,
 )
+from josuke.evm import execute
 
 FIXTURE_ROOT = pathlib.Path(__file__).parent / "fixtures" / "forge-project"
 
@@ -45,23 +46,12 @@ def _forge_inspect(contract: str, field: str, *extra: str) -> str:
     return out.strip()
 
 
-def _evm_x(hexcode: str) -> str:
-    """Execute `hexcode` and return its returndata (the deployed runtime code)."""
-    return subprocess.run(
-        ["evm", "-x"],
-        input=hexcode,
-        text=True,
-        capture_output=True,
-        check=True,
-    ).stdout.strip()
-
-
 def _deployed_code(contract: str, arg_types=(), arg_values=()) -> str:
     """The runtime bytecode a real deployment of `contract` would leave on chain."""
     initcode = _forge_inspect(contract, "bytecode").removeprefix("0x")
     if arg_types:
         initcode += abi_encode(list(arg_types), list(arg_values)).hex()
-    return _evm_x(initcode)
+    return execute(initcode)
 
 
 @pytest.fixture(autouse=True)
