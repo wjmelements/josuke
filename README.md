@@ -2,6 +2,45 @@
 
 Automated, verifiable upgrades for [ERC-8167](https://eips.ethereum.org/EIPS/eip-8167) modular dispatch proxies.
 
+## CLI
+
+```
+josuke init                     # create an empty josuke.json in the cwd
+josuke add <address> <facet>...   # add facet sources to a proxy, registering it if new
+josuke deploy                    # deploy changed/new facets, record them under `proposed`
+```
+
+Pass `-f/--file` to any command to point at a ledger other than `./josuke.json`.
+
+For each proxy, `deploy` resolves `facetSrc`, builds each facet's init bytecode
+from `HEAD` (reusing recorded `constructorArgs`, prompting for any that are
+missing), and deploys only those whose bytecode differs from what `current`
+records for that chain.
+
+It then builds the migration script: one `SelectorDelegated` + `SSTORE` per
+selector, pointing each at its facet and zeroing any selector dropped since
+`current`. Per-selector storage slots come from simulating a dispatch call
+against the live proxy with `evm -nx`; selectors come from each facet's ABI (for
+a raw `.evm` facet, from the matching Foundry artifact). The script is deployed
+with the `evm -C` universal constructor unless an identical one is already
+recorded under `proposed`.
+
+The result is written back as a fresh `proposed` state (facets + `migration`)
+stamped with the current git commit; `current` is left untouched.
+
+It builds with `forge` and broadcasts with `cast`, reading the environment:
+
+| Variable | Purpose |
+| --- | --- |
+| `ETH_RPC_URL` | Target chain endpoint. Required; also fixes the chain id. |
+| `ETH_KEYSTORE_ACCOUNT` | Keystore account name under `~/.foundry/keystores`. |
+| `ETH_PASSWORD` | Path to that keystore's password file. |
+| `ETH_KEYSTORE` | Path to a keystore file or directory (alternative to the above). |
+| `ETH_FROM` | Sender address, e.g. for an unlocked node account. |
+
+The wallet variables are Foundry's own; any wallet `cast` accepts via the
+environment works.
+
 ## josuke.json
 
 `josuke.json` is the deployment ledger.
@@ -101,13 +140,11 @@ JSON Schema (draft 2020-12). The file is an array of proxy entries.
         "migration": {
           "type": "object",
           "additionalProperties": false,
-          "required": ["address", "initcodeHash"],
+          "required": ["address"],
           "properties": {
-            "address": { "$ref": "#/$defs/address" },
-            "initcodeHash": { "$ref": "#/$defs/hash32" },
-            "codehash": { "$ref": "#/$defs/hash32" }
+            "address": { "$ref": "#/$defs/address" }
           },
-          "description": "The migration script delegatecalled by migrate(). Present on \"proposed\"; retained on \"current\" after promotion."
+          "description": "The migration script delegatecalled by migrate(). Present on \"proposed\"; retained on \"current\" after promotion. Its bytecode is fully determined by this deploymentState, so only the address is recorded."
         }
       }
     },
@@ -153,6 +190,10 @@ Notes:
   redeployed in that upgrade are guaranteed to match it.
 - The proxy `address` is assumed identical across chains; per-chain divergence
   would need a per-deployment address field.
+- The migration script carries no hashes because its bytecode is recomputable
+  from the `deploymentState`: the runtime is `SetDelegate.encode()` concatenated
+  per selector, and the creation bytecode prepends the `evm -C` universal
+  constructor (`600b380380600b3d393df3`).
 
 ### Example
 

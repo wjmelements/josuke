@@ -7,7 +7,7 @@ dependencies = ["click", "eth-abi", "eth-utils", "eth-hash[pycryptodome]", "requ
 test = ["pytest", "pytest-timeout"]
 
 [project.scripts]
-mytool = "josuke.cli:main"
+josuke = "josuke.cli:main"
 
 [build-system]
 requires = ["setuptools>=61"]

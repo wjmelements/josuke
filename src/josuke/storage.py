@@ -23,7 +23,6 @@ class ProxyStorage:
             }), file=evm.stdin)
             while True:
                 request = evm.stdout.readline()
-                print(">", request)
                 if not (request.startswith("{") or request.startswith("[")):
                     # Discard call result and advance to next selector
                     break
@@ -32,7 +31,6 @@ class ProxyStorage:
                 assert result.status_code == 200
                 # Answer the request
                 result = result.text
-                print("<", result)
                 print(result, file=evm.stdin)
                 result = loads(result)
                 if type(request) is dict:
@@ -46,6 +44,7 @@ class ProxyStorage:
                     if not is_match:
                         continue
                     assert selector.selector not in self.storage_keys
-                    self.storage_keys[selector.selector] = request["params"][0]
+                    slot = int(request["params"][1], 16)
+                    self.storage_keys[selector.selector] = f"0x{slot:064x}"
                     self.storage_values[selector.selector] = result["result"]
         evm.terminate()
