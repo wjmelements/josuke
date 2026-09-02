@@ -1,0 +1,31 @@
+name: schema
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  validate:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.14"
+      - run: pip install jsonschema
+      - name: Validate josuke.example.json against josuke.schema.json
+        run: |
+          python - <<'EOF'
+          import json
+          from jsonschema import Draft202012Validator
+
+          with open("josuke.schema.json") as f:
+              schema = json.load(f)
+          with open("josuke.example.json") as f:
+              example = json.load(f)
+
+          Draft202012Validator.check_schema(schema)
+          Draft202012Validator(schema).validate(example)
+          print("josuke.example.json is valid")
+          EOF
