@@ -1,0 +1,123 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/wjmelements/josuke/blob/main/josuke.schema.json",
+  "title": "josuke.json",
+  "description": "Deployment ledger for a diamond proxy and its facets, per chain.",
+  "type": "array",
+  "items": { "$ref": "#/$defs/proxy" },
+
+  "$defs": {
+    "address": {
+      "type": "string",
+      "pattern": "^0x[0-9a-fA-F]{40}$",
+      "description": "20-byte EVM address, 0x-prefixed hex."
+    },
+    "hash32": {
+      "type": "string",
+      "pattern": "^0x[0-9a-fA-F]{64}$",
+      "description": "32-byte keccak-256 digest, 0x-prefixed hex."
+    },
+    "gitCommit": {
+      "type": "string",
+      "pattern": "^[0-9a-fA-F]{40}$",
+      "description": "Full git commit the facet sources were built from."
+    },
+    "sourceId": {
+      "type": "string",
+      "pattern": "^[^*?]+(:[A-Za-z_$][A-Za-z0-9_$]*|\\.evm)$",
+      "description": "A concrete facet source with no globs: \"<path>:<ContractName>\" for a Solidity contract, or \"<path>.evm\" for a raw-bytecode facet."
+    },
+
+    "proxy": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["address", "facetSrc", "deployments"],
+      "properties": {
+        "address": {
+          "$ref": "#/$defs/address",
+          "description": "The diamond / proxy contract address."
+        },
+        "facetSrc": {
+          "type": "array",
+          "minItems": 1,
+          "uniqueItems": true,
+          "items": { "type": "string" },
+          "description": "Source patterns whose contracts are facets of this proxy. Each entry is a glob over .sol files (\"src/facets/*.sol\"), a single \"<path>:<ContractName>\", or a raw-bytecode file (\"<path>.evm\")."
+        },
+        "deployments": {
+          "type": "object",
+          "minProperties": 1,
+          "propertyNames": { "pattern": "^[1-9][0-9]*$" },
+          "additionalProperties": { "$ref": "#/$defs/deploymentHistory" },
+          "description": "Keyed by EVM chain id in decimal (\"314\" = Filecoin mainnet)."
+        }
+      }
+    },
+
+    "deploymentHistory": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["current"],
+      "properties": {
+        "current": {
+          "$ref": "#/$defs/deploymentState",
+          "description": "The facet set currently installed on the proxy."
+        },
+        "proposed": {
+          "$ref": "#/$defs/deploymentState",
+          "description": "A pending upgrade awaiting execution. Promoted to \"current\" once migrate(migration) is confirmed."
+        }
+      }
+    },
+
+    "deploymentState": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["gitCommit", "facets"],
+      "properties": {
+        "gitCommit": { "$ref": "#/$defs/gitCommit" },
+        "facets": {
+          "type": "object",
+          "minProperties": 1,
+          "propertyNames": { "$ref": "#/$defs/sourceId" },
+          "additionalProperties": { "$ref": "#/$defs/facet" }
+        },
+        "migration": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["address"],
+          "properties": {
+            "address": { "$ref": "#/$defs/address" }
+          },
+          "description": "The migration script delegatecalled by migrate(). Present on \"proposed\"; retained on \"current\" after promotion. Its bytecode is fully determined by this deploymentState, so only the address is recorded."
+        }
+      }
+    },
+
+    "facet": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["codehash", "initcodeHash"],
+      "properties": {
+        "address": {
+          "$ref": "#/$defs/address",
+          "description": "Where this facet is deployed. Recorded for facets (re)deployed by the upgrade script."
+        },
+        "codehash": {
+          "$ref": "#/$defs/hash32",
+          "description": "keccak-256 of the deployed runtime bytecode, i.e. what EXTCODEHASH returns for `address`."
+        },
+        "initcodeHash": {
+          "$ref": "#/$defs/hash32",
+          "description": "keccak-256 of the full creation bytecode: the compiled init bytecode concatenated with the ABI-encoded constructorArgs. Reproducible from gitCommit + constructorArgs, and what the verifier recomputes from source."
+        },
+        "constructorArgs": {
+          "type": "object",
+          "minProperties": 1,
+          "additionalProperties": true,
+          "description": "Constructor arguments keyed by parameter name. Values are JSON encodings of the ABI types: address and bytesN as 0x hex strings, arrays as arrays, integers as JSON number literals. Integer values are fed to eth_abi.encode, which requires a Python int, so they are kept as bare numbers rather than strings; parse this file with an integer-preserving JSON reader (Python's json is fine — JSON.parse and jq lose precision above 2^53)."
+        }
+      }
+    }
+  }
+}
