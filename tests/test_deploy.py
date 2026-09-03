@@ -397,6 +397,26 @@ def test_build_migration_rejects_selector_clash(monkeypatch):
         deploy.build_migration(PROXY, facets, proposed_facets, {}, ".")
 
 
+def test_build_migration_rejects_duplicate_storage_slot(monkeypatch):
+    class CollidingStorage(FakeStorage):
+        def fetch(self, selectors):
+            for s in selectors:  # slot detection returns the same slot for every selector
+                self.storage_keys[s.selector] = "0x" + "00" * 31 + "07"
+                self.storage_values.setdefault(s.selector, "0x" + "00" * 32)
+
+    monkeypatch.setattr(deploy, "ProxyStorage", CollidingStorage)
+    monkeypatch.setattr(
+        deploy,
+        "facet_selectors",
+        lambda facet, root: {"a.sol:A": [_sel("0x11111111")], "b.sol:B": [_sel("0x22222222")]}[facet.source_id],
+    )
+    facets = [_facet("a.sol:A"), _facet("b.sol:B")]
+    proposed_facets = {"a.sol:A": {"address": A1}, "b.sol:B": {"address": B2}}
+
+    with pytest.raises(Exception, match="storage slot"):
+        deploy.build_migration(PROXY, facets, proposed_facets, {}, ".")
+
+
 def test_build_migration_routes_generated_selectors(monkeypatch):
     from josuke.erc8167 import SELECTORS_SELECTOR
     from josuke.migration import SetDelegate

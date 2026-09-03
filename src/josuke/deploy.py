@@ -272,6 +272,19 @@ def build_migration(
             SetDelegate(sel, storage.storage_keys[sel], Delegate(ZERO_ADDRESS, ContractSource("", "")))
         )
 
+    # Each selector dispatches through its own storage slot, so the migration
+    # must never SSTORE the same slot twice; a collision means slot detection
+    # (evm -nx) returned the wrong slot for one of them.
+    by_slot = {}
+    for sd in setdelegates:
+        clash = by_slot.get(sd.storage_key32)
+        if clash is not None:
+            raise click.ClickException(
+                f"migration would write storage slot 0x{sd.storage_key32} for both "
+                f"{clash} and {sd.selector}; selector storage-slot detection is wrong"
+            )
+        by_slot[sd.storage_key32] = sd.selector
+
     return Migration(setdelegates) if setdelegates else None
 
 
