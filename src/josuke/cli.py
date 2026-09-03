@@ -5,6 +5,7 @@ import pathlib
 import click
 from eth_utils import to_checksum_address
 
+from .accept import run_accept
 from .deploy import run_deploy
 from .ledger import DEFAULT_LEDGER, load_ledger, parse_address, write_ledger
 from .verify import run_verify
@@ -95,3 +96,16 @@ def verify(ledger_path):
     removed selectors. Rebuilds each recorded gitCommit in a temporary worktree.
     """
     run_verify(ledger_path)
+
+
+@main.command()
+@ledger_option
+def accept(ledger_path):
+    """Accept a confirmed `proposed` deployment into `current`.
+
+    Checks on chain that the migration ran: every `proposed` selector now routes
+    to its facet and every selector dropped since `current` is cleared. Then
+    merges `proposed` into `current` and removes it. Rebuilds each recorded
+    gitCommit in a temporary worktree.
+    """
+    run_accept(ledger_path)

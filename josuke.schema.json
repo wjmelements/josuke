@@ -65,7 +65,7 @@
         },
         "proposed": {
           "$ref": "#/$defs/deploymentState",
-          "description": "A pending upgrade awaiting execution. Promoted to \"current\" once migrate(migration) is confirmed."
+          "description": "A pending upgrade awaiting execution. Merged into \"current\" by `josuke accept` once the migration is confirmed on chain."
         }
       }
     },
@@ -89,7 +89,7 @@
           "properties": {
             "address": { "$ref": "#/$defs/address" }
           },
-          "description": "The migration script delegatecalled by migrate(). Present on \"proposed\"; retained on \"current\" after promotion. Its bytecode is fully determined by this deploymentState, so only the address is recorded."
+          "description": "The migration script the proxy delegatecalls to apply this upgrade. Present on \"proposed\"; retained on \"current\" once accepted. Its bytecode is fully determined by this deploymentState, so only the address is recorded."
         }
       }
     },

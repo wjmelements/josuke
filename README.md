@@ -9,6 +9,7 @@ josuke init                     # create an empty josuke.json in the cwd
 josuke add <address> <facet>...   # add facet sources to a proxy, registering it if new
 josuke deploy                    # deploy changed/new facets, record them under `proposed`
 josuke verify                    # check the ledger against the chain in $ETH_RPC_URL
+josuke accept                    # after migrating, merge `proposed` into `current`
 ```
 
 Pass `-f/--file` to any command to point at a ledger other than `./josuke.json`.
@@ -40,6 +41,13 @@ what `facetSrc` resolves to, and the on-chain `migration` installs every
 proposed selector and zeroes every selector dropped since `current`. It reports
 all mismatches and exits non-zero if any.
 
+`accept` is run once the migration has executed against the proxy. It checks on
+chain that the migration took effect — every `proposed` selector now routes to
+its facet (new and unchanged alike) and every selector dropped since `current`
+is cleared — then merges `proposed` into `current` so the ledger's `current`
+matches the live code, and removes `proposed`. It exits non-zero without
+touching the ledger if any check fails.
+
 `deploy` builds with `forge` and broadcasts with `cast`, reading the environment:
 
 | Variable | Purpose |
@@ -57,7 +65,7 @@ environment works.
 
 `josuke.json` is the deployment ledger.
 It records, per chain, which facet is installed where, what source and constructor arguments produced it, and any pending upgrade.
-The deployment script reads it to decide what to redeploy, writes back a `proposed` upgrade, and once the migration is completed, promotes `proposed` to `current`.
+The deployment script reads it to decide what to redeploy, writes back a `proposed` upgrade, and once the migration is completed, `accept` merges `proposed` into `current`.
 Anyone can replay it to verify a live deployment against the source.
 
 ### Schema
