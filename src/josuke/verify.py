@@ -21,6 +21,7 @@ from .migration import SET_DELEGATE_SIZE, InvalidSetDelegate, SetDelegate
 from .proc import run
 from .selectors import Selector
 from .storage import ProxyStorage, slot_address as _slot_address
+from .summary import summarize_upgrade
 
 ZERO_ADDRESS = to_checksum_address("0x" + "00" * 20)
 
@@ -245,6 +246,11 @@ def run_verify(ledger_path):
                 verify_selectors(proposed, "proposed", tree, report)
                 if "migration" in proposed:
                     verify_migration(proxy, proposed, current or {}, storage, tree, report)
+                summarize_upgrade(
+                    proxy, chain, current, proposed,
+                    trees.get(current["gitCommit"]) if current else None,
+                    tree, storage,
+                )
 
     if report.failures:
         raise click.ClickException(

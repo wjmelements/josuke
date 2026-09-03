@@ -41,6 +41,11 @@ above the source that has a Makefile.
 The result is written back as a fresh `proposed` state (facets + `selectors` +
 `migration`) stamped with the current git commit; `current` is left untouched.
 
+For a proxy with a pending upgrade, `verify` first prints a summary of what
+`proposed` changes: each facet marked new, changed or removed, with its address
+and constructor arguments, and its selectors grouped beneath it — selectors not
+served by `current` are listed up front. The pass/fail checks follow.
+
 `verify` checks the recorded state against the chain, rebuilding each recorded
 `gitCommit` in a throwaway `git worktree`. For `current`: every facet's
 `initcodeHash` recomputes from its commit, its `codehash` matches the code at
