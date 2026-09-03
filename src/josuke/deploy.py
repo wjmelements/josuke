@@ -1,6 +1,5 @@
 import json
 import pathlib
-import subprocess
 from collections import namedtuple
 from os import environ
 
@@ -11,9 +10,11 @@ from eth_utils import keccak, to_checksum_address
 from .delegate import ContractSource, Delegate
 from .erc8167 import SELECTORS_SELECTOR, generated_selectors, selectors_method
 from .ethjsonrpc import chain_id, eth_get_code
+from .evm import evm_artifact
 from .forge import get_forge_config
 from .ledger import load_ledger, write_ledger
 from .migration import Migration, SetDelegate
+from .proc import run
 from .selectors import Selector
 from .storage import ProxyStorage
 
@@ -27,26 +28,15 @@ ZERO_ADDRESS = "0x" + "00" * 20
 Facet = namedtuple("Facet", "kind path contract source_id")
 
 
-def _run(cmd: list, root: pathlib.Path | None = None, stdin: str = None) -> str:
-    try:
-        return subprocess.run(
-            cmd, cwd=root, input=stdin, capture_output=True, text=True, check=True
-        ).stdout
-    except FileNotFoundError:
-        raise click.ClickException(f"{cmd[0]}: command not found")
-    except subprocess.CalledProcessError as e:
-        raise click.ClickException(f"{' '.join(cmd[:3])} failed:\n{e.stderr.strip()}")
-
-
 def git_commit(root: pathlib.Path) -> str:
-    if _run(["git", "status", "--porcelain"], root).strip():
+    if run(["git", "status", "--porcelain"], root).strip():
         click.echo("warning: uncommitted changes in the working tree", err=True)
-    return _run(["git", "rev-parse", "HEAD"], root).strip()
+    return run(["git", "rev-parse", "HEAD"], root).strip()
 
 
 def universal_constructor() -> str:
     """`evm -C` with no code: the length-agnostic constructor prefix it prepends."""
-    return _run(["evm", "-C"], stdin="").strip().removeprefix("0x")
+    return run(["evm", "-C"], stdin="").strip().removeprefix("0x")
 
 
 # -- facet resolution -------------------------------------------------------
@@ -93,23 +83,8 @@ def facet_from_source_id(source_id: str) -> Facet:
 
 def facet_abi(facet: Facet, root: pathlib.Path) -> list:
     if facet.kind == "sol":
-        return json.loads(_run(["forge", "inspect", facet.source_id, "abi", "--json"], root))
-
-    # A raw-bytecode facet still needs an ABI to know its selectors; take it from
-    # a Foundry artifact whose name matches the file.
-    # FIXME: `forge build` won't build the .evm artifact (out/<name>.evm/<name>.json);
-    # per the Makefile in ~/projects/erc8167 it's assembled with `evm` and merged
-    # with the ABI of the matching src/interfaces/<name>.sol. Build it here.
-    stem = pathlib.Path(facet.path).stem
-    out_dir = root / get_forge_config(root).get("out", "out")
-    for artifact in sorted(out_dir.glob("**/*.json")):
-        if artifact.stem.lower() == stem.lower():
-            data = json.loads(artifact.read_text())
-            if isinstance(data, list):
-                return data
-            if "abi" in data:
-                return data["abi"]
-    raise click.ClickException(f"no Foundry artifact with an ABI found for {facet.source_id}")
+        return json.loads(run(["forge", "inspect", facet.source_id, "abi", "--json"], root))
+    return evm_artifact(root / facet.path, root)["abi"]
 
 
 def facet_selectors(facet: Facet, root: pathlib.Path) -> list:
@@ -122,7 +97,7 @@ def facet_selectors(facet: Facet, root: pathlib.Path) -> list:
 
 
 def constructor_inputs(source_id: str, root: pathlib.Path) -> list:
-    abi = json.loads(_run(["forge", "inspect", source_id, "abi", "--json"], root))
+    abi = json.loads(run(["forge", "inspect", source_id, "abi", "--json"], root))
     ctor = [m for m in abi if m["type"] == "constructor"]
     return ctor[0]["inputs"] if ctor else []
 
@@ -151,15 +126,9 @@ def facet_initcode(facet: Facet, root: pathlib.Path, recorded_args, prompt: bool
     With `prompt` false, a constructor arg missing from `recorded_args` is an
     error instead of an interactive prompt (used when verifying)."""
     if facet.kind == "evm":
-        # FIXME: this treats the .evm file as raw hex, but ERC-8167 ships .evm as
-        # evm-assembler source. Per the Makefile in ~/projects/erc8167, the
-        # initcode is `evm -c <file>` (or `evm <file>` when the name contains
-        # "constructor"), and `forge build` does not produce these artifacts.
-        # Assemble it here (and fall back to raw hex only if that fails).
-        raw = (root / facet.path).read_text().strip()
-        return raw.removeprefix("0x"), None
+        return evm_artifact(root / facet.path, root)["initcode"], None
 
-    initcode = _run(["forge", "inspect", facet.source_id, "bytecode"], root).strip()
+    initcode = run(["forge", "inspect", facet.source_id, "bytecode"], root).strip()
     initcode = initcode.removeprefix("0x")
     inputs = constructor_inputs(facet.source_id, root)
     if not inputs:
@@ -190,7 +159,7 @@ def keccak_hex(data_hex: str) -> str:
 
 def deploy_initcode(initcode_hex: str, root: pathlib.Path) -> str:
     """Broadcast a creation transaction via cast; return the new contract address."""
-    out = _run(["cast", "send", "--create", "0x" + initcode_hex, "--json"], root)
+    out = run(["cast", "send", "--create", "0x" + initcode_hex, "--json"], root)
     address = json.loads(out).get("contractAddress")
     if not address:
         raise click.ClickException(f"cast send returned no contractAddress:\n{out}")
@@ -346,7 +315,7 @@ def run_deploy(ledger_path, redeploy_all: bool = False):
     chain = chain_id()
     commit = git_commit(root)
 
-    _run(["forge", "build"], root)
+    run(["forge", "build"], root)
 
     for entry in ledger:
         proxy = to_checksum_address(entry["address"])

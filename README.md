@@ -29,10 +29,14 @@ itself), deploys it with the `evm -C` universal constructor, and records it unde
 It then builds the migration script: one `SelectorDelegated` + `SSTORE` per
 selector, pointing each at its facet and zeroing any selector dropped since
 `current`. Per-selector storage slots come from simulating a dispatch call
-against the live proxy with `evm -nx`;
-selectors come from each facet's ABI (for a raw `.evm` facet, from the matching
-Foundry artifact). The script is deployed with the `evm -C` universal constructor
-unless an identical one is already recorded under `proposed`.
+against the live proxy with `evm -nx`; selectors come from each facet's ABI. The
+script is deployed with the `evm -C` universal constructor unless an identical one
+is already recorded under `proposed`.
+
+For a `<path>.evm` facet (evm-assembler source), josuke reads bytecode and ABI
+from the artifact its governing Makefile produces, building it with
+`make -C <dir> out/<name>.evm/<name>.json` where `<dir>` is the nearest directory
+above the source that has a Makefile.
 
 The result is written back as a fresh `proposed` state (facets + `selectors` +
 `migration`) stamped with the current git commit; `current` is left untouched.

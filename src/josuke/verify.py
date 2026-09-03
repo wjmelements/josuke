@@ -13,12 +13,12 @@ from .deploy import (
     keccak_hex,
     resolve_facets,
     selectors_runtime,
-    _run,
 )
 from .erc8167 import SELECTORS_SELECTOR
 from .ethjsonrpc import chain_id, eth_get_code
 from .ledger import load_ledger
 from .migration import SET_DELEGATE_SIZE, InvalidSetDelegate, SetDelegate
+from .proc import run
 from .selectors import Selector
 from .storage import ProxyStorage, slot_address as _slot_address
 
@@ -47,19 +47,16 @@ class SourceTrees:
     def get(self, commit: str) -> pathlib.Path:
         if commit not in self._trees:
             tree = pathlib.Path(self._tmp.name) / commit
-            _run(["git", "worktree", "add", "--detach", str(tree), commit], self.root)
+            run(["git", "worktree", "add", "--detach", str(tree), commit], self.root)
             self._trees[commit] = tree  # recorded before build so a build failure still cleans up
             if (tree / ".gitmodules").exists():
-                _run(["git", "submodule", "update", "--init", "--recursive"], tree)
-            _run(["forge", "build"], tree)
-            # FIXME: `forge build` does not produce the .evm facet artifacts
-            # (out/<name>.evm/<name>.json). Assemble them per the Makefile rule in
-            # ~/projects/erc8167 so verify can recompute .evm facet bytecode.
+                run(["git", "submodule", "update", "--init", "--recursive"], tree)
+            run(["forge", "build"], tree)
         return self._trees[commit]
 
     def close(self) -> None:
         for tree in self._trees.values():
-            _run(["git", "worktree", "remove", "--force", str(tree)], self.root)
+            run(["git", "worktree", "remove", "--force", str(tree)], self.root)
         self._tmp.cleanup()
 
     def __enter__(self):

@@ -25,7 +25,7 @@
     "sourceId": {
       "type": "string",
       "pattern": "^[^*?]+(:[A-Za-z_$][A-Za-z0-9_$]*|\\.evm)$",
-      "description": "A concrete facet source with no globs: \"<path>:<ContractName>\" for a Solidity contract, or \"<path>.evm\" for a raw-bytecode facet."
+      "description": "A concrete facet source with no globs: \"<path>:<ContractName>\" for a Solidity contract, or \"<path>.evm\" for an evm-assembler source facet built via the Makefile that governs its directory."
     },
 
     "proxy": {
@@ -42,7 +42,7 @@
           "minItems": 1,
           "uniqueItems": true,
           "items": { "type": "string" },
-          "description": "Source patterns whose contracts are facets of this proxy. Each entry is a glob over .sol files (\"src/facets/*.sol\"), a single \"<path>:<ContractName>\", or a raw-bytecode file (\"<path>.evm\")."
+          "description": "Source patterns whose contracts are facets of this proxy. Each entry is a glob over .sol files (\"src/facets/*.sol\"), a single \"<path>:<ContractName>\", or an evm-assembler source file (\"<path>.evm\")."
         },
         "deployments": {
           "type": "object",

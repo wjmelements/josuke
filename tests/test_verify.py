@@ -294,10 +294,10 @@ def test_source_trees_checks_out_each_commit_and_cleans_up(tmp_path, monkeypatch
     git("commit", "-qm", "two")
 
     builds = []
-    real_run = verify._run
+    real_run = verify.run
     monkeypatch.setattr(
         verify,
-        "_run",
+        "run",
         lambda cmd, root=None, stdin=None: builds.append(str(root)) or ""
         if cmd[:2] == ["forge", "build"]
         else real_run(cmd, root, stdin),

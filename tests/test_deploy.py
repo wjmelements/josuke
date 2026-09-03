@@ -79,10 +79,14 @@ def test_resolve_facets_passes_through_explicit_and_evm_and_dedupes():
 # -- facet_initcode -------------------------------------------------------
 
 
-def test_facet_initcode_reads_raw_evm_file(tmp_path):
-    (tmp_path / "impl.evm").write_text("0xdeadBEEF\n")
+def test_facet_initcode_uses_evm_artifact(tmp_path, monkeypatch):
+    monkeypatch.setattr(
+        deploy,
+        "evm_artifact",
+        lambda source, root: {"initcode": "deadbeef", "runtime": "beef", "abi": []},
+    )
     initcode, args = deploy.facet_initcode(Facet("evm", "impl.evm", None, "impl.evm"), tmp_path, None)
-    assert initcode == "deadBEEF"
+    assert initcode == "deadbeef"
     assert args is None
 
 
@@ -96,7 +100,7 @@ def stub_chain(monkeypatch, tmp_path):
     monkeypatch.setenv("ETH_RPC_URL", "http://mock.rpc")
     monkeypatch.setattr(deploy, "chain_id", lambda: "314")
     monkeypatch.setattr(deploy, "git_commit", lambda root: "f" * 40)
-    monkeypatch.setattr(deploy, "_run", lambda *a, **k: "")  # forge build
+    monkeypatch.setattr(deploy, "run", lambda *a, **k: "")  # forge build
     monkeypatch.setattr(deploy, "code_hash", lambda addr: "0x" + "cc" * 32)
     monkeypatch.setattr(deploy, "build_migration", lambda *a, **k: None)
     monkeypatch.setattr(deploy, "selectors_runtime", lambda *a, **k: None)
