@@ -90,6 +90,15 @@
             "address": { "$ref": "#/$defs/address" }
           },
           "description": "The migration script the proxy delegatecalls to apply this upgrade. Present on \"proposed\"; retained on \"current\" once accepted. Its bytecode is fully determined by this deploymentState, so only the address is recorded."
+        },
+        "selectors": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["address"],
+          "properties": {
+            "address": { "$ref": "#/$defs/address" }
+          },
+          "description": "The generated delegate serving ERC-8167 `selectors()`: it returns every selector this deploymentState installs. Synthesized by `josuke deploy` when no facet implements `selectors()`; its bytecode is fully determined by the facet set, so only the address is recorded."
         }
       }
     },

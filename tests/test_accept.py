@@ -157,6 +157,35 @@ def test_accepted_state_without_migration():
     assert "migration" not in got
 
 
+def test_accepted_state_carries_selectors():
+    proposed = {
+        "gitCommit": "new",
+        "facets": {"a.sol:A": {"address": A1}},
+        "selectors": {"address": B2},
+    }
+    assert accept.accepted_state({}, proposed)["selectors"] == {"address": B2}
+
+
+def test_verify_migrated_checks_generated_selectors_routing(monkeypatch):
+    _owns(monkeypatch, {"a.sol:A": [_sel("0x11111111")]})
+    proposed = _state({"a.sol:A": {"address": A1}}) | {"selectors": {"address": B2}}
+    storage = FakeStorage(PROXY, {"0x11111111": _word(A1), "0x6e25b978": _word(OLD)})
+
+    report = _report()
+    accept.verify_migrated(None, proposed, storage, None, ".", report)
+    assert any("0x6e25b978" in f and "migration not run" in f for f in report.failures)
+
+
+def test_verify_migrated_passes_with_generated_selectors_routed(monkeypatch):
+    _owns(monkeypatch, {"a.sol:A": [_sel("0x11111111")]})
+    proposed = _state({"a.sol:A": {"address": A1}}) | {"selectors": {"address": B2}}
+    storage = FakeStorage(PROXY, {"0x11111111": _word(A1), "0x6e25b978": _word(B2)})
+
+    report = _report()
+    accept.verify_migrated(None, proposed, storage, None, ".", report)
+    assert report.failures == []
+
+
 # -- run_accept ---------------------------------------------------------
 
 

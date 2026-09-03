@@ -7,18 +7,20 @@ from eth_utils import to_checksum_address
 
 from .deploy import (
     build_migration,
-    chain_id,
     facet_from_source_id,
     facet_initcode,
     facet_selectors,
     keccak_hex,
     resolve_facets,
-    rpc,
+    selectors_runtime,
     _run,
 )
+from .erc8167 import SELECTORS_SELECTOR
+from .ethjsonrpc import chain_id, eth_get_code
 from .ledger import load_ledger
 from .migration import SET_DELEGATE_SIZE, InvalidSetDelegate, SetDelegate
-from .storage import ProxyStorage
+from .selectors import Selector
+from .storage import ProxyStorage, slot_address as _slot_address
 
 ZERO_ADDRESS = to_checksum_address("0x" + "00" * 20)
 
@@ -68,14 +70,7 @@ class SourceTrees:
 
 
 def _onchain_codehash(address: str) -> str:
-    return keccak_hex(rpc("eth_getCode", [address, "latest"]))
-
-
-def _slot_address(raw: str | None) -> str | None:
-    """The delegate address held in a 32-byte storage word, or None if empty."""
-    if not raw or int(raw, 16) == 0:
-        return None
-    return to_checksum_address("0x" + raw.removeprefix("0x").rjust(64, "0")[-40:])
+    return keccak_hex(eth_get_code(address))
 
 
 def verify_facets(state: dict, label: str, tree: pathlib.Path, report: Report) -> None:
@@ -97,12 +92,19 @@ def verify_facets(state: dict, label: str, tree: pathlib.Path, report: Report) -
 
 
 def _selector_owners(state: dict, tree: pathlib.Path) -> tuple[dict, list]:
-    """(selector -> (source_id, address), [Selector]) for a deployment state."""
+    """(selector -> (source_id, address), [Selector]) for a deployment state.
+
+    Includes the generated `selectors()` delegate recorded under `state.selectors`,
+    so dispatch and acceptance checks cover it like any facet selector."""
     owners, selectors = {}, []
     for source_id, rec in state["facets"].items():
         for selector in facet_selectors(facet_from_source_id(source_id), tree):
             owners[selector.selector] = (source_id, rec.get("address"))
             selectors.append(selector)
+    impl = state.get("selectors")
+    if impl and SELECTORS_SELECTOR not in owners:
+        owners[SELECTORS_SELECTOR] = ("selectors()", impl.get("address"))
+        selectors.append(Selector(SELECTORS_SELECTOR, "selectors()"))
     return owners, selectors
 
 
@@ -117,6 +119,33 @@ def verify_dispatch(current: dict, storage: ProxyStorage, tree: pathlib.Path, re
             continue
         if routed != to_checksum_address(address):
             report.fail(f"current dispatch {selector} ({source_id}): routes to {routed}, expected {address}")
+
+
+def verify_selectors(state: dict, label: str, tree: pathlib.Path, report: Report) -> None:
+    """The recorded `selectors()` delegate holds the method generated for this facet set.
+
+    Routing to that address is covered by `verify_dispatch` / `verify_migration`
+    via `_selector_owners`; this checks the deployed bytecode itself."""
+    impl = state.get("selectors")
+    if not impl:
+        return
+
+    facets = [facet_from_source_id(source_id) for source_id in state["facets"]]
+    runtime = selectors_runtime(facets, tree)
+    address = impl.get("address")
+    if runtime is None:
+        report.fail(f"{label}.selectors @{address}: a facet implements selectors(); it should not be recorded")
+        return
+    if address is None:
+        report.fail(f"{label}.selectors: no recorded address")
+        return
+
+    onchain = bytes.fromhex(eth_get_code(address).removeprefix("0x"))
+    if onchain != runtime:
+        report.fail(
+            f"{label}.selectors @{address}: on-chain code is not the generated selectors() "
+            f"for this facet set"
+        )
 
 
 def verify_proposed_set(facet_src: list, proposed: dict, tree: pathlib.Path, report: Report) -> None:
@@ -135,12 +164,15 @@ def verify_migration(
     """The on-chain migration installs every proposed selector and zeroes removals."""
     address = proposed["migration"]["address"]
     facets = [facet_from_source_id(source_id) for source_id in proposed["facets"]]
-    expected = build_migration(proxy, facets, proposed["facets"], current, tree, storage=storage)
+    expected = build_migration(
+        proxy, facets, proposed["facets"], current, tree,
+        storage=storage, selectors_impl=proposed.get("selectors"),
+    )
     if expected is None:
         report.fail(f"proposed.migration @{address}: recorded, but recomputation needs no migration")
         return
 
-    onchain = bytes.fromhex(rpc("eth_getCode", [address, "latest"]).removeprefix("0x"))
+    onchain = bytes.fromhex(eth_get_code(address).removeprefix("0x"))
     if len(onchain) % SET_DELEGATE_SIZE:
         report.fail(f"proposed.migration @{address}: {len(onchain)} bytes is not a whole number of SetDelegates")
         return
@@ -207,11 +239,13 @@ def run_verify(ledger_path):
                 tree = trees.get(current["gitCommit"])
                 verify_facets(current, "current", tree, report)
                 verify_dispatch(current, storage, tree, report)
+                verify_selectors(current, "current", tree, report)
 
             if proposed:
                 tree = trees.get(proposed["gitCommit"])
                 verify_facets(proposed, "proposed", tree, report)
                 verify_proposed_set(entry["facetSrc"], proposed, tree, report)
+                verify_selectors(proposed, "proposed", tree, report)
                 if "migration" in proposed:
                     verify_migration(proxy, proposed, current or {}, storage, tree, report)
 

@@ -5,11 +5,12 @@ from collections import namedtuple
 from os import environ
 
 import click
-import requests
 from eth_abi import encode as abi_encode
 from eth_utils import keccak, to_checksum_address
 
 from .delegate import ContractSource, Delegate
+from .erc8167 import SELECTORS_SELECTOR, generated_selectors, selectors_method
+from .ethjsonrpc import chain_id, eth_get_code
 from .forge import get_forge_config
 from .ledger import load_ledger, write_ledger
 from .migration import Migration, SetDelegate
@@ -35,30 +36,6 @@ def _run(cmd: list, root: pathlib.Path | None = None, stdin: str = None) -> str:
         raise click.ClickException(f"{cmd[0]}: command not found")
     except subprocess.CalledProcessError as e:
         raise click.ClickException(f"{' '.join(cmd[:3])} failed:\n{e.stderr.strip()}")
-
-
-def rpc(method: str, params: list):
-    resp = requests.post(
-        environ["ETH_RPC_URL"],
-        json={"id": 1, "jsonrpc": "2.0", "method": method, "params": params},
-    )
-    if resp.status_code != 200:
-        raise click.ClickException(f"{method}: HTTP {resp.status_code}")
-    body = resp.json()
-    if body.get("error"):
-        raise click.ClickException(f"{method}: {body['error']}")
-    return body["result"]
-
-
-def chain_id() -> str:
-    """Decimal chain id string, from `cast` when available, else `eth_chainId`."""
-    try:
-        out = subprocess.run(
-            ["cast", "chain-id"], capture_output=True, text=True, check=True
-        ).stdout.strip()
-        return str(int(out))
-    except (FileNotFoundError, subprocess.CalledProcessError):
-        return str(int(rpc("eth_chainId", []), 16))
 
 
 def git_commit(root: pathlib.Path) -> str:
@@ -221,7 +198,7 @@ def deploy_initcode(initcode_hex: str, root: pathlib.Path) -> str:
 
 
 def code_hash(address: str) -> str:
-    return keccak_hex(rpc("eth_getCode", [address, "latest"]))
+    return keccak_hex(eth_get_code(address))
 
 
 # -- migration script -----------------------------------------------------
@@ -244,6 +221,17 @@ def current_selectors(current: dict, root: pathlib.Path) -> dict:
     return out
 
 
+def selectors_runtime(facets: list, root: pathlib.Path) -> bytes | None:
+    """Runtime bytecode of the generated ERC-8167 `selectors()` for a facet set,
+    or None when a facet in the set already implements `selectors()` (in which
+    case josuke defers to it). `deploy` deploys this; `verify` recomputes it to
+    check the recorded address."""
+    selector_lists = [facet_selectors(facet, root) for facet in facets]
+    if any(s.selector == SELECTORS_SELECTOR for sels in selector_lists for s in sels):
+        return None
+    return selectors_method(generated_selectors(selector_lists))
+
+
 def build_migration(
     proxy: str,
     facets: list,
@@ -251,11 +239,14 @@ def build_migration(
     current: dict,
     root: pathlib.Path,
     storage: ProxyStorage | None = None,
+    selectors_impl: dict | None = None,
 ):
     """A Migration that points every proposed selector at its facet and zeroes
     selectors dropped since `current`. Returns None when nothing needs changing.
 
-    `storage` may be a pre-populated ProxyStorage to avoid re-querying slots."""
+    `storage` may be a pre-populated ProxyStorage to avoid re-querying slots.
+    `selectors_impl` is the generated `selectors()` delegate record (if any);
+    when given, `selectors()` is routed to it like any facet selector."""
     owner = {}  # selector -> Facet
     selectors = {}  # selector -> Selector
     for facet in facets:
@@ -271,11 +262,17 @@ def build_migration(
             selectors[selector.selector] = selector
 
     installed = current_selectors(current, root)
-    removed = {s: installed[s] for s in installed if s not in owner}
+    kept = set(owner)
+    if selectors_impl:
+        kept.add(SELECTORS_SELECTOR)  # re-pointed below, not removed
+    removed = {s: installed[s] for s in installed if s not in kept}
 
     if storage is None:
         storage = ProxyStorage(proxy)
-        storage.fetch(list({**installed, **selectors}.values()))
+        probe = {**installed, **selectors}
+        if selectors_impl:
+            probe[SELECTORS_SELECTOR] = Selector(SELECTORS_SELECTOR, "selectors()")
+        storage.fetch(list(probe.values()))
 
     setdelegates = []
     for sel in sorted(owner):
@@ -288,6 +285,17 @@ def build_migration(
             ContractSource(facet.path, facet.contract or ""),
         )
         setdelegates.append(SetDelegate(sel, slot, delegate))
+    if selectors_impl:
+        slot = storage.storage_keys.get(SELECTORS_SELECTOR)
+        if slot is None:
+            raise click.ClickException(f"could not resolve a storage slot for {SELECTORS_SELECTOR}")
+        setdelegates.append(
+            SetDelegate(
+                SELECTORS_SELECTOR,
+                slot,
+                Delegate(to_checksum_address(selectors_impl["address"]), ContractSource("selectors()", "")),
+            )
+        )
     for sel in sorted(removed):
         if int(storage.storage_values.get(sel, "0x0") or "0x0", 16) == 0:
             continue  # already clear on chain
@@ -302,12 +310,27 @@ def deploy_migration(migration: Migration, prior: dict, root: pathlib.Path) -> d
     """Deploy the migration script unless `prior` already holds identical code."""
     runtime = migration.encode()
     if prior and prior.get("address"):
-        onchain = rpc("eth_getCode", [prior["address"], "latest"])
+        onchain = eth_get_code(prior["address"])
         if bytes.fromhex(onchain.removeprefix("0x")) == runtime:
             return prior
 
     initcode = universal_constructor() + runtime.hex()
     click.echo("deploying migration")
+    return {"address": deploy_initcode(initcode, root)}
+
+
+def deploy_selectors_impl(
+    runtime: bytes, prior: dict | None, root: pathlib.Path, redeploy_all: bool = False
+) -> dict:
+    """Deploy the generated `selectors()` delegate unless `prior` already holds
+    identical code (skipped by `redeploy_all`)."""
+    if not redeploy_all and prior and prior.get("address"):
+        onchain = eth_get_code(prior["address"])
+        if bytes.fromhex(onchain.removeprefix("0x")) == runtime:
+            return prior
+
+    initcode = universal_constructor() + runtime.hex()
+    click.echo("deploying selectors()")
     return {"address": deploy_initcode(initcode, root)}
 
 
@@ -372,16 +395,27 @@ def run_deploy(ledger_path, redeploy_all: bool = False):
             deployed += 1
 
         proposed = {"gitCommit": commit, "facets": proposed_facets}
-        migration = build_migration(proxy, facets, proposed_facets, current, root)
+
+        runtime = selectors_runtime(facets, root)
+        selectors_impl = None
+        if runtime is not None:
+            prior_selectors = prior_proposed.get("selectors") or current.get("selectors")
+            selectors_impl = deploy_selectors_impl(runtime, prior_selectors, root, redeploy_all)
+            proposed["selectors"] = selectors_impl
+
+        migration = build_migration(
+            proxy, facets, proposed_facets, current, root, selectors_impl=selectors_impl
+        )
         if migration is not None:
             proposed["migration"] = deploy_migration(
                 migration, prior_proposed.get("migration"), root
             )
         history["proposed"] = proposed
 
-        click.echo(
-            f"{proxy} chain {chain}: {deployed} facet(s) deployed, "
-            f"{'migration ready' if migration is not None else 'no migration needed'}"
-        )
+        notes = [f"{deployed} facet(s) deployed"]
+        if selectors_impl is not None:
+            notes.append("selectors() generated")
+        notes.append("migration ready" if migration is not None else "no migration needed")
+        click.echo(f"{proxy} chain {chain}: " + ", ".join(notes))
 
     write_ledger(ledger_path, ledger)

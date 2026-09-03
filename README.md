@@ -21,16 +21,21 @@ from `HEAD` (reusing recorded `constructorArgs`, prompting for any that are
 missing), and deploys only those whose bytecode differs from what `current`
 records for that chain.
 
+When no facet in the set implements ERC-8167 `selectors()`, `deploy` generates
+that method from the full selector set (every facet selector plus `selectors()`
+itself), deploys it with the `evm -C` universal constructor, and records it under
+`selectors`.
+
 It then builds the migration script: one `SelectorDelegated` + `SSTORE` per
 selector, pointing each at its facet and zeroing any selector dropped since
 `current`. Per-selector storage slots come from simulating a dispatch call
-against the live proxy with `evm -nx`; selectors come from each facet's ABI (for
-a raw `.evm` facet, from the matching Foundry artifact). The script is deployed
-with the `evm -C` universal constructor unless an identical one is already
-recorded under `proposed`.
+against the live proxy with `evm -nx`;
+selectors come from each facet's ABI (for a raw `.evm` facet, from the matching
+Foundry artifact). The script is deployed with the `evm -C` universal constructor
+unless an identical one is already recorded under `proposed`.
 
-The result is written back as a fresh `proposed` state (facets + `migration`)
-stamped with the current git commit; `current` is left untouched.
+The result is written back as a fresh `proposed` state (facets + `selectors` +
+`migration`) stamped with the current git commit; `current` is left untouched.
 
 `verify` checks the recorded state against the chain, rebuilding each recorded
 `gitCommit` in a throwaway `git worktree`. For `current`: every facet's
@@ -38,8 +43,9 @@ stamped with the current git commit; `current` is left untouched.
 the recorded address, and the proxy dispatches each of its selectors to that
 address. For `proposed`: the same hash checks, plus `proposed.facets` is exactly
 what `facetSrc` resolves to, and the on-chain `migration` installs every
-proposed selector and zeroes every selector dropped since `current`. It reports
-all mismatches and exits non-zero if any.
+proposed selector and zeroes every selector dropped since `current`. A recorded
+`selectors` delegate must hold the method josuke generates for that facet set.
+It reports all mismatches and exits non-zero if any.
 
 `accept` is run once the migration has executed against the proxy. It checks on
 chain that the migration took effect — every `proposed` selector now routes to
@@ -86,9 +92,11 @@ Notes:
 - The proxy `address` is assumed identical across chains; per-chain divergence
   would need a per-deployment address field.
 - The migration script carries no hashes because its bytecode is recomputable
-  from the `deploymentState`: the runtime is `SetDelegate.encode()` concatenated
-  per selector, and the creation bytecode prepends the `evm -C` universal
-  constructor (`600b380380600b3d393df3`).
+  from the `deploymentState`: one delegate-assignment fragment per selector, with
+  the `evm -C` universal constructor (`600b380380600b3d393df3`) prepended.
+- `selectors` carries no hashes for the same reason: it is the `selectors()`
+  method generated from the set of selectors the `deploymentState` installs. It
+  is absent when a facet implements `selectors()` itself.
 
 ### Example
 

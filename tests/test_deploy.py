@@ -99,6 +99,7 @@ def stub_chain(monkeypatch, tmp_path):
     monkeypatch.setattr(deploy, "_run", lambda *a, **k: "")  # forge build
     monkeypatch.setattr(deploy, "code_hash", lambda addr: "0x" + "cc" * 32)
     monkeypatch.setattr(deploy, "build_migration", lambda *a, **k: None)
+    monkeypatch.setattr(deploy, "selectors_runtime", lambda *a, **k: None)
 
     log = {"deployed": []}
     counter = [0]
@@ -392,6 +393,100 @@ def test_build_migration_rejects_selector_clash(monkeypatch):
         deploy.build_migration(PROXY, facets, proposed_facets, {}, ".")
 
 
+def test_build_migration_routes_generated_selectors(monkeypatch):
+    from josuke.erc8167 import SELECTORS_SELECTOR
+    from josuke.migration import SetDelegate
+
+    monkeypatch.setattr(deploy, "ProxyStorage", FakeStorage)
+    monkeypatch.setattr(deploy, "facet_selectors", lambda facet, root: [_sel("0x11111111")])
+    facets = [_facet("a.sol:A")]
+    proposed_facets = {"a.sol:A": {"address": A1}}
+
+    migration = deploy.build_migration(
+        PROXY, facets, proposed_facets, {}, ".", selectors_impl={"address": B2}
+    )
+    runtime = migration.encode()
+    frags = {
+        SetDelegate.decode(runtime[i : i + 100]).selector: SetDelegate.decode(runtime[i : i + 100])
+        for i in range(0, len(runtime), 100)
+    }
+    assert frags[SELECTORS_SELECTOR].delegate.address == B2
+
+
+# -- selectors() synthesis -------------------------------------------------
+
+
+def test_selectors_runtime_defers_to_a_facet_that_implements_it(monkeypatch):
+    from josuke.erc8167 import SELECTORS_SELECTOR
+
+    monkeypatch.setattr(
+        deploy, "facet_selectors", lambda facet, root: [_sel(SELECTORS_SELECTOR)]
+    )
+    assert deploy.selectors_runtime([_facet("a.sol:A")], ".") is None
+
+
+def test_selectors_runtime_generates_from_the_facet_set(monkeypatch):
+    from josuke.erc8167 import generated_selectors, selectors_method
+
+    monkeypatch.setattr(deploy, "facet_selectors", lambda facet, root: [_sel("0x11111111")])
+    runtime = deploy.selectors_runtime([_facet("a.sol:A")], ".")
+    assert runtime == selectors_method(generated_selectors([[_sel("0x11111111")]]))
+
+
+def test_run_deploy_synthesizes_and_records_selectors(stub_chain, monkeypatch, tmp_path):
+    _resolve_to(monkeypatch, ["a.evm"])
+    monkeypatch.setattr(deploy, "selectors_runtime", lambda facets, root: b"\x60\x00")
+    path = _write(tmp_path, [{"address": PROXY, "facetSrc": ["*.evm"]}])
+
+    deploy.run_deploy(path)
+
+    proposed = json.loads(path.read_text())[0]["deployments"]["314"]["proposed"]
+    assert "address" in proposed["selectors"]
+    assert b"\x60\x00".hex() in stub_chain["deployed"]  # deployed with the universal constructor
+
+
+def test_run_deploy_omits_selectors_when_a_facet_owns_it(stub_chain, monkeypatch, tmp_path):
+    _resolve_to(monkeypatch, ["a.evm"])
+    monkeypatch.setattr(deploy, "selectors_runtime", lambda facets, root: None)
+    path = _write(tmp_path, [{"address": PROXY, "facetSrc": ["*.evm"]}])
+
+    deploy.run_deploy(path)
+
+    proposed = json.loads(path.read_text())[0]["deployments"]["314"]["proposed"]
+    assert "selectors" not in proposed
+
+
+def test_run_deploy_reuses_selectors_impl_when_runtime_unchanged(stub_chain, monkeypatch, tmp_path):
+    _resolve_to(monkeypatch, ["a.evm"])
+    monkeypatch.setattr(deploy, "selectors_runtime", lambda facets, root: b"\x60\x00")
+    monkeypatch.setattr(deploy, "eth_get_code", lambda address: "0x6000")
+    prior_impl = {"address": "0x" + "5e" * 20}
+    path = _write(
+        tmp_path,
+        [
+            {
+                "address": PROXY,
+                "facetSrc": ["*.evm"],
+                "deployments": {
+                    "314": {
+                        "proposed": {
+                            "gitCommit": "e" * 40,
+                            "facets": {"a.evm": {"address": "0x" + "ab" * 20, "codehash": "0x" + "11" * 32, "initcodeHash": keccak_hex("a.evm".encode().hex())}},
+                            "selectors": prior_impl,
+                        }
+                    }
+                },
+            }
+        ],
+    )
+
+    deploy.run_deploy(path)
+
+    proposed = json.loads(path.read_text())[0]["deployments"]["314"]["proposed"]
+    assert proposed["selectors"] == prior_impl
+    assert b"\x60\x00".hex() not in stub_chain["deployed"]
+
+
 def test_deploy_migration_reuses_prior_when_code_matches(monkeypatch):
     from josuke.migration import Migration
 
@@ -403,7 +498,7 @@ def test_deploy_migration_reuses_prior_when_code_matches(monkeypatch):
             return runtime
 
     prior = {"address": "0x" + "ab" * 20}
-    monkeypatch.setattr(deploy, "rpc", lambda m, p: "0x" + runtime.hex())
+    monkeypatch.setattr(deploy, "eth_get_code", lambda address: "0x" + runtime.hex())
     monkeypatch.setattr(deploy, "deploy_initcode", lambda *a: pytest.fail("should not deploy"))
 
     assert deploy.deploy_migration(M([]), prior, ".") is prior

@@ -4,10 +4,10 @@ from os import environ
 import click
 from eth_utils import to_checksum_address
 
-from .deploy import chain_id
+from .ethjsonrpc import chain_id
 from .ledger import load_ledger, write_ledger
-from .storage import ProxyStorage
-from .verify import Report, SourceTrees, _selector_owners, _slot_address
+from .storage import ProxyStorage, slot_address as _slot_address
+from .verify import Report, SourceTrees, _selector_owners
 
 
 def verify_migrated(
@@ -60,6 +60,8 @@ def accepted_state(current: dict, proposed: dict) -> dict:
     that belongs here.
     """
     accepted = {"gitCommit": proposed["gitCommit"], "facets": proposed["facets"]}
+    if "selectors" in proposed:
+        accepted["selectors"] = proposed["selectors"]
     if "migration" in proposed:
         accepted["migration"] = proposed["migration"]
     return accepted

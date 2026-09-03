@@ -148,6 +148,59 @@ def test_verify_dispatch_passes_when_route_matches(monkeypatch):
     assert report.failures == []
 
 
+# -- verify_selectors -----------------------------------------------------
+
+
+def _generated_runtime(selector_lists):
+    from josuke.erc8167 import generated_selectors, selectors_method
+
+    return selectors_method(generated_selectors(selector_lists))
+
+
+def test_verify_selectors_passes_when_code_matches(monkeypatch):
+    monkeypatch.setattr(deploy, "facet_selectors", lambda facet, root: [_sel("0x11111111")])
+    runtime = _generated_runtime([[_sel("0x11111111")]])
+    monkeypatch.setattr(verify, "eth_get_code", lambda address: "0x" + runtime.hex())
+
+    report = _report()
+    verify.verify_selectors(_state({"a.sol:A": {"address": A1}}) | {"selectors": {"address": B2}}, "proposed", ".", report)
+    assert report.failures == []
+
+
+def test_verify_selectors_flags_stale_code(monkeypatch):
+    monkeypatch.setattr(deploy, "facet_selectors", lambda facet, root: [_sel("0x11111111")])
+    monkeypatch.setattr(verify, "eth_get_code", lambda address: "0x" + "00" * 8)
+
+    report = _report()
+    verify.verify_selectors(_state({"a.sol:A": {"address": A1}}) | {"selectors": {"address": B2}}, "proposed", ".", report)
+    assert any("not the generated selectors()" in f for f in report.failures)
+
+
+def test_verify_selectors_flags_record_when_a_facet_implements_it(monkeypatch):
+    from josuke.erc8167 import SELECTORS_SELECTOR
+
+    monkeypatch.setattr(deploy, "facet_selectors", lambda facet, root: [_sel(SELECTORS_SELECTOR)])
+    report = _report()
+    verify.verify_selectors(_state({"a.sol:A": {"address": A1}}) | {"selectors": {"address": B2}}, "proposed", ".", report)
+    assert any("should not be recorded" in f for f in report.failures)
+
+
+def test_verify_selectors_noop_without_record():
+    report = _report()
+    verify.verify_selectors(_state({"a.sol:A": {"address": A1}}), "current", ".", report)
+    assert report.failures == []
+
+
+def test_selector_owners_includes_generated_selectors(monkeypatch):
+    from josuke.erc8167 import SELECTORS_SELECTOR
+
+    monkeypatch.setattr(verify, "facet_selectors", lambda facet, tree: [_sel("0x11111111")])
+    owners, _ = verify._selector_owners(
+        _state({"a.sol:A": {"address": A1}}) | {"selectors": {"address": B2}}, "."
+    )
+    assert owners[SELECTORS_SELECTOR] == ("selectors()", B2)
+
+
 # -- verify_migration -----------------------------------------------------
 
 
@@ -170,7 +223,7 @@ def test_verify_migration_passes_for_recomputed_bytecode(monkeypatch):
     expected = deploy.build_migration(
         PROXY, [deploy.facet_from_source_id("a.sol:A")], proposed["facets"], {}, ".", storage=storage
     )
-    monkeypatch.setattr(verify, "rpc", lambda m, p: "0x" + expected.encode().hex())
+    monkeypatch.setattr(verify, "eth_get_code", lambda address: "0x" + expected.encode().hex())
 
     report = _report()
     verify.verify_migration(PROXY, {**proposed, "migration": {"address": OLD}}, {}, storage, ".", report)
@@ -185,7 +238,7 @@ def test_verify_migration_flags_missing_install(monkeypatch):
     expected = deploy.build_migration(PROXY, facets, proposed["facets"], {}, ".", storage=storage)
     # on-chain migration only carries the first fragment
     onchain = expected.encode()[:SET_DELEGATE_SIZE]
-    monkeypatch.setattr(verify, "rpc", lambda m, p: "0x" + onchain.hex())
+    monkeypatch.setattr(verify, "eth_get_code", lambda address: "0x" + onchain.hex())
 
     report = _report()
     verify.verify_migration(PROXY, {**proposed, "migration": {"address": OLD}}, {}, storage, ".", report)
@@ -208,7 +261,7 @@ def test_verify_migration_flags_unzeroed_removal(monkeypatch):
     from josuke.migration import Migration
 
     kept = [sd for sd in expected.setdelegates if sd.delegate.address != verify.ZERO_ADDRESS]
-    monkeypatch.setattr(verify, "rpc", lambda m, p: "0x" + Migration(kept).encode().hex())
+    monkeypatch.setattr(verify, "eth_get_code", lambda address: "0x" + Migration(kept).encode().hex())
 
     report = _report()
     verify.verify_migration(

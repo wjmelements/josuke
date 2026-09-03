@@ -3,7 +3,16 @@ from os import environ
 from requests import post
 from subprocess import PIPE, Popen
 
+from eth_utils import to_checksum_address
+
 from .selectors import Selector
+
+
+def slot_address(raw: str | None) -> str | None:
+    """The delegate address held in a 32-byte storage word, or None if empty."""
+    if not raw or int(raw, 16) == 0:
+        return None
+    return to_checksum_address("0x" + raw.removeprefix("0x").rjust(64, "0")[-40:])
 
 
 class ProxyStorage:
