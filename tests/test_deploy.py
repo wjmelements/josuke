@@ -384,6 +384,21 @@ def test_build_migration_none_when_dropped_selector_already_clear(monkeypatch):
     assert deploy.build_migration(PROXY, [], {}, current, ".") is None
 
 
+def test_build_migration_none_when_already_routed(monkeypatch):
+    """Re-running deploy with nothing changed (e.g. right after accept) must not
+    propose a migration: every selector already routes to its recorded facet."""
+    word = "0x" + "00" * 12 + A1[2:].lower()
+    monkeypatch.setattr(
+        deploy, "ProxyStorage", lambda addr: FakeStorage(addr, {"0x11111111": word})
+    )
+    monkeypatch.setattr(deploy, "facet_selectors", lambda facet, root: [_sel("0x11111111")])
+    facets = [_facet("a.sol:A")]
+    proposed_facets = {"a.sol:A": {"address": A1}}
+    current = {"facets": {"a.sol:A": {"address": A1}}}
+
+    assert deploy.build_migration(PROXY, facets, proposed_facets, current, ".") is None
+
+
 def test_build_migration_rejects_selector_clash(monkeypatch):
     monkeypatch.setattr(deploy, "ProxyStorage", FakeStorage)
     monkeypatch.setattr(deploy, "facet_selectors", lambda facet, root: [_sel("0x11111111")])
@@ -450,7 +465,7 @@ def test_selectors_runtime_generates_from_the_facet_set(monkeypatch):
     assert runtime == selectors_method(generated_selectors([[_sel("0x11111111")]]))
 
 
-def test_run_deploy_synthesizes_and_records_selectors(stub_chain, monkeypatch, tmp_path):
+def test_run_deploy_synthesizes_and_records_selectors(stub_chain, monkeypatch, tmp_path, capsys):
     _resolve_to(monkeypatch, ["a.evm"])
     monkeypatch.setattr(deploy, "selectors_runtime", lambda facets, root: b"\x60\x00")
     path = _write(tmp_path, [{"address": PROXY, "facetSrc": ["*.evm"]}])
@@ -460,6 +475,7 @@ def test_run_deploy_synthesizes_and_records_selectors(stub_chain, monkeypatch, t
     proposed = json.loads(path.read_text())[0]["deployments"]["314"]["proposed"]
     assert "address" in proposed["selectors"]
     assert b"\x60\x00".hex() in stub_chain["deployed"]  # deployed with the universal constructor
+    assert "selectors() generated" in capsys.readouterr().out
 
 
 def test_run_deploy_omits_selectors_when_a_facet_owns_it(stub_chain, monkeypatch, tmp_path):
@@ -473,7 +489,7 @@ def test_run_deploy_omits_selectors_when_a_facet_owns_it(stub_chain, monkeypatch
     assert "selectors" not in proposed
 
 
-def test_run_deploy_reuses_selectors_impl_when_runtime_unchanged(stub_chain, monkeypatch, tmp_path):
+def test_run_deploy_reuses_selectors_impl_when_runtime_unchanged(stub_chain, monkeypatch, tmp_path, capsys):
     _resolve_to(monkeypatch, ["a.evm"])
     monkeypatch.setattr(deploy, "selectors_runtime", lambda facets, root: b"\x60\x00")
     monkeypatch.setattr(deploy, "eth_get_code", lambda address: "0x6000")
@@ -502,6 +518,7 @@ def test_run_deploy_reuses_selectors_impl_when_runtime_unchanged(stub_chain, mon
     proposed = json.loads(path.read_text())[0]["deployments"]["314"]["proposed"]
     assert proposed["selectors"] == prior_impl
     assert b"\x60\x00".hex() not in stub_chain["deployed"]
+    assert "selectors() unchanged" in capsys.readouterr().out
 
 
 def test_deploy_migration_reuses_prior_when_code_matches(monkeypatch):

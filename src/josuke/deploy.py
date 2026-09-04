@@ -17,7 +17,7 @@ from .ledger import load_ledger, write_ledger
 from .migration import Migration, SetDelegate
 from .proc import run
 from .selectors import Selector
-from .storage import ProxyStorage
+from .storage import ProxyStorage, slot_address
 
 ZERO_ADDRESS = "0x" + "00" * 20
 
@@ -258,22 +258,20 @@ def build_migration(
         if slot is None:
             raise click.ClickException(f"could not resolve a storage slot for {sel}")
         facet = owner[sel]
-        delegate = Delegate(
-            proposed_facets[facet.source_id]["address"],  # already checksummed by deploy_initcode
-            ContractSource(facet.path, facet.contract or ""),
-        )
+        address = proposed_facets[facet.source_id]["address"]  # already checksummed by deploy_initcode
+        if slot_address(storage.storage_values.get(sel)) == to_checksum_address(address):
+            continue  # already routed correctly on-chain
+        delegate = Delegate(address, ContractSource(facet.path, facet.contract or ""))
         setdelegates.append(SetDelegate(sel, slot, delegate))
     if selectors_impl:
         slot = storage.storage_keys.get(SELECTORS_SELECTOR)
         if slot is None:
             raise click.ClickException(f"could not resolve a storage slot for {SELECTORS_SELECTOR}")
-        setdelegates.append(
-            SetDelegate(
-                SELECTORS_SELECTOR,
-                slot,
-                Delegate(to_checksum_address(selectors_impl["address"]), ContractSource("selectors()", "")),
+        address = to_checksum_address(selectors_impl["address"])
+        if slot_address(storage.storage_values.get(SELECTORS_SELECTOR)) != address:
+            setdelegates.append(
+                SetDelegate(SELECTORS_SELECTOR, slot, Delegate(address, ContractSource("selectors()", "")))
             )
-        )
     for sel in sorted(removed):
         if int(storage.storage_values.get(sel, "0x0") or "0x0", 16) == 0:
             continue  # already clear on chain
@@ -405,7 +403,7 @@ def run_deploy(ledger_path, redeploy_all: bool = False):
 
         notes = [f"{deployed} facet(s) deployed"]
         if selectors_impl is not None:
-            notes.append("selectors() generated")
+            notes.append("selectors() unchanged" if selectors_impl is prior_selectors else "selectors() generated")
         notes.append("migration ready" if migration is not None else "no migration needed")
         click.echo(f"{proxy} chain {chain}: " + ", ".join(notes))
 
