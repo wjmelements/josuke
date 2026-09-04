@@ -202,6 +202,7 @@ def run_verify(ledger_path):
     ledger = load_ledger(ledger_path)
     chain = chain_id()
     report = Report()
+    verified: list[str] = []
 
     with SourceTrees(root) as trees:
         for entry in ledger:
@@ -228,9 +229,13 @@ def run_verify(ledger_path):
 
             if current:
                 tree = trees.get(current["gitCommit"])
+                before = len(report.failures)
                 verify_facets(current, "current", tree, report)
                 verify_dispatch(current, storage, tree, report)
                 verify_selectors(current, "current", tree, report)
+                if len(report.failures) == before:
+                    verified.append(proxy)
+                    click.secho(f"✓ {proxy}: current deployment verified", fg="green")
 
             if proposed:
                 tree = trees.get(proposed["gitCommit"])
@@ -250,4 +255,8 @@ def run_verify(ledger_path):
             f"{len(report.failures)} verification failure(s):\n"
             + "\n".join(f"  - {failure}" for failure in report.failures)
         )
-    click.echo(f"verified chain {chain}: {len(ledger)} proxy entr{'y' if len(ledger) == 1 else 'ies'}")
+    click.secho(
+        f"✓ verified chain {chain}: {len(verified)}/{len(ledger)} "
+        f"proxy entr{'y' if len(ledger) == 1 else 'ies'} confirmed current",
+        fg="green", bold=True,
+    )
