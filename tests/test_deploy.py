@@ -57,6 +57,7 @@ requires_forge = pytest.mark.skipif(
 def test_resolve_facets_expands_glob_to_deployable_contracts():
     facets = resolve_facets(["src/*.sol"], FIXTURE_ROOT)
     assert {f.source_id for f in facets} == {
+        "src/FromDeployer.sol:FromDeployer",
         "src/NoArgs.sol:NoArgs",
         "src/WithArgs.sol:WithArgs",
     }

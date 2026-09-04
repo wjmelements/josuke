@@ -12,11 +12,19 @@ from .proc import run
 _built: set[str] = set()
 
 
-def execute(initcode_hex: str) -> str:
-    """Run `evm -x`: execute creation bytecode, return the deployed runtime hex."""
+def execute(initcode_hex: str, sender: str | None = None) -> str:
+    """Run `evm -x`: execute creation bytecode, return the deployed runtime hex.
+
+    `sender` sets `msg.sender` for the constructor, so an immutable derived from
+    the deployer is reproduced.
+    """
+    if sender is None:
+        stdin = initcode_hex
+    else:
+        stdin = json.dumps({"from": sender, "data": initcode_hex})
     return subprocess.run(
         ["evm", "-x"],
-        input=initcode_hex,
+        input=stdin,
         text=True,
         capture_output=True,
         check=True,

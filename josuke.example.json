@@ -47,6 +47,7 @@
                         "src/facets/Token.sol:Token": {
                             "codehash": "0x8642864286428642864286428642864286428642864286428642864286428642",
                             "initcodeHash": "0x70cc70cc70cc70cc70cc70cc70cc70cc70cc70cc70cc70cc70cc70cc70cc70cc",
+                            "from": "0x4a6f6B9fF1fc974096f9063a45Fd12bD5B928AD1",
                             "constructorArgs": {
                                 "supply": 10000000000000000000000000,
                                 "name": "NewWorldOrder",

@@ -125,6 +125,10 @@
           "minProperties": 1,
           "additionalProperties": true,
           "description": "Constructor arguments keyed by parameter name. Values are JSON encodings of the ABI types: address and bytesN as 0x hex strings, arrays as arrays, integers as JSON number literals. Integer values are fed to eth_abi.encode, which requires a Python int, so they are kept as bare numbers rather than strings; parse this file with an integer-preserving JSON reader (Python's json is fine — JSON.parse and jq lose precision above 2^53)."
+        },
+        "from": {
+          "$ref": "#/$defs/address",
+          "description": "Deployer address, supplied as msg.sender when the verifier re-simulates the constructor. Record it when an immutable is derived from the deployer; omit it otherwise."
         }
       }
     }

@@ -46,12 +46,12 @@ def _forge_inspect(contract: str, field: str, *extra: str) -> str:
     return out.strip()
 
 
-def _deployed_code(contract: str, arg_types=(), arg_values=()) -> str:
+def _deployed_code(contract: str, arg_types=(), arg_values=(), sender=None) -> str:
     """The runtime bytecode a real deployment of `contract` would leave on chain."""
     initcode = _forge_inspect(contract, "bytecode").removeprefix("0x")
     if arg_types:
         initcode += abi_encode(list(arg_types), list(arg_values)).hex()
-    return execute(initcode)
+    return execute(initcode, sender)
 
 
 @pytest.fixture(autouse=True)
@@ -163,6 +163,47 @@ def test_matches_source_false_on_wrong_immutable(eth_rpc):
             (A_VALUE, B_VALUE),
         ),
     )
+    delegate.fetch()
+
+    assert delegate.matches_source() is False
+
+
+# -- matches_source(): deployer immutable ------------------------------------
+
+DEPLOYER = "0xd8dA6BF26964aF9D7eEd9e03E53415D37aA96045"
+
+
+def test_matches_source_true_with_deployer(eth_rpc):
+    source = ContractSource(
+        "src/FromDeployer.sol", "FromDeployer", sender=DEPLOYER, root=str(FIXTURE_ROOT)
+    )
+    delegate = Delegate(ADDRESS, source)
+    eth_rpc.set_code(ADDRESS, _deployed_code("src/FromDeployer.sol:FromDeployer", sender=DEPLOYER))
+    delegate.fetch()
+
+    assert delegate.matches_source() is True
+
+
+def test_matches_source_false_on_wrong_deployer(eth_rpc):
+    source = ContractSource(
+        "src/FromDeployer.sol",
+        "FromDeployer",
+        sender="0x0000000000000000000000000000000000000001",
+        root=str(FIXTURE_ROOT),
+    )
+    delegate = Delegate(ADDRESS, source)
+    eth_rpc.set_code(ADDRESS, _deployed_code("src/FromDeployer.sol:FromDeployer", sender=DEPLOYER))
+    delegate.fetch()
+
+    assert delegate.matches_source() is False
+
+
+def test_matches_source_false_when_deployer_omitted(eth_rpc):
+    # Without `sender` the constructor runs from 0x0, so the recomputed immutable
+    # is the zero address, not the real deployer.
+    source = ContractSource("src/FromDeployer.sol", "FromDeployer", root=str(FIXTURE_ROOT))
+    delegate = Delegate(ADDRESS, source)
+    eth_rpc.set_code(ADDRESS, _deployed_code("src/FromDeployer.sol:FromDeployer", sender=DEPLOYER))
     delegate.fetch()
 
     assert delegate.matches_source() is False

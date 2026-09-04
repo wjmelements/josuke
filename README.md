@@ -94,6 +94,9 @@ Notes:
   answers "was it built from this commit with these args?" and is what the
   verifier recomputes from source. A facet with no constructor has
   `initcodeHash == keccak256(initcode)` and omits `constructorArgs`.
+- `from` is the deployer address, replayed as `msg.sender` when the verifier
+  re-simulates the constructor. It is only needed when an immutable is derived
+  from the deployer; omit it otherwise.
 - One `gitCommit` covers a whole `deploymentState`. When `proposed` is promoted,
   unchanged facets keep their existing entries, so a long-lived `current` can
   contain facets whose bytecode predates its `gitCommit`; only the facets

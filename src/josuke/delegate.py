@@ -7,11 +7,12 @@ from subprocess import run
 from .evm import execute
 
 class ContractSource:
-    def __init__(self, path: str, name: str, config={}, root: str = "."):
+    def __init__(self, path: str, name: str, config={}, root: str = ".", sender: str | None = None):
         self.path = path
         self.name = name
         self.config = config
         self.root = root
+        self.sender = sender  # msg.sender
 
     def __repr__(self):
         return f"{self.path}:{self.name}"
@@ -84,4 +85,4 @@ class Delegate:
             constructor_args = abi_encode([a["type"] for a in abi_inputs], values).hex()
             initcode += constructor_args
 
-        return self.deployed_bytecode == execute(initcode)
+        return self.deployed_bytecode == execute(initcode, self.source.sender)
