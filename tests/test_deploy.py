@@ -275,6 +275,57 @@ def test_run_deploy_records_constructor_args(stub_chain, monkeypatch, tmp_path):
     assert facet["constructorArgs"] == {"owner": "0x" + "12" * 20}
 
 
+def test_run_deploy_verifies_new_sol_facets_on_sourcify(stub_chain, monkeypatch, tmp_path):
+    monkeypatch.setattr(
+        deploy, "resolve_facets", lambda facet_src, root: [_facet("a.sol:A")]
+    )
+    calls = []
+    monkeypatch.setattr(
+        deploy,
+        "verify_sourcify",
+        lambda facet, address, chain, root: calls.append((facet.source_id, address, chain)),
+    )
+    path = _write(tmp_path, [{"address": PROXY, "facetSrc": ["*.sol"]}])
+
+    deploy.run_deploy(path)
+
+    assert calls == [("a.sol:A", "0x" + f"{1:040x}", "314")]
+
+
+def test_run_deploy_does_not_reverify_reused_sol_facets(stub_chain, monkeypatch, tmp_path):
+    monkeypatch.setattr(
+        deploy, "resolve_facets", lambda facet_src, root: [_facet("a.sol:A")]
+    )
+    calls = []
+    monkeypatch.setattr(deploy, "verify_sourcify", lambda *a, **k: calls.append(a))
+    path = _write(tmp_path, [{"address": PROXY, "facetSrc": ["*.sol"]}])
+
+    deploy.run_deploy(path)  # first run deploys + verifies
+    deploy.run_deploy(path)  # nothing changed: reused, must not re-verify
+
+    assert len(calls) == 1
+
+
+def test_verify_sourcify_calls_forge(monkeypatch):
+    calls = []
+    monkeypatch.setattr(deploy, "run", lambda cmd, root: calls.append(cmd) or "")
+
+    deploy.verify_sourcify(_facet("a.sol:A"), A1, "314", ".")
+
+    assert calls == [["forge", "verify-contract", A1, "a.sol:A", "--chain", "314", "--verifier", "sourcify"]]
+
+
+def test_verify_sourcify_failure_is_non_fatal(monkeypatch, capsys):
+    def fail(cmd, root):
+        raise deploy.click.ClickException("boom")
+
+    monkeypatch.setattr(deploy, "run", fail)
+
+    deploy.verify_sourcify(_facet("a.sol:A"), A1, "314", ".")  # must not raise
+
+    assert "warning: Sourcify verification failed" in capsys.readouterr().err
+
+
 def test_run_deploy_requires_rpc_url(monkeypatch, tmp_path):
     monkeypatch.delenv("ETH_RPC_URL", raising=False)
     monkeypatch.chdir(tmp_path)

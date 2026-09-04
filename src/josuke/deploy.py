@@ -179,6 +179,17 @@ def code_hash(address: str) -> str:
     return keccak_hex(eth_get_code(address))
 
 
+def verify_sourcify(facet: Facet, address: str, chain: str, root: pathlib.Path) -> None:
+    """Upload a freshly deployed .sol facet's source to Sourcify. Best-effort:
+    a failure here doesn't stop the deploy, since the facet is already on chain."""
+    contract = f"{facet.path}:{facet.contract}"
+    click.echo(f"verifying {contract} on Sourcify")
+    try:
+        run(["forge", "verify-contract", address, contract, "--chain", chain, "--verifier", "sourcify"], root)
+    except click.ClickException as e:
+        click.echo(f"warning: Sourcify verification failed for {contract}: {e}", err=True)
+
+
 # -- migration script -----------------------------------------------------
 
 
@@ -373,6 +384,8 @@ def run_deploy(ledger_path, redeploy_all: bool = False):
 
             click.echo(f"deploying {facet.source_id}")
             address = deploy_initcode(initcode, root)
+            if facet.kind == "sol":
+                verify_sourcify(facet, address, chain, root)
             facet_entry = {
                 "address": address,
                 "codehash": code_hash(address),

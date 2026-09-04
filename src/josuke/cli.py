@@ -79,8 +79,8 @@ def add(address, facets, ledger_path):
 def deploy(ledger_path, all_):
     """Deploy changed and new facets to $ETH_RPC_URL, recording them under `proposed`.
 
-    Uses `forge` to build and `cast` to broadcast; the signing wallet is taken
-    from Foundry's environment (ETH_KEYSTORE_ACCOUNT, ETH_FROM, ...).
+    Uses `forge` to build and `cast` to broadcast, then verifies new .sol facets
+    on Sourcify. The signing wallet is taken from Foundry's environment.
     """
     run_deploy(ledger_path, redeploy_all=all_)
 
