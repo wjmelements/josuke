@@ -12,7 +12,6 @@ from josuke.evm import _governing_makefile, evm_artifact
 
 ARTIFACT = {
     "bytecode": {"object": "0xdeadbeef"},
-    "deployedBytecode": {"object": "0xbeef"},
     "abi": [{"type": "function", "name": "impl", "inputs": [], "outputs": []}],
 }
 
@@ -55,7 +54,7 @@ def test_evm_artifact_builds_and_reads(tmp_path):
     _stub_makefile(tmp_path, "Impl")
 
     got = evm_artifact(src / "Impl.evm", tmp_path)
-    assert got == {"initcode": "deadbeef", "runtime": "beef", "abi": ARTIFACT["abi"]}
+    assert got == {"initcode": "deadbeef", "abi": ARTIFACT["abi"]}
 
 
 @needs_make

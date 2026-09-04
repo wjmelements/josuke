@@ -84,7 +84,7 @@ def test_facet_initcode_uses_evm_artifact(tmp_path, monkeypatch):
     monkeypatch.setattr(
         deploy,
         "evm_artifact",
-        lambda source, root: {"initcode": "deadbeef", "runtime": "beef", "abi": []},
+        lambda source, root: {"initcode": "deadbeef", "abi": []},
     )
     initcode, args = deploy.facet_initcode(Facet("evm", "impl.evm", None, "impl.evm"), tmp_path, None)
     assert initcode == "deadbeef"

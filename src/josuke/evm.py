@@ -45,7 +45,7 @@ def _governing_makefile(source: pathlib.Path, root: pathlib.Path) -> pathlib.Pat
 
 def evm_artifact(source: pathlib.Path, root: pathlib.Path) -> dict:
     """Assemble the `.evm` facet at `source` via its Makefile and return
-    `{"initcode": <hex>, "runtime": <hex>, "abi": [...]}`.
+    `{"initcode": <hex>, "abi": [...]}`.
 
     ERC-8167 `.evm` files are evm-assembler source, not raw bytecode. Projects that
     ship them attach a Makefile rule (the `ASM_ARTIFACT` macro) that assembles the
@@ -82,6 +82,5 @@ def evm_artifact(source: pathlib.Path, root: pathlib.Path) -> dict:
         )
     return {
         "initcode": data["bytecode"]["object"].removeprefix("0x"),
-        "runtime": data["deployedBytecode"]["object"].removeprefix("0x"),
         "abi": abi,
     }
