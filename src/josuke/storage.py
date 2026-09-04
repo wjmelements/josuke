@@ -38,10 +38,10 @@ class ProxyStorage:
                 request = loads(request)
                 result = post(environ['ETH_RPC_URL'], json=request)
                 assert result.status_code == 200
-                # Answer the request
-                result = result.text
-                print(result, file=evm.stdin)
-                result = loads(result)
+                # Answer the request. Re-serialize compactly: the RPC body may be
+                # pretty-printed, but evm reads one JSON value per line.
+                result = loads(result.text)
+                print(dumps(result), file=evm.stdin)
                 if type(request) is dict:
                     request_list = [request]
                     result_list = [result]
