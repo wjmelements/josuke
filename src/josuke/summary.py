@@ -27,12 +27,6 @@ def _commit_stamp(tree: pathlib.Path) -> str:
     return run(["git", "-C", str(tree), "show", "-s", "--format=%h %cs", "HEAD"]).strip()
 
 
-def _short(address: str | None) -> str:
-    if not address:
-        return "?"
-    return f"{address[:6]}…{address[-4:]}" if len(address) > 12 else address
-
-
 def _fmt(value) -> str:
     return json.dumps(value)
 
@@ -160,7 +154,7 @@ def summarize_upgrade(
 
     # -- header --
     click.echo("")
-    click.echo(f"{_short(proxy)}  chain {chain}  ·  proposed upgrade")
+    click.echo(f"{proxy}  chain {chain}  ·  proposed upgrade")
     if current:
         click.echo(f"  current   {_commit_stamp(current_tree)}")
     else:
@@ -230,7 +224,7 @@ def summarize_upgrade(
         _lost_list(lost, moved)
 
     if proposed.get("selectors"):
-        addr = _short(proposed["selectors"].get("address"))
+        addr = proposed["selectors"].get("address") or "?"
         click.echo("")
         click.echo(
             f"  {'GENERATED'.ljust(9)} selectors()          {addr}"
@@ -250,7 +244,7 @@ def summarize_upgrade(
                 installs += 1
         cleared = sum(1 for s in removed if slot_address(storage.storage_values.get(s)))
         click.echo("")
-        click.echo(f"MIGRATION  {_short(proposed['migration'].get('address'))}")
+        click.echo(f"MIGRATION  {proposed['migration'].get('address') or '?'}")
         click.echo(f"  installs {installs} selector routes, clears {cleared}")
 
     click.echo("")
