@@ -105,8 +105,8 @@ def test_new_selector_is_listed_in_new_section(capsys, stub):
     top = _segment(out, "NEW SELECTORS")
     assert "pause()" in top and "→ Emergency" in top
     assert any(line.strip().startswith("+ pause()") for line in out.splitlines())
-    # the unchanged facet stays a one-liner
-    assert "govAction()" not in out
+    # the unchanged facet still lists its (unchanged) selectors
+    assert "govAction()" in out
 
 
 def test_selectors_grouped_under_their_facet(capsys, stub):
@@ -130,16 +130,18 @@ def test_selectors_grouped_under_their_facet(capsys, stub):
     assert "gamma()" in seg_b
 
 
-def test_unchanged_facet_is_a_one_liner(capsys, stub):
+def test_unchanged_facet_lists_its_address_and_selectors(capsys, stub):
+    address = "0x" + "11" * 20
     out = _run(
         capsys,
         stub,
         _same({"a.sol:A": [_sel("0xaa000001", "alpha()")]}),
-        current=_state({"a.sol:A": _facet(initcode_hash="0xsame")}),
-        proposed=_state({"a.sol:A": _facet(initcode_hash="0xsame")}),
+        current=_state({"a.sol:A": _facet(initcode_hash="0xsame", address=address)}),
+        proposed=_state({"a.sol:A": _facet(initcode_hash="0xsame", address=address)}),
     )
     assert "UNCHANGED" in out
-    assert "alpha()" not in out
+    assert "alpha()" in out
+    assert address in out  # full address, not abbreviated
 
 
 def test_changed_facet_lists_selectors(capsys, stub):
@@ -261,6 +263,37 @@ def test_migration_and_generated_lines(capsys, stub):
     assert "GENERATED" in out and "returns 2 selectors" in out
     assert "MIGRATION" in out
     assert "installs 2 selector routes, clears 1" in out
-    # the generated selectors() route is not counted as a new method
-    assert "NEW SELECTORS (0)" in out
-    assert out.rstrip().endswith("0 new · 0 moved · 1 removed selector")
+    # selectors() has no previous route here, so it counts as a new selector
+    assert "NEW SELECTORS (1)" in out
+    assert out.rstrip().endswith("1 new · 0 moved · 1 removed selector")
+
+
+def test_migration_installs_excludes_already_routed_selectors(capsys, stub):
+    """An UNCHANGED facet is already routed on-chain; the migration doesn't
+    touch it, so it must not be counted in "installs"."""
+    kept = _sel("0x11111111", "kept()")
+    fresh = _sel("0x22222222", "fresh()")
+    gone = _sel("0x99999999", "gone()")
+    mapping = {
+        ("cur", "a.sol:A"): [kept],
+        ("prop", "a.sol:A"): [kept],
+        ("prop", "b.sol:B"): [fresh],
+        ("cur", "old.sol:Old"): [gone],
+    }
+    kept_address = "0x" + "11" * 20
+    storage = FakeStorage({
+        "0x11111111": "0x" + "00" * 12 + kept_address[2:].lower(),  # already routed
+        "0x99999999": "0x" + "00" * 12 + "aa" * 20,  # still live, needs clearing
+    })
+    out = _run(
+        capsys,
+        stub,
+        mapping,
+        current=_state({"a.sol:A": _facet(address=kept_address), "old.sol:Old": _facet()}),
+        proposed=_state(
+            {"a.sol:A": _facet(address=kept_address), "b.sol:B": _facet(address="0x" + "22" * 20)},
+            migration={"address": "0x" + "d1" * 20},
+        ),
+        storage=storage,
+    )
+    assert "installs 1 selector routes, clears 1" in out

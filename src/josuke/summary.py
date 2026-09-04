@@ -10,6 +10,7 @@ import json
 import pathlib
 
 import click
+from eth_utils import to_checksum_address
 
 from .deploy import facet_from_source_id, facet_selectors
 from .erc8167 import SELECTORS_SELECTOR, selectors_selector
@@ -30,10 +31,6 @@ def _short(address: str | None) -> str:
     if not address:
         return "?"
     return f"{address[:6]}…{address[-4:]}" if len(address) > 12 else address
-
-
-def _hash_short(digest: str | None) -> str:
-    return f"{digest[:6]}…{digest[-4:]}" if digest else "?"
 
 
 def _fmt(value) -> str:
@@ -141,13 +138,15 @@ def summarize_upgrade(
     if SELECTORS_SELECTOR in cur_owner or SELECTORS_SELECTOR in prop_owner:
         lookup.setdefault(SELECTORS_SELECTOR, selectors_selector())
 
-    # Classify real facet methods only; the generated `selectors()` route is
-    # infrastructure, described by its own line, not a "new selector".
+    # The generated `selectors()` route has its own "GENERATED" line, so it's
+    # excluded here, unless it's newly appearing, in which case it's a new selector too.
+    selectors_is_new = SELECTORS_SELECTOR in prop_owner and SELECTORS_SELECTOR not in cur_owner
+
     def _methods(owner):
         return {
             s: sid
             for s, sid in owner.items()
-            if not (s == SELECTORS_SELECTOR and sid == "selectors()")
+            if not (s == SELECTORS_SELECTOR and sid == "selectors()" and not selectors_is_new)
         }
 
     cur_methods, prop_methods = _methods(cur_owner), _methods(prop_owner)
@@ -194,22 +193,11 @@ def summarize_upgrade(
             click.echo("    (could not build — see checks below)")
             continue
 
-        if status == "UNCHANGED":
-            addr = rec.get("address") or old.get("address")
-            click.echo(f"    {_short(addr)}  ·  {_plural(len(selectors), 'selector')}")
-            continue
-
-        addr, old_addr = rec.get("address"), old.get("address")
+        addr, old_addr = rec.get("address") or old.get("address"), old.get("address")
         if status == "CHANGED" and old_addr and old_addr != addr:
-            click.echo(f"    address       {_short(addr)}  (was {_short(old_addr)})")
+            click.echo(f"    address       {addr or '?'}  (was {old_addr or '?'})")
         else:
-            click.echo(f"    address       {_short(addr)}")
-
-        ih, old_ih = rec.get("initcodeHash"), old.get("initcodeHash")
-        if status == "CHANGED" and old_ih and old_ih != ih:
-            click.echo(f"    initcodeHash  {_hash_short(ih)}  (was {_hash_short(old_ih)})")
-        else:
-            click.echo(f"    initcodeHash  {_hash_short(ih)}")
+            click.echo(f"    address       {addr or '?'}")
 
         args = rec.get("constructorArgs")
         if args:
@@ -250,10 +238,20 @@ def summarize_upgrade(
         )
 
     if proposed.get("migration"):
+        def _target(sid):
+            if sid == "selectors()":
+                return proposed.get("selectors", {}).get("address")
+            return prop_facets.get(sid, {}).get("address")
+
+        installs = 0
+        for s, sid in prop_owner.items():
+            target = _target(sid)
+            if not target or slot_address(storage.storage_values.get(s)) != to_checksum_address(target):
+                installs += 1
         cleared = sum(1 for s in removed if slot_address(storage.storage_values.get(s)))
         click.echo("")
         click.echo(f"MIGRATION  {_short(proposed['migration'].get('address'))}")
-        click.echo(f"  installs {len(prop_owner)} selector routes, clears {cleared}")
+        click.echo(f"  installs {installs} selector routes, clears {cleared}")
 
     click.echo("")
     click.echo(
