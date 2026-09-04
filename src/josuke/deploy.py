@@ -412,7 +412,9 @@ def run_deploy(ledger_path, redeploy_all: bool = False):
             proposed["migration"] = deploy_migration(
                 migration, prior_proposed.get("migration"), root
             )
-        history["proposed"] = proposed
+            history["proposed"] = proposed
+        else:
+            history.pop("proposed", None)  # nothing pending: already live on chain
 
         notes = [f"{deployed} facet(s) deployed"]
         if selectors_impl is not None:

@@ -103,7 +103,11 @@ def stub_chain(monkeypatch, tmp_path):
     monkeypatch.setattr(deploy, "git_commit", lambda root: "f" * 40)
     monkeypatch.setattr(deploy, "run", lambda *a, **k: "")  # forge build
     monkeypatch.setattr(deploy, "code_hash", lambda addr: "0x" + "cc" * 32)
-    monkeypatch.setattr(deploy, "build_migration", lambda *a, **k: None)
+    # A truthy stand-in for "migration ready": most of these tests care about
+    # facet/selectors handling, not migration content, but `proposed` is now
+    # only recorded when a migration is needed, so it must not be None here.
+    monkeypatch.setattr(deploy, "build_migration", lambda *a, **k: object())
+    monkeypatch.setattr(deploy, "deploy_migration", lambda *a, **k: {"address": "0x" + "dd" * 20})
     monkeypatch.setattr(deploy, "selectors_runtime", lambda *a, **k: None)
 
     log = {"deployed": []}
@@ -627,3 +631,42 @@ def test_run_deploy_records_migration(stub_chain, monkeypatch, tmp_path):
 
     proposed = json.loads(path.read_text())[0]["deployments"]["314"]["proposed"]
     assert proposed["migration"] == {"address": "0x" + "99" * 20}
+
+
+def test_run_deploy_omits_proposed_when_no_migration_needed(stub_chain, monkeypatch, tmp_path):
+    _resolve_to(monkeypatch, ["a.evm"])
+    monkeypatch.setattr(deploy, "build_migration", lambda *a, **k: None)
+    path = _write(tmp_path, [{"address": PROXY, "facetSrc": ["*.evm"]}])
+
+    deploy.run_deploy(path)
+
+    history = json.loads(path.read_text())[0]["deployments"]["314"]
+    assert "proposed" not in history
+
+
+def test_run_deploy_clears_stale_proposed_when_no_migration_needed(stub_chain, monkeypatch, tmp_path):
+    _resolve_to(monkeypatch, ["a.evm"])
+    monkeypatch.setattr(deploy, "build_migration", lambda *a, **k: None)
+    path = _write(
+        tmp_path,
+        [
+            {
+                "address": PROXY,
+                "facetSrc": ["*.evm"],
+                "deployments": {
+                    "314": {
+                        "proposed": {
+                            "gitCommit": "e" * 40,
+                            "facets": {"a.evm": {"address": "0x" + "ab" * 20, "codehash": "0x" + "11" * 32, "initcodeHash": "0x" + "00" * 32}},
+                            "migration": {"address": "0x" + "77" * 20},
+                        }
+                    }
+                },
+            }
+        ],
+    )
+
+    deploy.run_deploy(path)
+
+    history = json.loads(path.read_text())[0]["deployments"]["314"]
+    assert "proposed" not in history
