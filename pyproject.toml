@@ -1,6 +1,7 @@
 [project]
 name = "josuke"
 version = "0.0.1"
+requires-python = ">=3.10"
 dependencies = ["click", "click-spinner", "eth-abi", "eth-utils", "eth-hash[pycryptodome]", "requests"]
 
 [project.optional-dependencies]

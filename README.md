@@ -2,6 +2,29 @@
 
 Automated, verifiable upgrades for [ERC-8167](https://eips.ethereum.org/EIPS/eip-8167) modular dispatch proxies.
 
+## Installation
+
+josuke needs these on `PATH`:
+
+- Python 3.10+
+- [Foundry](https://getfoundry.sh)'s `forge`/`cast`
+- the [`evm`](https://github.com/wjmelements/evm) assembler/interpreter
+
+```
+# EVM assembler/interpreter
+git clone --recurse-submodules https://github.com/wjmelements/evm.git
+make -C evm bin/evm
+sudo install evm/bin/evm /usr/local/bin/evm
+
+# Foundry (forge, cast)
+curl -L https://foundry.paradigm.xyz | bash
+foundryup
+
+# josuke
+git clone https://github.com/wjmelements/josuke.git
+pip install ./josuke
+```
+
 ## CLI
 
 ```
