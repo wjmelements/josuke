@@ -12,6 +12,7 @@
                     "gitCommit": "e910ce4ca320c7c67e71af36b4a7bd2b2a76666a",
                     "facets": {
                         "lib/diamond-std/Admin.sol:Owned": {
+                            "address": "0x6666666666666666666666666666666666666666",
                             "codehash": "0x26ae26ae26ae26ae26ae26ae26ae26ae26ae26ae26ae26ae26ae26ae26ae26ae",
                             "initcodeHash": "0x0de10de10de10de10de10de10de10de10de10de10de10de10de10de10de10de1",
                             "constructorArgs": {
@@ -20,10 +21,12 @@
                             }
                         },
                         "lib/erc8169/implementation.evm": {
+                            "address": "0x7777777777777777777777777777777777777777",
                             "codehash": "0xdfb2e9cd33edb3ebcbde59c4734b88174fb1355b78a146dc8f94d40366691047",
                             "initcodeHash": "0x8169816981698169816981698169816981698169816981698169816981698169"
                         },
                         "src/facets/Bicameral.sol:BicameralGovernance": {
+                            "address": "0x8888888888888888888888888888888888888888",
                             "codehash": "0x1c9f1c9f1c9f1c9f1c9f1c9f1c9f1c9f1c9f1c9f1c9f1c9f1c9f1c9f1c9f1c9f",
                             "initcodeHash": "0x6a116a116a116a116a116a116a116a116a116a116a116a116a116a116a116a11",
                             "constructorArgs": {
@@ -37,6 +40,7 @@
                             }
                         },
                         "src/facets/Bicameral.sol:BicameralView": {
+                            "address": "0x9999999999999999999999999999999999999999",
                             "codehash": "0x37bf37bf37bf37bf37bf37bf37bf37bf37bf37bf37bf37bf37bf37bf37bf37bf",
                             "initcodeHash": "0x1e001e001e001e001e001e001e001e001e001e001e001e001e001e001e001e00",
                             "constructorArgs": {
@@ -45,6 +49,7 @@
                             }
                         },
                         "src/facets/Token.sol:Token": {
+                            "address": "0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
                             "codehash": "0x8642864286428642864286428642864286428642864286428642864286428642",
                             "initcodeHash": "0x70cc70cc70cc70cc70cc70cc70cc70cc70cc70cc70cc70cc70cc70cc70cc70cc",
                             "from": "0x4a6f6B9fF1fc974096f9063a45Fd12bD5B928AD1",
