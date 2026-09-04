@@ -1,7 +1,7 @@
 [project]
 name = "josuke"
 version = "0.0.1"
-dependencies = ["click", "eth-abi", "eth-utils", "eth-hash[pycryptodome]", "requests"]
+dependencies = ["click", "click-spinner", "eth-abi", "eth-utils", "eth-hash[pycryptodome]", "requests"]
 
 [project.optional-dependencies]
 test = ["pytest", "pytest-timeout"]

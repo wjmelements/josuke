@@ -4,6 +4,7 @@ from collections import namedtuple
 from os import environ
 
 import click
+import click_spinner
 from eth_abi import encode as abi_encode
 from eth_utils import keccak, to_checksum_address
 
@@ -158,11 +159,19 @@ def keccak_hex(data_hex: str) -> str:
 
 
 def deploy_initcode(initcode_hex: str, root: pathlib.Path) -> str:
-    """Broadcast a creation transaction via cast; return the new contract address."""
-    out = run(["cast", "send", "--create", "0x" + initcode_hex, "--json"], root)
+    """Broadcast a creation transaction via cast; return the new contract address.
+
+    Signs and sends with `--async` so the tx hash is available as soon as it's
+    known, then waits for the receipt separately with a spinner, since that's
+    the part that actually takes a while.
+    """
+    tx_hash = run(["cast", "send", "--async", "--create", "0x" + initcode_hex], root).strip()
+    click.echo(f"deploying: tx {tx_hash} pending...")
+    with click_spinner.spinner():
+        out = run(["cast", "receipt", tx_hash, "--json"], root)
     address = json.loads(out).get("contractAddress")
     if not address:
-        raise click.ClickException(f"cast send returned no contractAddress:\n{out}")
+        raise click.ClickException(f"cast receipt returned no contractAddress:\n{out}")
     return to_checksum_address(address)
 
 
