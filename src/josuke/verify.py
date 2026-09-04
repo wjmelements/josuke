@@ -17,7 +17,7 @@ from .deploy import (
 from .erc8167 import SELECTORS_SELECTOR
 from .ethjsonrpc import chain_id, eth_get_code
 from .ledger import load_ledger
-from .migration import SET_DELEGATE_SIZE, InvalidSetDelegate, SetDelegate
+from .migration import InvalidMigration, Migration
 from .proc import run
 from .selectors import Selector
 from .storage import ProxyStorage, slot_address as _slot_address
@@ -171,18 +171,11 @@ def verify_migration(
         return
 
     onchain = bytes.fromhex(eth_get_code(address).removeprefix("0x"))
-    if len(onchain) % SET_DELEGATE_SIZE:
-        report.fail(f"proposed.migration @{address}: {len(onchain)} bytes is not a whole number of SetDelegates")
+    try:
+        got = {sd.selector: sd for sd in Migration.decode(onchain).setdelegates}
+    except (InvalidMigration, KeyError):
+        report.fail(f"proposed.migration @{address}: on-chain code is not a recognized migration script")
         return
-
-    got = {}
-    for i in range(0, len(onchain), SET_DELEGATE_SIZE):
-        try:
-            fragment = SetDelegate.decode(onchain[i : i + SET_DELEGATE_SIZE])
-        except (InvalidSetDelegate, KeyError):
-            report.fail(f"proposed.migration @{address}: fragment at byte {i} is not a recognized SetDelegate")
-            continue
-        got[fragment.selector] = fragment
 
     want = {sd.selector: sd for sd in expected.setdelegates}
     for selector, sd in sorted(want.items()):

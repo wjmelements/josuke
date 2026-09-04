@@ -339,12 +339,9 @@ def test_build_migration_installs_every_proposed_selector(monkeypatch):
     }
 
     migration = deploy.build_migration(PROXY, facets, proposed_facets, {}, ".")
-    runtime = migration.encode()
+    from josuke.migration import Migration
 
-    assert len(runtime) == 2 * 100  # two SetDelegate fragments
-    from josuke.migration import SetDelegate
-
-    frags = [SetDelegate.decode(runtime[i : i + 100]) for i in (0, 100)]
+    frags = Migration.decode(migration.encode()).setdelegates
     assert {f.selector for f in frags} == {"0x11111111", "0x22222222"}
     assert {f.delegate.address for f in frags} == {A1, B2}
 
@@ -367,10 +364,9 @@ def test_build_migration_zeroes_dropped_selectors(monkeypatch):
     current = {"facets": {"keep.sol:Keep": {}, "old.sol:Old": {}}}
 
     migration = deploy.build_migration(PROXY, facets, proposed_facets, current, ".")
-    from josuke.migration import SetDelegate
+    from josuke.migration import Migration
 
-    runtime = migration.encode()
-    frags = [SetDelegate.decode(runtime[i : i + 100]) for i in range(0, len(runtime), 100)]
+    frags = Migration.decode(migration.encode()).setdelegates
     by_sel = {f.selector: f for f in frags}
     assert by_sel["0x99999999"].delegate.address.lower() == deploy.ZERO_ADDRESS
     assert by_sel["0x11111111"].delegate.address == A1
@@ -420,7 +416,7 @@ def test_build_migration_rejects_duplicate_storage_slot(monkeypatch):
 
 def test_build_migration_routes_generated_selectors(monkeypatch):
     from josuke.erc8167 import SELECTORS_SELECTOR
-    from josuke.migration import SetDelegate
+    from josuke.migration import Migration
 
     monkeypatch.setattr(deploy, "ProxyStorage", FakeStorage)
     monkeypatch.setattr(deploy, "facet_selectors", lambda facet, root: [_sel("0x11111111")])
@@ -430,11 +426,7 @@ def test_build_migration_routes_generated_selectors(monkeypatch):
     migration = deploy.build_migration(
         PROXY, facets, proposed_facets, {}, ".", selectors_impl={"address": B2}
     )
-    runtime = migration.encode()
-    frags = {
-        SetDelegate.decode(runtime[i : i + 100]).selector: SetDelegate.decode(runtime[i : i + 100])
-        for i in range(0, len(runtime), 100)
-    }
+    frags = {sd.selector: sd for sd in Migration.decode(migration.encode()).setdelegates}
     assert frags[SELECTORS_SELECTOR].delegate.address == B2
 
 

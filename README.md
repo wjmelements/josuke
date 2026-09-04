@@ -28,7 +28,9 @@ itself), deploys it with the `evm -C` universal constructor, and records it unde
 
 It then builds the migration script: one `SelectorDelegated` + `SSTORE` per
 selector, pointing each at its facet and zeroing any selector dropped since
-`current`. Per-selector storage slots come from simulating a dispatch call
+`current`. Selectors are grouped by facet so the event signature is pushed once
+and each facet address once, roughly halving the script's codesize.
+Per-selector storage slots come from simulating a dispatch call
 against the live proxy with `evm -nx`; selectors come from each facet's ABI. The
 script is deployed with the `evm -C` universal constructor unless an identical one
 is already recorded under `proposed`.

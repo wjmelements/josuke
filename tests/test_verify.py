@@ -12,7 +12,7 @@ import pytest
 from eth_utils import to_checksum_address
 
 from josuke import deploy, verify
-from josuke.migration import SET_DELEGATE_SIZE
+from josuke.migration import Migration
 
 PROXY = "0x2222222222222222222222222222222222222222"
 A1 = to_checksum_address("0x" + "a1" * 20)
@@ -230,15 +230,46 @@ def test_verify_migration_passes_for_recomputed_bytecode(monkeypatch):
     assert report.failures == []
 
 
+def test_verify_migration_passes_multi_facet_multi_selector(monkeypatch):
+    # facet A serves two selectors (a NORMAL block then the group's FINAL block),
+    # facet B one (a lone FINAL block) — exercises both block shapes and the
+    # group-to-group transition on the passing path.
+    _migration_setup(monkeypatch, {
+        "a.sol:A": [_sel("0x11111111"), _sel("0x33333333")],
+        "b.sol:B": [_sel("0x22222222")],
+    })
+    proposed = _state({"a.sol:A": {"address": A1}, "b.sol:B": {"address": B2}})
+    storage = _fetched_storage(["0x11111111", "0x33333333", "0x22222222"])
+    facets = [deploy.facet_from_source_id("a.sol:A"), deploy.facet_from_source_id("b.sol:B")]
+    expected = deploy.build_migration(PROXY, facets, proposed["facets"], {}, ".", storage=storage)
+    assert len({sd.delegate.address for sd in expected.setdelegates}) == 2  # two groups
+    monkeypatch.setattr(verify, "eth_get_code", lambda address: "0x" + expected.encode().hex())
+
+    report = _report()
+    verify.verify_migration(PROXY, {**proposed, "migration": {"address": OLD}}, {}, storage, ".", report)
+    assert report.failures == []
+
+
+def test_verify_migration_flags_unrecognized_bytecode(monkeypatch):
+    _migration_setup(monkeypatch, {"a.sol:A": [_sel("0x11111111")]})
+    proposed = _state({"a.sol:A": {"address": A1}})
+    storage = _fetched_storage(["0x11111111"])
+    monkeypatch.setattr(verify, "eth_get_code", lambda address: "0x" + "60" * 40)
+
+    report = _report()
+    verify.verify_migration(PROXY, {**proposed, "migration": {"address": OLD}}, {}, storage, ".", report)
+    assert any("not a recognized migration script" in f for f in report.failures)
+
+
 def test_verify_migration_flags_missing_install(monkeypatch):
     _migration_setup(monkeypatch, {"a.sol:A": [_sel("0x11111111")], "b.sol:B": [_sel("0x22222222")]})
     proposed = _state({"a.sol:A": {"address": A1}, "b.sol:B": {"address": B2}})
     storage = _fetched_storage(["0x11111111", "0x22222222"])
     facets = [deploy.facet_from_source_id("a.sol:A"), deploy.facet_from_source_id("b.sol:B")]
     expected = deploy.build_migration(PROXY, facets, proposed["facets"], {}, ".", storage=storage)
-    # on-chain migration only carries the first fragment
-    onchain = expected.encode()[:SET_DELEGATE_SIZE]
-    monkeypatch.setattr(verify, "eth_get_code", lambda address: "0x" + onchain.hex())
+    # on-chain migration only carries the route for 0x11111111
+    partial = Migration([sd for sd in expected.setdelegates if sd.selector == "0x11111111"])
+    monkeypatch.setattr(verify, "eth_get_code", lambda address: "0x" + partial.encode().hex())
 
     report = _report()
     verify.verify_migration(PROXY, {**proposed, "migration": {"address": OLD}}, {}, storage, ".", report)
@@ -258,8 +289,6 @@ def test_verify_migration_flags_unzeroed_removal(monkeypatch):
     facets = [deploy.facet_from_source_id("keep.sol:Keep")]
     expected = deploy.build_migration(PROXY, facets, proposed["facets"], current, ".", storage=storage)
     # drop the zeroing fragment (the one whose delegate is the zero address)
-    from josuke.migration import Migration
-
     kept = [sd for sd in expected.setdelegates if sd.delegate.address != verify.ZERO_ADDRESS]
     monkeypatch.setattr(verify, "eth_get_code", lambda address: "0x" + Migration(kept).encode().hex())
 
