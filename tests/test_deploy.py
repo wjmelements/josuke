@@ -121,10 +121,12 @@ def stub_chain(monkeypatch, tmp_path):
         counter[0] += 1
         addr = "0x" + f"{counter[0]:040x}"
         log["deployed"].append(initcode_hex)
-        return addr
+        return addr, DEPLOYER
 
     monkeypatch.setattr(deploy, "facet_initcode", fake_initcode)
     monkeypatch.setattr(deploy, "deploy_initcode", fake_deploy)
+    # differential replay needs a live `evm`/RPC; default to "sender-independent"
+    monkeypatch.setattr(deploy, "deployer_derived", lambda initcode, sender: False)
     return log
 
 
@@ -143,6 +145,7 @@ def _resolve_to(monkeypatch, source_ids):
 
 
 PROXY = "0x2222222222222222222222222222222222222222"
+DEPLOYER = to_checksum_address("0x" + "de" * 20)  # cast-receipt `from`, per fake_deploy
 
 
 def test_run_deploy_first_time_deploys_all_into_proposed(stub_chain, monkeypatch, tmp_path):
@@ -312,6 +315,27 @@ def test_run_deploy_carries_from_forward_on_redeploy(stub_chain, monkeypatch, tm
     facet = json.loads(path.read_text())[0]["deployments"]["314"]["proposed"]["facets"]["a.evm"]
     assert facet["address"] == "0x" + f"{1:040x}"  # actually redeployed
     assert facet["from"] == deployer
+
+
+def test_run_deploy_records_from_when_runtime_depends_on_sender(stub_chain, monkeypatch, tmp_path):
+    _resolve_to(monkeypatch, ["a.evm"])
+    monkeypatch.setattr(deploy, "deployer_derived", lambda initcode, sender: True)
+    path = _write(tmp_path, [{"address": PROXY, "facetSrc": ["*.evm"]}])
+
+    deploy.run_deploy(path)
+
+    facet = json.loads(path.read_text())[0]["deployments"]["314"]["proposed"]["facets"]["a.evm"]
+    assert facet["from"] == DEPLOYER  # the actual cast-receipt sender, not a recorded value
+
+
+def test_run_deploy_omits_from_when_runtime_is_sender_independent(stub_chain, monkeypatch, tmp_path):
+    _resolve_to(monkeypatch, ["a.evm"])  # stub_chain defaults deployer_derived -> False
+    path = _write(tmp_path, [{"address": PROXY, "facetSrc": ["*.evm"]}])
+
+    deploy.run_deploy(path)
+
+    facet = json.loads(path.read_text())[0]["deployments"]["314"]["proposed"]["facets"]["a.evm"]
+    assert "from" not in facet
 
 
 def test_run_deploy_verifies_new_sol_facets_on_sourcify(stub_chain, monkeypatch, tmp_path):
@@ -636,7 +660,7 @@ def test_deploy_migration_deploys_when_no_prior(monkeypatch):
 
     def fake_deploy(initcode, root):
         seen["initcode"] = initcode
-        return "0x" + "77" * 20
+        return "0x" + "77" * 20, DEPLOYER
 
     monkeypatch.setattr(deploy, "deploy_initcode", fake_deploy)
 

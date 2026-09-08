@@ -1,8 +1,10 @@
 import json
 import pathlib
 import subprocess
+from os import environ
 
 import click
+from requests import post
 
 from .proc import run
 
@@ -29,6 +31,108 @@ def execute(initcode_hex: str, sender: str | None = None) -> str:
         capture_output=True,
         check=True,
     ).stdout.strip()
+
+
+class EvmRelay:
+    """A running ``evm -nx``. Feed it eth_call-shaped requests with :meth:`call`;
+    the JSON-RPC state fetches it emits on stdout are forwarded to ``ETH_RPC_URL``
+    and its result line is returned.
+
+    Every RPC result is memoised by ``(method, params)`` in ``cache`` (a dict you
+    may pass in to share across relays), so repeated reads — and repeated runs
+    over the same initcode, in this process or the next — hit the node once. Use
+    as a context manager so the process is always reaped."""
+
+    def __init__(self, cache: dict | None = None):
+        self.cache = {} if cache is None else cache
+        self._proc = subprocess.Popen(
+            ["evm", "-nx"],
+            stdin=subprocess.PIPE,
+            stdout=subprocess.PIPE,
+            text=True,
+            bufsize=1,
+        )
+
+    def call(self, request: dict, on_exchange=None) -> str:
+        """Run one request (a ``{"data": ...}`` create or a ``{"to": ...}`` call)
+        and return evm's output line: the runtime hex for a create, ``""`` on a
+        revert. ``on_exchange(rpc_request, rpc_response)`` sees every request/
+        response pair, cache hits included."""
+        self._write(json.dumps(request))
+        while True:
+            line = self._proc.stdout.readline()
+            if line == "":
+                raise click.ClickException("evm -nx exited before returning a result")
+            line = line.strip()
+            if line[:1] not in ("{", "["):
+                return line
+            rpc_request = json.loads(line)
+            rpc_response = self._answer(rpc_request)
+            self._write(json.dumps(rpc_response))
+            if on_exchange is not None:
+                on_exchange(rpc_request, rpc_response)
+
+    def _answer(self, rpc_request):
+        """Resolve one JSON-RPC request (object or batch array) from the cache,
+        fetching only the misses from ``ETH_RPC_URL``."""
+        batch = rpc_request if isinstance(rpc_request, list) else [rpc_request]
+        answers = [None] * len(batch)
+        misses = []
+        for i, req in enumerate(batch):
+            key = (req["method"], json.dumps(req.get("params", [])))
+            if key in self.cache:
+                answers[i] = {"jsonrpc": "2.0", "id": req.get("id"), "result": self.cache[key]}
+            else:
+                misses.append((i, req, key))
+        if misses:
+            payload = [req for _, req, _ in misses]
+            response = post(environ["ETH_RPC_URL"], json=payload if isinstance(rpc_request, list) else payload[0])
+            if response.status_code != 200:
+                raise click.ClickException(f"ETH_RPC_URL: HTTP {response.status_code}")
+            fetched = json.loads(response.text)
+            by_id = {r.get("id"): r for r in (fetched if isinstance(fetched, list) else [fetched])}
+            for i, req, key in misses:
+                answer = by_id[req.get("id")]
+                if "result" in answer:
+                    self.cache[key] = answer["result"]
+                answers[i] = answer
+        return answers if isinstance(rpc_request, list) else answers[0]
+
+    def _write(self, line: str) -> None:
+        self._proc.stdin.write(line + "\n")
+        self._proc.stdin.flush()
+
+    def close(self) -> None:
+        self._proc.terminate()
+        self._proc.wait()
+        self._proc.stdin.close()
+        self._proc.stdout.close()
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *exc):
+        self.close()
+
+
+# A throwaway sender to contrast the real deployer against (and a spare, for the
+# improbable case the real deployer is the first one).
+_PROBE_SENDERS = ("0x" + "11" * 20, "0x" + "22" * 20)
+
+
+def deployer_derived(initcode_hex: str, deployer: str) -> bool:
+    """True when the deployed runtime depends on the constructor's msg.sender (an
+    immutable set from the deployer, and the like), so `from` must be recorded.
+
+    Replays ``initcode_hex`` as a create twice in one ``evm -nx`` process — once
+    as the real ``deployer``, once as a probe address — so chain state is fetched
+    once and frozen for both, and any difference in the returned runtime is the
+    sender alone."""
+    probe = next(s for s in _PROBE_SENDERS if s != deployer.lower())
+    with EvmRelay() as relay:
+        actual = relay.call({"from": deployer, "data": initcode_hex})
+        probed = relay.call({"from": probe, "data": initcode_hex})
+    return actual != probed
 
 
 def _governing_makefile(source: pathlib.Path, root: pathlib.Path) -> pathlib.Path | None:

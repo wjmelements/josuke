@@ -1,14 +1,28 @@
-"""Tests for josuke.evm's .evm-facet artifact build."""
+"""Tests for josuke.evm's .evm-facet artifact build and the `evm -nx` relay."""
 
 import json
+import pathlib
 import shutil
+import subprocess
 import textwrap
+from unittest.mock import patch
 
 import click
 import pytest
 
+from ethrpc_mock import MockEthRpc
 from josuke import evm
-from josuke.evm import _governing_makefile, evm_artifact
+from josuke.evm import EvmRelay, _governing_makefile, deployer_derived, evm_artifact
+
+FIXTURE_ROOT = pathlib.Path(__file__).parent / "fixtures" / "forge-project"
+
+
+def _initcode(contract: str) -> str:
+    out = subprocess.run(
+        ["forge", "inspect", f"src/{contract}.sol:{contract}", "bytecode"],
+        cwd=FIXTURE_ROOT, text=True, capture_output=True, check=True,
+    ).stdout.strip()
+    return out.removeprefix("0x")
 
 ARTIFACT = {
     "bytecode": {"object": "0xdeadbeef"},
@@ -97,3 +111,55 @@ def test_evm_artifact_without_abi_raises(tmp_path):
     )
     with pytest.raises(click.ClickException, match="no ABI"):
         evm_artifact(src / "Impl.evm", tmp_path)
+
+
+# -- EvmRelay / deployer_derived -------------------------------------------
+
+needs_evm = pytest.mark.skipif(
+    shutil.which("evm") is None or shutil.which("forge") is None,
+    reason="requires the `evm` and `forge` binaries",
+)
+
+DEPLOYER = "0x" + "aa" * 20
+
+
+@pytest.fixture
+def eth_rpc(monkeypatch):
+    monkeypatch.setenv("ETH_RPC_URL", "http://mock.rpc/test")
+    rpc = MockEthRpc()
+    with patch("josuke.evm.post", rpc):
+        yield rpc
+
+
+@needs_evm
+def test_deployer_derived_true_when_constructor_reads_sender(eth_rpc):
+    assert deployer_derived(_initcode("FromDeployer"), DEPLOYER) is True
+
+
+@needs_evm
+def test_deployer_derived_false_without_a_constructor(eth_rpc):
+    assert deployer_derived(_initcode("NoArgs"), DEPLOYER) is False
+
+
+@needs_evm
+def test_evm_relay_caches_rpc_results_across_processes(eth_rpc):
+    initcode = _initcode("NoArgs")
+    cache = {}
+    with EvmRelay(cache=cache) as relay:
+        relay.call({"from": DEPLOYER, "data": initcode})
+    first = len(eth_rpc.calls)
+    with EvmRelay(cache=cache) as relay:  # identical run, shared cache
+        relay.call({"from": DEPLOYER, "data": initcode})
+    assert len(eth_rpc.calls) == first  # every request served from the cache
+
+
+@needs_evm
+def test_evm_relay_reports_exchanges(eth_rpc):
+    seen = []
+    with EvmRelay() as relay:
+        relay.call(
+            {"from": DEPLOYER, "data": _initcode("NoArgs")},
+            on_exchange=lambda req, resp: seen.append(req),
+        )
+    methods = {r["method"] for batch in seen for r in (batch if isinstance(batch, list) else [batch])}
+    assert "eth_blockNumber" in methods and "eth_getCode" in methods

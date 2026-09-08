@@ -11,7 +11,7 @@ from eth_utils import keccak, to_checksum_address
 from .delegate import ContractSource, Delegate
 from .erc8167 import SELECTORS_SELECTOR, generated_selectors, selectors_method
 from .ethjsonrpc import chain_id, eth_get_code
-from .evm import evm_artifact
+from .evm import deployer_derived, evm_artifact
 from .forge import get_forge_config
 from .ledger import load_ledger, write_ledger
 from .migration import Migration, SetDelegate
@@ -158,8 +158,9 @@ def keccak_hex(data_hex: str) -> str:
     return "0x" + keccak(bytes.fromhex(data_hex.removeprefix("0x"))).hex()
 
 
-def deploy_initcode(initcode_hex: str, root: pathlib.Path) -> str:
-    """Broadcast a creation transaction via cast; return the new contract address.
+def deploy_initcode(initcode_hex: str, root: pathlib.Path) -> tuple[str, str]:
+    """Broadcast a creation transaction via cast; return `(contract address,
+    sender address)`, both checksummed.
 
     Signs and sends with `--async` so the tx hash is available as soon as it's
     known, then waits for the receipt separately with a spinner, since that's
@@ -169,10 +170,11 @@ def deploy_initcode(initcode_hex: str, root: pathlib.Path) -> str:
     click.echo(f"deploying: tx {tx_hash} pending...")
     with click_spinner.spinner():
         out = run(["cast", "receipt", tx_hash, "--json"], root)
-    address = json.loads(out).get("contractAddress")
+    receipt = json.loads(out)
+    address = receipt.get("contractAddress")
     if not address:
         raise click.ClickException(f"cast receipt returned no contractAddress:\n{out}")
-    return to_checksum_address(address)
+    return to_checksum_address(address), to_checksum_address(receipt["from"])
 
 
 def code_hash(address: str) -> str:
@@ -316,7 +318,7 @@ def deploy_migration(migration: Migration, prior: dict, root: pathlib.Path) -> d
 
     initcode = universal_constructor() + runtime.hex()
     click.echo("deploying migration")
-    return {"address": deploy_initcode(initcode, root)}
+    return {"address": deploy_initcode(initcode, root)[0]}
 
 
 def deploy_selectors_impl(
@@ -331,7 +333,7 @@ def deploy_selectors_impl(
 
     initcode = universal_constructor() + runtime.hex()
     click.echo("deploying selectors()")
-    return {"address": deploy_initcode(initcode, root)}
+    return {"address": deploy_initcode(initcode, root)[0]}
 
 
 # -- orchestration ------------------------------------------------------
@@ -383,7 +385,7 @@ def run_deploy(ledger_path, redeploy_all: bool = False):
                     continue
 
             click.echo(f"deploying {facet.source_id}")
-            address = deploy_initcode(initcode, root)
+            address, sender = deploy_initcode(initcode, root)
             if facet.kind == "sol":
                 verify_sourcify(facet, address, chain, root)
             facet_entry = {
@@ -393,7 +395,9 @@ def run_deploy(ledger_path, redeploy_all: bool = False):
             }
             if args:
                 facet_entry["constructorArgs"] = args
-            if recorded.get("from"):
+            if deployer_derived(initcode, sender):
+                facet_entry["from"] = sender  # runtime depends on sender
+            elif recorded.get("from"):
                 facet_entry["from"] = recorded["from"]
             proposed_facets[facet.source_id] = facet_entry
             deployed += 1

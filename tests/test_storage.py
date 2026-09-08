@@ -42,11 +42,11 @@ ABI = [
 
 @pytest.fixture
 def eth_rpc(monkeypatch):
-    # Patches `josuke.storage.post` and provides ETH_RPC_URL.
+    # Patches the RPC `post` used by the `EvmRelay` behind ProxyStorage.fetch.
     monkeypatch.setenv("ETH_RPC_URL", "http://mock.rpc/test")
     rpc = MockEthRpc(block_number=BLOCK_NUMBER)
     rpc.set_code(PROXY_ADDRESS, PROXY_CODE)
-    with patch("josuke.storage.post", rpc):
+    with patch("josuke.evm.post", rpc):
         yield rpc
 
 
