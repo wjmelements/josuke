@@ -5,6 +5,7 @@ against fabricated ledger states, a fake ProxyStorage, and a fake eth_getCode.
 """
 
 import json
+import pathlib
 import shutil
 import subprocess
 
@@ -82,30 +83,104 @@ def _state(facets, commit="c0"):
     return {"gitCommit": commit, "facets": facets}
 
 
-def test_verify_facets_flags_initcode_and_codehash(monkeypatch):
-    monkeypatch.setattr(verify, "facet_initcode", lambda f, root, args, prompt: ("dead", None))
-    monkeypatch.setattr(verify, "keccak_hex", lambda h: "0x" + "11" * 32)
-    monkeypatch.setattr(verify, "_onchain_codehash", lambda addr: "0x" + "99" * 32)
+# keccak_hex over the fake initcode "ic" / replayed runtime "rt" the stubs below emit.
+_HASHES = {"ic": "0xICHASH", "rt": "0xRTHASH"}
 
-    state = _state({
-        "a.sol:A": {"address": A1, "initcodeHash": "0x" + "11" * 32, "codehash": "0x" + "22" * 32},
-    })
+
+def _stub_facet_checks(monkeypatch, runtime="rt"):
+    monkeypatch.setattr(verify, "facet_initcode", lambda f, root, args, prompt: ("ic", None))
+    monkeypatch.setattr(verify, "_replay_runtime", lambda initcode, sender, cache: runtime)
+    monkeypatch.setattr(verify, "keccak_hex", lambda h: _HASHES.get(h, "0x" + h))
+    monkeypatch.setattr(verify, "_onchain_codehash", lambda addr: "0xRTHASH")
+
+
+def test_verify_facets_flags_initcode_hash(monkeypatch):
+    _stub_facet_checks(monkeypatch)
+    state = _state({"a.sol:A": {"address": A1, "initcodeHash": "0xWRONG", "codehash": "0xRTHASH"}})
     report = _report()
     verify.verify_facets(state, "current", ".", report)
 
     assert len(report.failures) == 1
-    assert "codehash" in report.failures[0]
+    assert "initcodeHash" in report.failures[0]
+
+
+def test_verify_facets_flags_codehash_forged_against_source(monkeypatch):
+    # initcodeHash right, on-chain code matches the recorded codehash, but the
+    # runtime rebuilt from source does not: a forged codehash.
+    _stub_facet_checks(monkeypatch)
+    monkeypatch.setattr(verify, "_onchain_codehash", lambda addr: "0xFORGED")
+    state = _state({"a.sol:A": {"address": A1, "initcodeHash": "0xICHASH", "codehash": "0xFORGED"}})
+    report = _report()
+    verify.verify_facets(state, "current", ".", report)
+
+    assert len(report.failures) == 1
+    assert "rebuilt from source" in report.failures[0]
+
+
+def test_verify_facets_replays_from_recorded_sender(monkeypatch):
+    _stub_facet_checks(monkeypatch)
+    seen = {}
+    monkeypatch.setattr(
+        verify, "_replay_runtime",
+        lambda initcode, sender, cache: seen.setdefault("sender", sender) or "rt",
+    )
+    state = _state({"a.sol:A": {"address": A1, "initcodeHash": "0xICHASH", "codehash": "0xRTHASH", "from": A1}})
+    verify.verify_facets(state, "current", ".", _report())
+
+    assert seen["sender"] == A1
+
+
+def test_verify_facets_passes_clean(monkeypatch):
+    _stub_facet_checks(monkeypatch)
+    state = _state({"a.sol:A": {"address": A1, "initcodeHash": "0xICHASH", "codehash": "0xRTHASH"}})
+    report = _report()
+    verify.verify_facets(state, "current", ".", report)
+
+    assert report.failures == []
 
 
 def test_verify_facets_flags_missing_address(monkeypatch):
-    monkeypatch.setattr(verify, "facet_initcode", lambda f, root, args, prompt: ("dead", None))
-    monkeypatch.setattr(verify, "keccak_hex", lambda h: "0xok")
-
-    state = _state({"a.sol:A": {"initcodeHash": "0xok", "codehash": "0xwhatever"}})
+    _stub_facet_checks(monkeypatch)
+    state = _state({"a.sol:A": {"initcodeHash": "0xICHASH", "codehash": "0xRTHASH"}})
     report = _report()
     verify.verify_facets(state, "proposed", ".", report)
 
     assert report.failures == [f"{PROXY} proposed a.sol:A: no recorded address; cannot check deployed code"]
+
+
+@pytest.mark.skipif(
+    shutil.which("evm") is None or shutil.which("forge") is None,
+    reason="requires the `evm` and `forge` binaries",
+)
+def test_verify_facets_rebuilds_runtime_from_source(monkeypatch):
+    """End-to-end: real `forge inspect` + real `evm -nx` against a mock node."""
+    from unittest.mock import patch
+
+    from ethrpc_mock import MockEthRpc
+
+    monkeypatch.setenv("ETH_RPC_URL", "http://mock.rpc/test")
+    root = pathlib.Path(__file__).parent / "fixtures" / "forge-project"
+    source_id = "src/FromDeployer.sol:FromDeployer"  # bakes msg.sender into an immutable
+    deployer = to_checksum_address("0x" + "ab" * 20)
+
+    facet = deploy.facet_from_source_id(source_id)
+    initcode, _ = deploy.facet_initcode(facet, root, None, prompt=False)
+    with patch("josuke.evm.post", MockEthRpc()):
+        true_codehash = verify.keccak_hex(verify._replay_runtime(initcode, deployer, {}))
+
+    def check(codehash, sender, onchain):
+        rec = {"address": A1, "initcodeHash": verify.keccak_hex(initcode), "codehash": codehash, "from": sender}
+        monkeypatch.setattr(verify, "_onchain_codehash", lambda addr: onchain)
+        report = _report()
+        with patch("josuke.evm.post", MockEthRpc()):
+            verify.verify_facets(_state({source_id: rec}), "current", root, report)
+        return report.failures
+
+    assert check(true_codehash, deployer, true_codehash) == []
+    # codehash forged to match tampered on-chain code — the source rebuild catches it
+    assert any("rebuilt from source" in f for f in check("0xFORGED", deployer, "0xFORGED"))
+    # `from` dropped: constructor replays from zero, immutable differs, caught
+    assert any("rebuilt from source" in f for f in check(true_codehash, None, true_codehash))
 
 
 # -- verify_proposed_set ----------------------------------------------------
@@ -370,6 +445,7 @@ def stub_trees(monkeypatch):
     monkeypatch.setattr(verify, "SourceTrees", lambda root: Trees())
     monkeypatch.setattr(verify, "chain_id", lambda: "314")
     monkeypatch.setattr(verify, "ProxyStorage", FakeStorage)
+    monkeypatch.setattr(verify, "_replay_runtime", lambda initcode, sender, cache: "")
 
 
 def test_run_verify_requires_rpc_url(monkeypatch, tmp_path):

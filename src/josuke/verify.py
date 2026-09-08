@@ -16,6 +16,7 @@ from .deploy import (
 )
 from .erc8167 import SELECTORS_SELECTOR
 from .ethjsonrpc import chain_id, eth_get_code
+from .evm import EvmRelay
 from .ledger import load_ledger
 from .migration import InvalidMigration, Migration
 from .proc import run
@@ -71,7 +72,19 @@ def _onchain_codehash(address: str) -> str:
     return keccak_hex(eth_get_code(address))
 
 
-def verify_facets(state: dict, label: str, tree: pathlib.Path, report: Report) -> None:
+def _replay_runtime(initcode: str, sender: str | None, cache: dict | None) -> str:
+    """The runtime bytecode `initcode`'s constructor leaves on chain, replayed
+    against live state (as `sender`, when an immutable is derived from it)."""
+    request = {"data": initcode}
+    if sender:
+        request["from"] = sender
+    with EvmRelay(cache=cache) as relay:
+        return relay.call(request)
+
+
+def verify_facets(
+    state: dict, label: str, tree: pathlib.Path, report: Report, rpc_cache: dict | None = None
+) -> None:
     """Each recorded facet is built from `state`'s commit and live on chain."""
     for source_id, rec in state["facets"].items():
         facet = facet_from_source_id(source_id)
@@ -79,6 +92,13 @@ def verify_facets(state: dict, label: str, tree: pathlib.Path, report: Report) -
         got = keccak_hex(initcode)
         if got != rec["initcodeHash"]:
             report.fail(f"{label} {source_id}: initcodeHash {got} != recorded {rec['initcodeHash']}")
+
+        # Rebuild the runtime from source and hash that too. The check above only
+        # ties the initcode to source; without this, a codehash recorded to match
+        # tampered on-chain code would pass.
+        got = keccak_hex(_replay_runtime(initcode, rec.get("from"), rpc_cache))
+        if got != rec["codehash"]:
+            report.fail(f"{label} {source_id}: codehash {got} rebuilt from source != recorded {rec['codehash']}")
 
         address = rec.get("address")
         if address is None:
@@ -203,6 +223,7 @@ def run_verify(ledger_path):
     chain = chain_id()
     report = Report()
     verified: list[str] = []
+    rpc_cache: dict = {}  # shared across every facet replay for the run
 
     with SourceTrees(root) as trees:
         for entry in ledger:
@@ -230,7 +251,7 @@ def run_verify(ledger_path):
             if current:
                 tree = trees.get(current["gitCommit"])
                 before = len(report.failures)
-                verify_facets(current, "current", tree, report)
+                verify_facets(current, "current", tree, report, rpc_cache)
                 verify_dispatch(current, storage, tree, report)
                 verify_selectors(current, "current", tree, report)
                 if len(report.failures) == before:
@@ -239,7 +260,7 @@ def run_verify(ledger_path):
 
             if proposed:
                 tree = trees.get(proposed["gitCommit"])
-                verify_facets(proposed, "proposed", tree, report)
+                verify_facets(proposed, "proposed", tree, report, rpc_cache)
                 verify_proposed_set(entry["facetSrc"], proposed, tree, report)
                 verify_selectors(proposed, "proposed", tree, report)
                 if "migration" in proposed:
