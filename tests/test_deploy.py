@@ -279,6 +279,41 @@ def test_run_deploy_records_constructor_args(stub_chain, monkeypatch, tmp_path):
     assert facet["constructorArgs"] == {"owner": "0x" + "12" * 20}
 
 
+def test_run_deploy_carries_from_forward_on_redeploy(stub_chain, monkeypatch, tmp_path):
+    _resolve_to(monkeypatch, ["a.evm"])
+    deployer = "0x" + "4a" * 20
+    path = _write(
+        tmp_path,
+        [
+            {
+                "address": PROXY,
+                "facetSrc": ["*.evm"],
+                "deployments": {
+                    "314": {
+                        "current": {
+                            "gitCommit": "e" * 40,
+                            "facets": {
+                                "a.evm": {
+                                    "address": "0x" + "ab" * 20,
+                                    "codehash": "0x" + "11" * 32,
+                                    "initcodeHash": "0x" + "00" * 32,  # forces redeploy
+                                    "from": deployer,
+                                }
+                            },
+                        }
+                    }
+                },
+            }
+        ],
+    )
+
+    deploy.run_deploy(path)
+
+    facet = json.loads(path.read_text())[0]["deployments"]["314"]["proposed"]["facets"]["a.evm"]
+    assert facet["address"] == "0x" + f"{1:040x}"  # actually redeployed
+    assert facet["from"] == deployer
+
+
 def test_run_deploy_verifies_new_sol_facets_on_sourcify(stub_chain, monkeypatch, tmp_path):
     monkeypatch.setattr(
         deploy, "resolve_facets", lambda facet_src, root: [_facet("a.sol:A")]

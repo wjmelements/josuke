@@ -393,6 +393,8 @@ def run_deploy(ledger_path, redeploy_all: bool = False):
             }
             if args:
                 facet_entry["constructorArgs"] = args
+            if recorded.get("from"):
+                facet_entry["from"] = recorded["from"]
             proposed_facets[facet.source_id] = facet_entry
             deployed += 1
 
