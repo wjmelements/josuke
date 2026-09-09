@@ -350,6 +350,8 @@ def run_deploy(ledger_path, redeploy_all: bool = False):
 
     run(["forge", "build"], root)
 
+    run_deployed: dict[str, dict] = {}  # initcodeHash -> facet entry, shared across proxies this run
+
     for entry in ledger:
         proxy = to_checksum_address(entry["address"])
         deployments = entry.setdefault("deployments", {})
@@ -379,10 +381,18 @@ def run_deploy(ledger_path, redeploy_all: bool = False):
             if not redeploy_all:
                 if live and live.get("initcodeHash") == initcode_hash:
                     proposed_facets[facet.source_id] = live
+                    run_deployed.setdefault(initcode_hash, live)
                     continue
                 if staged and staged.get("initcodeHash") == initcode_hash and staged.get("address"):
                     proposed_facets[facet.source_id] = staged
+                    run_deployed.setdefault(initcode_hash, staged)
                     continue
+
+            shared = run_deployed.get(initcode_hash)
+            if shared and shared.get("address"):
+                click.echo(f"reusing {shared['address']} for {facet.source_id}")
+                proposed_facets[facet.source_id] = shared
+                continue
 
             click.echo(f"deploying {facet.source_id}")
             address, sender = deploy_initcode(initcode, root)
@@ -400,6 +410,7 @@ def run_deploy(ledger_path, redeploy_all: bool = False):
             elif recorded.get("from"):
                 facet_entry["from"] = recorded["from"]
             proposed_facets[facet.source_id] = facet_entry
+            run_deployed.setdefault(initcode_hash, facet_entry)
             deployed += 1
 
         proposed = {"gitCommit": commit, "facets": proposed_facets}

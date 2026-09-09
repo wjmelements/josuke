@@ -42,7 +42,8 @@ unchanged.
 For each proxy, `deploy` resolves `facetSrc`, builds each facet's init bytecode
 from `HEAD` (reusing recorded `constructorArgs`, prompting for any that are
 missing), and deploys only those whose bytecode differs from what `current`
-records for that chain.
+records for that chain. When two proxies resolve to the same init bytecode, it
+is deployed once and both proxies point at that address.
 
 When no facet in the set implements ERC-8167 `selectors()`, `deploy` generates
 that method from the full selector set (every facet selector plus `selectors()`

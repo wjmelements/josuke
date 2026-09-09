@@ -249,6 +249,25 @@ def test_run_deploy_is_idempotent_before_promotion(stub_chain, monkeypatch, tmp_
     assert len(stub_chain["deployed"]) == 2  # no new transactions
 
 
+def test_run_deploy_shares_one_deployment_across_proxies(stub_chain, monkeypatch, tmp_path):
+    _resolve_to(monkeypatch, ["shared.evm"])
+    path = _write(
+        tmp_path,
+        [
+            {"address": PROXY, "facetSrc": ["*.evm"]},
+            {"address": "0x" + "33" * 20, "facetSrc": ["*.evm"]},
+        ],
+    )
+
+    deploy.run_deploy(path)
+
+    entries = json.loads(path.read_text())
+    a = entries[0]["deployments"]["314"]["proposed"]["facets"]["shared.evm"]
+    b = entries[1]["deployments"]["314"]["proposed"]["facets"]["shared.evm"]
+    assert a["address"] == b["address"]
+    assert len(stub_chain["deployed"]) == 1  # deployed once, reused for the second proxy
+
+
 def test_run_deploy_records_constructor_args(stub_chain, monkeypatch, tmp_path):
     _resolve_to(monkeypatch, ["a.evm"])
     path = _write(
