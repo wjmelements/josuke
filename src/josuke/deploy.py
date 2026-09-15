@@ -122,10 +122,6 @@ def _prompt_arg(source_id: str, name: str, abi_type: str):
 
 
 def facet_initcode(facet: Facet, root: pathlib.Path, recorded_args, prompt: bool = True):
-    """Return (initcode_hex, constructor_args | None) for `facet` at HEAD.
-
-    With `prompt` false, a constructor arg missing from `recorded_args` is an
-    error instead of an interactive prompt (used when verifying)."""
     if facet.kind == "evm":
         return evm_artifact(root / facet.path, root)["initcode"], None
 
@@ -147,25 +143,18 @@ def facet_initcode(facet: Facet, root: pathlib.Path, recorded_args, prompt: bool
         return _prompt_arg(facet.source_id, arg["name"], arg["type"])
 
     args = {arg["name"]: resolve(arg) for arg in inputs}
-    encoded = abi_encode(
+    encoded_args = abi_encode(
         [arg["type"] for arg in inputs],
         [coerce_arg(arg["type"], args[arg["name"]]) for arg in inputs],
     ).hex()
-    return initcode + encoded, args
+    return initcode + encoded_args, args
 
 
 def keccak_hex(data_hex: str) -> str:
     return "0x" + keccak(bytes.fromhex(data_hex.removeprefix("0x"))).hex()
 
 
-def deploy_initcode(initcode_hex: str, root: pathlib.Path) -> tuple[str, str]:
-    """Broadcast a creation transaction via cast; return `(contract address,
-    sender address)`, both checksummed.
-
-    Signs and sends with `--async` so the tx hash is available as soon as it's
-    known, then waits for the receipt separately with a spinner, since that's
-    the part that actually takes a while.
-    """
+def deploy_initcode(initcode_hex: str, root: pathlib.Path) -> tuple[str, str, str]:
     tx_hash = run(["cast", "send", "--async", "--create", "0x" + initcode_hex], root).strip()
     click.echo(f"deploying: tx {tx_hash} pending...")
     with click_spinner.spinner():
@@ -174,20 +163,23 @@ def deploy_initcode(initcode_hex: str, root: pathlib.Path) -> tuple[str, str]:
     address = receipt.get("contractAddress")
     if not address:
         raise click.ClickException(f"cast receipt returned no contractAddress:\n{out}")
-    return to_checksum_address(address), to_checksum_address(receipt["from"])
+    return to_checksum_address(address), to_checksum_address(receipt["from"]), tx_hash
 
 
 def code_hash(address: str) -> str:
     return keccak_hex(eth_get_code(address))
 
 
-def verify_sourcify(facet: Facet, address: str, chain: str, root: pathlib.Path) -> None:
-    """Upload a freshly deployed .sol facet's source to Sourcify. Best-effort:
-    a failure here doesn't stop the deploy, since the facet is already on chain."""
+def verify_sourcify(
+    facet: Facet, address: str, chain: str, root: pathlib.Path, creation_tx_hash: str | None = None
+) -> None:
     contract = f"{facet.path}:{facet.contract}"
     click.echo(f"verifying {contract} on Sourcify")
+    cmd = ["forge", "verify-contract", address, contract, "--chain", chain, "--verifier", "sourcify"]
+    if creation_tx_hash:
+        cmd += ["--creation-transaction-hash", creation_tx_hash]
     try:
-        run(["forge", "verify-contract", address, contract, "--chain", chain, "--verifier", "sourcify"], root)
+        run(cmd, root)
     except click.ClickException as e:
         click.echo(f"warning: Sourcify verification failed for {contract}: {e}", err=True)
 
@@ -213,10 +205,6 @@ def current_selectors(current: dict, root: pathlib.Path) -> dict:
 
 
 def selectors_runtime(facets: list, root: pathlib.Path) -> bytes | None:
-    """Runtime bytecode of the generated ERC-8167 `selectors()` for a facet set,
-    or None when a facet in the set already implements `selectors()` (in which
-    case josuke defers to it). `deploy` deploys this; `verify` recomputes it to
-    check the recorded address."""
     selector_lists = [facet_selectors(facet, root) for facet in facets]
     if any(s.selector == SELECTORS_SELECTOR for sels in selector_lists for s in sels):
         return None
@@ -395,9 +383,9 @@ def run_deploy(ledger_path, redeploy_all: bool = False):
                 continue
 
             click.echo(f"deploying {facet.source_id}")
-            address, sender = deploy_initcode(initcode, root)
+            address, sender, tx_hash = deploy_initcode(initcode, root)
             if facet.kind == "sol":
-                verify_sourcify(facet, address, chain, root)
+                verify_sourcify(facet, address, chain, root, tx_hash)
             facet_entry = {
                 "address": address,
                 "codehash": code_hash(address),

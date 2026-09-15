@@ -121,7 +121,7 @@ def stub_chain(monkeypatch, tmp_path):
         counter[0] += 1
         addr = "0x" + f"{counter[0]:040x}"
         log["deployed"].append(initcode_hex)
-        return addr, DEPLOYER
+        return addr, DEPLOYER, "0x" + f"{counter[0]:064x}"
 
     monkeypatch.setattr(deploy, "facet_initcode", fake_initcode)
     monkeypatch.setattr(deploy, "deploy_initcode", fake_deploy)
@@ -365,13 +365,15 @@ def test_run_deploy_verifies_new_sol_facets_on_sourcify(stub_chain, monkeypatch,
     monkeypatch.setattr(
         deploy,
         "verify_sourcify",
-        lambda facet, address, chain, root: calls.append((facet.source_id, address, chain)),
+        lambda facet, address, chain, root, tx_hash: calls.append(
+            (facet.source_id, address, chain, tx_hash)
+        ),
     )
     path = _write(tmp_path, [{"address": PROXY, "facetSrc": ["*.sol"]}])
 
     deploy.run_deploy(path)
 
-    assert calls == [("a.sol:A", "0x" + f"{1:040x}", "314")]
+    assert calls == [("a.sol:A", "0x" + f"{1:040x}", "314", "0x" + f"{1:064x}")]
 
 
 def test_run_deploy_does_not_reverify_reused_sol_facets(stub_chain, monkeypatch, tmp_path):
@@ -395,6 +397,21 @@ def test_verify_sourcify_calls_forge(monkeypatch):
     deploy.verify_sourcify(_facet("a.sol:A"), A1, "314", ".")
 
     assert calls == [["forge", "verify-contract", A1, "a.sol:A", "--chain", "314", "--verifier", "sourcify"]]
+
+
+def test_verify_sourcify_passes_creation_tx_hash(monkeypatch):
+    calls = []
+    monkeypatch.setattr(deploy, "run", lambda cmd, root: calls.append(cmd) or "")
+    tx_hash = "0x" + "ab" * 32
+
+    deploy.verify_sourcify(_facet("a.sol:A"), A1, "314", ".", tx_hash)
+
+    assert calls == [
+        [
+            "forge", "verify-contract", A1, "a.sol:A", "--chain", "314", "--verifier", "sourcify",
+            "--creation-transaction-hash", tx_hash,
+        ]
+    ]
 
 
 def test_verify_sourcify_failure_is_non_fatal(monkeypatch, capsys):
