@@ -54,10 +54,10 @@ def accepted_state(current: dict, proposed: dict) -> dict:
     """The deployment state that replaces `current` once `proposed`'s migration is confirmed.
 
     `proposed.facets` is already the complete resolved facet set — `deploy`
-    copies unchanged facets forward — so acceptance is a wholesale swap and
-    `current`'s prior contents are dropped. Both states are passed in because a
-    planned schema change will fold the outgoing facets into a `previous` record;
-    that belongs here.
+    copies unchanged facets forward — so acceptance is a wholesale swap.
+    `current`'s prior contents are dropped from `current`, not from the ledger:
+    every delegate it installed was archived by `history_entries` when it was
+    itself accepted.
     """
     accepted = {"gitCommit": proposed["gitCommit"], "facets": proposed["facets"]}
     if "selectors" in proposed:
@@ -65,6 +65,31 @@ def accepted_state(current: dict, proposed: dict) -> dict:
     if "migration" in proposed:
         accepted["migration"] = proposed["migration"]
     return accepted
+
+
+def history_entries(state: dict) -> dict:
+    """address -> `history` entry for every delegate `state` installs.
+
+    An entry carries what `verify` needs to rebuild the delegate from source: the
+    commit, and the facet's record minus its address (which is the key). The
+    generated `selectors()` delegate has no source of its own, so its entry names
+    the facet set it enumerates instead. Carried-forward facets are stamped with
+    `state`'s commit; that is sound because `deploy` only carries a facet forward
+    when its initcode at that commit is unchanged.
+    """
+    entries = {}
+    for source_id, rec in state["facets"].items():
+        if rec.get("address"):
+            entries[to_checksum_address(rec["address"])] = {
+                "source": source_id,
+                "gitCommit": state["gitCommit"],
+            } | {k: v for k, v in rec.items() if k != "address"}
+    if "selectors" in state:
+        entries[to_checksum_address(state["selectors"]["address"])] = {
+            "gitCommit": state["gitCommit"],
+            "selectorsFor": sorted(state["facets"]),
+        }
+    return entries
 
 
 def run_accept(ledger_path):
@@ -120,5 +145,6 @@ def run_accept(ledger_path):
     for proxy, history, accepted in pending:
         history["current"] = accepted
         del history["proposed"]
+        history.setdefault("history", {}).update(history_entries(accepted))
         click.echo(f"{proxy} chain {chain}: accepted proposed -> current")
     write_ledger(ledger_path, ledger)

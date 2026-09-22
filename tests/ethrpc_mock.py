@@ -36,6 +36,7 @@ class MockEthRpc:
         self.storage = {}
         self.nonce = {}
         self.balance = {}
+        self.logs = []  # list of raw eth_getLogs-shaped dicts, address already lowercased
 
     # -- request plumbing ----------------------------------------------------
 
@@ -86,6 +87,32 @@ class MockEthRpc:
         key = (norm_addr(params[0]), norm_slot(params[1]))
         return self.storage.get(key, "0x" + "00" * 32)
 
+    def _rpc_eth_getLogs(self, params):
+        query = params[0]
+        address = norm_addr(query["address"])
+        from_block = int(query["fromBlock"], 16)
+        to_block = int(query["toBlock"], 16)
+        topic_filters = query.get("topics", [])
+        out = []
+        for log in self.logs:
+            if norm_addr(log["address"]) != address:
+                continue
+            if not (from_block <= int(log["blockNumber"], 16) <= to_block):
+                continue
+            if self._topics_match(log["topics"], topic_filters):
+                out.append(log)
+        return out
+
+    @staticmethod
+    def _topics_match(topics: list, filters: list) -> bool:
+        for i, wanted in enumerate(filters):
+            if wanted is None:
+                continue
+            alternatives = wanted if isinstance(wanted, list) else [wanted]
+            if i >= len(topics) or topics[i] not in alternatives:
+                return False
+        return True
+
     # -- test helpers ------------------------------------------------------
 
     def set_code(self, address: str, code: str):
@@ -93,6 +120,28 @@ class MockEthRpc:
 
     def set_storage(self, address: str, slot: str, value: str):
         self.storage[(norm_addr(address), norm_slot(slot))] = value
+
+    def add_log(
+        self,
+        address: str,
+        topics: list,
+        data: str = "0x",
+        block: int = 1,
+        tx_hash: str | None = None,
+        log_index: int = 0,
+        removed: bool = False,
+    ):
+        self.logs.append(
+            {
+                "address": norm_addr(address),
+                "topics": topics,
+                "data": data,
+                "blockNumber": hex(block),
+                "transactionHash": tx_hash or ("0x" + f"{len(self.logs):064x}"),
+                "logIndex": hex(log_index),
+                "removed": removed,
+            }
+        )
 
     def requests_for(self, method: str):
         out = []

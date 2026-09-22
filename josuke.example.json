@@ -60,6 +60,26 @@
                             }
                         }
                     }
+                },
+                "history": {
+                    "0xbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb": {
+                        "source": "src/facets/Token.sol:Token",
+                        "gitCommit": "d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0",
+                        "codehash": "0xb0b1b0b1b0b1b0b1b0b1b0b1b0b1b0b1b0b1b0b1b0b1b0b1b0b1b0b1b0b1b0b1",
+                        "initcodeHash": "0xc0c1c0c1c0c1c0c1c0c1c0c1c0c1c0c1c0c1c0c1c0c1c0c1c0c1c0c1c0c1c0c1",
+                        "constructorArgs": {
+                            "supply": 5000000000000000000000000,
+                            "name": "OldWorldOrder",
+                            "symbol": "OWO"
+                        }
+                    },
+                    "0xcccccccccccccccccccccccccccccccccccccccc": {
+                        "gitCommit": "d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0",
+                        "selectorsFor": [
+                            "lib/diamond-std/Admin.sol:Owned",
+                            "src/facets/Token.sol:Token"
+                        ]
+                    }
                 }
             }
         }
