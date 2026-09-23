@@ -295,7 +295,7 @@ def test_verify_migration_passes_for_recomputed_bytecode(monkeypatch):
     proposed = _state({"a.sol:A": {"address": A1}})
     storage = _fetched_storage(["0x11111111"])
     expected = deploy.build_migration(
-        PROXY, [deploy.facet_from_source_id("a.sol:A")], proposed["facets"], {}, ".", ".", storage=storage
+        PROXY, [deploy.facet_from_source_id("a.sol:A")], proposed["facets"], {}, ".", storage=storage
     )
     monkeypatch.setattr(verify, "eth_get_code", lambda address: "0x" + expected.encode().hex())
 
@@ -315,7 +315,7 @@ def test_verify_migration_passes_multi_facet_multi_selector(monkeypatch):
     proposed = _state({"a.sol:A": {"address": A1}, "b.sol:B": {"address": B2}})
     storage = _fetched_storage(["0x11111111", "0x33333333", "0x22222222"])
     facets = [deploy.facet_from_source_id("a.sol:A"), deploy.facet_from_source_id("b.sol:B")]
-    expected = deploy.build_migration(PROXY, facets, proposed["facets"], {}, ".", ".", storage=storage)
+    expected = deploy.build_migration(PROXY, facets, proposed["facets"], {}, ".", storage=storage)
     assert len({sd.delegate.address for sd in expected.setdelegates}) == 2  # two groups
     monkeypatch.setattr(verify, "eth_get_code", lambda address: "0x" + expected.encode().hex())
 
@@ -340,7 +340,7 @@ def test_verify_migration_flags_missing_install(monkeypatch):
     proposed = _state({"a.sol:A": {"address": A1}, "b.sol:B": {"address": B2}})
     storage = _fetched_storage(["0x11111111", "0x22222222"])
     facets = [deploy.facet_from_source_id("a.sol:A"), deploy.facet_from_source_id("b.sol:B")]
-    expected = deploy.build_migration(PROXY, facets, proposed["facets"], {}, ".", ".", storage=storage)
+    expected = deploy.build_migration(PROXY, facets, proposed["facets"], {}, ".", storage=storage)
     # on-chain migration only carries the route for 0x11111111
     partial = Migration([sd for sd in expected.setdelegates if sd.selector == "0x11111111"])
     monkeypatch.setattr(verify, "eth_get_code", lambda address: "0x" + partial.encode().hex())
@@ -361,7 +361,7 @@ def test_verify_migration_flags_unzeroed_removal(monkeypatch):
     # 0x99999999 currently routes somewhere non-zero, so it must be zeroed
     storage = _fetched_storage(["0x11111111", "0x99999999"], {"0x99999999": _word(OLD)})
     facets = [deploy.facet_from_source_id("keep.sol:Keep")]
-    expected = deploy.build_migration(PROXY, facets, proposed["facets"], current, ".", ".", storage=storage)
+    expected = deploy.build_migration(PROXY, facets, proposed["facets"], deploy.current_selectors(current, "."), ".", storage=storage)
     # drop the zeroing fragment (the one whose delegate is the zero address)
     kept = [sd for sd in expected.setdelegates if sd.delegate.address != verify.ZERO_ADDRESS]
     monkeypatch.setattr(verify, "eth_get_code", lambda address: "0x" + Migration(kept).encode().hex())

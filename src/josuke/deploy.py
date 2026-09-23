@@ -206,6 +206,23 @@ def current_selectors(current: dict, current_tree: pathlib.Path | None) -> dict:
     return out
 
 
+def check_current_selectors(current: dict, installed: dict) -> None:
+    """Cross-check `installed` (from `current_selectors`) against the generated
+    `selectors()` delegate recorded in `current`, whose code lists every selector
+    deployed with it. Only our recorded delegate is trusted: the proxy's own
+    `selectors()` may be missing or broken, and deploy must still repair it."""
+    impl = current.get("selectors")
+    if not impl or not impl.get("address"):
+        return
+    runtime = selectors_method(generated_selectors([list(installed.values())]))
+    onchain = bytes.fromhex(eth_get_code(impl["address"]).removeprefix("0x"))
+    if onchain != runtime:
+        raise click.ClickException(
+            f"current.selectors @{impl['address']} does not list the selectors of "
+            f"current.facets at {current['gitCommit']}; cannot tell which selectors to zero"
+        )
+
+
 def selectors_runtime(facets: list, root: pathlib.Path) -> bytes | None:
     selector_lists = [facet_selectors(facet, root) for facet in facets]
     if any(s.selector == SELECTORS_SELECTOR for sels in selector_lists for s in sels):
@@ -217,18 +234,16 @@ def build_migration(
     proxy: str,
     facets: list,
     proposed_facets: dict,
-    current: dict,
-    current_tree: pathlib.Path | None,
+    installed: dict,
     root: pathlib.Path,
     storage: ProxyStorage | None = None,
     selectors_impl: dict | None = None,
 ):
     """A Migration that points every proposed selector at its facet and zeroes
-    selectors dropped since `current`. Returns None when nothing needs changing.
+    `installed` selectors it drops. Returns None when nothing needs changing.
 
-    `current_tree` is a checkout of `current.gitCommit` (None when nothing is
-    current): a function deleted from a facet that is still in `facetSrc` only
-    shows up in the old source.
+    `installed` is `current_selectors` of the current state: a function deleted
+    from a facet that is still in `facetSrc` only shows up in the old source.
 
     `storage` may be a pre-populated ProxyStorage to avoid re-querying slots.
     `selectors_impl` is the generated `selectors()` delegate record (if any);
@@ -247,7 +262,6 @@ def build_migration(
             owner[selector.selector] = facet
             selectors[selector.selector] = selector
 
-    installed = current_selectors(current, current_tree)
     kept = set(owner)
     if selectors_impl:
         kept.add(SELECTORS_SELECTOR)  # re-pointed below, not removed
@@ -357,6 +371,10 @@ def run_deploy(ledger_path, redeploy_all: bool = False):
             prior_proposed = history.get("proposed", {})
             prior_proposed_facets = prior_proposed.get("facets", {})
 
+            # Checked before this proxy deploys anything, so a mismatch spends no gas on it.
+            installed = current_selectors(current, trees.get(current["gitCommit"])) if current_facets else {}
+            check_current_selectors(current, installed)
+
             facets = resolve_facets(entry["facetSrc"], root)
             proposed_facets = {}
             deployed = 0
@@ -418,9 +436,8 @@ def run_deploy(ledger_path, redeploy_all: bool = False):
                 selectors_impl = deploy_selectors_impl(runtime, prior_selectors, root, redeploy_all)
                 proposed["selectors"] = selectors_impl
 
-            current_tree = trees.get(current["gitCommit"]) if current_facets else None
             migration = build_migration(
-                proxy, facets, proposed_facets, current, current_tree, root, selectors_impl=selectors_impl
+                proxy, facets, proposed_facets, installed, root, selectors_impl=selectors_impl
             )
             if migration is not None:
                 proposed["migration"] = deploy_migration(

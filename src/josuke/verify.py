@@ -6,6 +6,7 @@ from eth_utils import to_checksum_address
 
 from .deploy import (
     build_migration,
+    current_selectors,
     facet_from_source_id,
     facet_initcode,
     facet_selectors,
@@ -160,7 +161,7 @@ def verify_migration(
     address = proposed["migration"]["address"]
     facets = [facet_from_source_id(source_id) for source_id in proposed["facets"]]
     expected = build_migration(
-        proxy, facets, proposed["facets"], current, current_tree, tree,
+        proxy, facets, proposed["facets"], current_selectors(current, current_tree), tree,
         storage=storage, selectors_impl=proposed.get("selectors"),
     )
     if expected is None:

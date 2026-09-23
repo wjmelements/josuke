@@ -9,6 +9,7 @@ import json
 import pathlib
 import shutil
 
+import click
 import pytest
 from eth_utils import keccak, to_checksum_address
 
@@ -522,7 +523,7 @@ def test_build_migration_installs_every_proposed_selector(monkeypatch):
         "b.sol:B": {"address": B2},
     }
 
-    migration = deploy.build_migration(PROXY, facets, proposed_facets, {}, ".", ".")
+    migration = deploy.build_migration(PROXY, facets, proposed_facets, {}, ".")
     from josuke.migration import Migration
 
     frags = Migration.decode(migration.encode()).setdelegates
@@ -547,7 +548,7 @@ def test_build_migration_zeroes_dropped_selectors(monkeypatch):
     proposed_facets = {"keep.sol:Keep": {"address": A1}}
     current = {"facets": {"keep.sol:Keep": {}, "old.sol:Old": {}}}
 
-    migration = deploy.build_migration(PROXY, facets, proposed_facets, current, ".", ".")
+    migration = deploy.build_migration(PROXY, facets, proposed_facets, deploy.current_selectors(current, "."), ".")
     from josuke.migration import Migration
 
     frags = Migration.decode(migration.encode()).setdelegates
@@ -565,7 +566,7 @@ def test_build_migration_none_when_dropped_selector_already_clear(monkeypatch):
     monkeypatch.setattr(deploy, "facet_selectors", selectors)
     current = {"facets": {"old.sol:Old": {}}}
 
-    assert deploy.build_migration(PROXY, [], {}, current, ".", ".") is None
+    assert deploy.build_migration(PROXY, [], {}, deploy.current_selectors(current, "."), ".") is None
 
 
 def test_build_migration_none_when_already_routed(monkeypatch):
@@ -580,7 +581,7 @@ def test_build_migration_none_when_already_routed(monkeypatch):
     proposed_facets = {"a.sol:A": {"address": A1}}
     current = {"facets": {"a.sol:A": {"address": A1}}}
 
-    assert deploy.build_migration(PROXY, facets, proposed_facets, current, ".", ".") is None
+    assert deploy.build_migration(PROXY, facets, proposed_facets, deploy.current_selectors(current, "."), ".") is None
 
 
 def test_build_migration_rejects_selector_clash(monkeypatch):
@@ -590,7 +591,7 @@ def test_build_migration_rejects_selector_clash(monkeypatch):
     proposed_facets = {"a.sol:A": {"address": A1}, "b.sol:B": {"address": B2}}
 
     with pytest.raises(Exception, match="claimed by"):
-        deploy.build_migration(PROXY, facets, proposed_facets, {}, ".", ".")
+        deploy.build_migration(PROXY, facets, proposed_facets, {}, ".")
 
 
 def test_build_migration_rejects_duplicate_storage_slot(monkeypatch):
@@ -610,7 +611,7 @@ def test_build_migration_rejects_duplicate_storage_slot(monkeypatch):
     proposed_facets = {"a.sol:A": {"address": A1}, "b.sol:B": {"address": B2}}
 
     with pytest.raises(Exception, match="storage slot"):
-        deploy.build_migration(PROXY, facets, proposed_facets, {}, ".", ".")
+        deploy.build_migration(PROXY, facets, proposed_facets, {}, ".")
 
 
 def test_build_migration_routes_generated_selectors(monkeypatch):
@@ -623,7 +624,7 @@ def test_build_migration_routes_generated_selectors(monkeypatch):
     proposed_facets = {"a.sol:A": {"address": A1}}
 
     migration = deploy.build_migration(
-        PROXY, facets, proposed_facets, {}, ".", ".", selectors_impl={"address": B2}
+        PROXY, facets, proposed_facets, {}, ".", selectors_impl={"address": B2}
     )
     frags = {sd.selector: sd for sd in Migration.decode(migration.encode()).setdelegates}
     assert frags[SELECTORS_SELECTOR].delegate.address == B2
@@ -703,6 +704,59 @@ def test_run_deploy_reuses_selectors_impl_when_runtime_unchanged(stub_chain, mon
     assert proposed["selectors"] == prior_impl
     assert b"\x60\x00".hex() not in stub_chain["deployed"]
     assert "selectors() unchanged" in capsys.readouterr().out
+
+
+def test_check_current_selectors_accepts_matching_delegate(monkeypatch):
+    from josuke.erc8167 import generated_selectors, selectors_method
+
+    runtime = selectors_method(generated_selectors([[_sel("0x11111111")]]))
+    monkeypatch.setattr(deploy, "eth_get_code", lambda address: "0x" + runtime.hex())
+    current = {"gitCommit": "e" * 40, "selectors": {"address": "0x" + "5e" * 20}}
+    deploy.check_current_selectors(current, {"0x11111111": _sel("0x11111111")})
+
+
+def test_check_current_selectors_rejects_unlisted_selector(monkeypatch):
+    from josuke.erc8167 import generated_selectors, selectors_method
+
+    # deployed with 0x22222222, which the source at gitCommit no longer shows
+    runtime = selectors_method(generated_selectors([[_sel("0x11111111"), _sel("0x22222222")]]))
+    monkeypatch.setattr(deploy, "eth_get_code", lambda address: "0x" + runtime.hex())
+    current = {"gitCommit": "e" * 40, "selectors": {"address": "0x" + "5e" * 20}}
+    with pytest.raises(click.ClickException, match="cannot tell which selectors to zero"):
+        deploy.check_current_selectors(current, {"0x11111111": _sel("0x11111111")})
+
+
+def test_check_current_selectors_skips_without_recorded_delegate(monkeypatch):
+    monkeypatch.setattr(deploy, "eth_get_code", lambda address: pytest.fail("no delegate to read"))
+    deploy.check_current_selectors({"gitCommit": "e" * 40, "facets": {}}, {})
+
+
+def test_run_deploy_checks_current_selectors_before_deploying(stub_chain, monkeypatch, tmp_path):
+    _resolve_to(monkeypatch, ["a.evm"])
+    monkeypatch.setattr(deploy, "current_selectors", lambda current, tree: {})
+    monkeypatch.setattr(deploy, "eth_get_code", lambda address: "0x00")
+    path = _write(
+        tmp_path,
+        [
+            {
+                "address": PROXY,
+                "facetSrc": ["*.evm"],
+                "deployments": {
+                    "314": {
+                        "current": {
+                            "gitCommit": "e" * 40,
+                            "facets": {"b.evm": {"address": "0x" + "ab" * 20, "codehash": "0x" + "11" * 32, "initcodeHash": "0x" + "00" * 32}},
+                            "selectors": {"address": "0x" + "5e" * 20},
+                        }
+                    }
+                },
+            }
+        ],
+    )
+
+    with pytest.raises(click.ClickException, match="current.selectors"):
+        deploy.run_deploy(path)
+    assert stub_chain["deployed"] == []
 
 
 def test_deploy_migration_reuses_prior_when_code_matches(monkeypatch):
