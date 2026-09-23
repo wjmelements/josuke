@@ -18,6 +18,7 @@ from .migration import Migration, SetDelegate
 from .proc import run
 from .selectors import Selector
 from .storage import ProxyStorage, slot_address
+from .worktree import SourceTrees
 
 ZERO_ADDRESS = "0x" + "00" * 20
 
@@ -187,12 +188,13 @@ def verify_sourcify(
 # -- migration script -----------------------------------------------------
 
 
-def current_selectors(current: dict, root: pathlib.Path) -> dict:
-    """selector -> Selector for everything the installed facet set exposes."""
+def current_selectors(current: dict, current_tree: pathlib.Path) -> dict:
+    """selector -> Selector for everything the installed facet set exposes, read
+    from `current_tree`, the checkout of `current.gitCommit`."""
     out = {}
     for source_id in current.get("facets", {}):
         try:
-            selectors = facet_selectors(facet_from_source_id(source_id), root)
+            selectors = facet_selectors(facet_from_source_id(source_id), current_tree)
         except click.ClickException:
             click.echo(
                 f"warning: cannot determine selectors for {source_id}; not zeroed",
@@ -216,12 +218,16 @@ def build_migration(
     facets: list,
     proposed_facets: dict,
     current: dict,
+    current_tree: pathlib.Path,
     root: pathlib.Path,
     storage: ProxyStorage | None = None,
     selectors_impl: dict | None = None,
 ):
     """A Migration that points every proposed selector at its facet and zeroes
     selectors dropped since `current`. Returns None when nothing needs changing.
+
+    `current_tree` is a checkout of `current.gitCommit`: a function deleted from
+    a facet that is still in `facetSrc` only shows up in the old source.
 
     `storage` may be a pre-populated ProxyStorage to avoid re-querying slots.
     `selectors_impl` is the generated `selectors()` delegate record (if any);
@@ -240,7 +246,7 @@ def build_migration(
             owner[selector.selector] = facet
             selectors[selector.selector] = selector
 
-    installed = current_selectors(current, root)
+    installed = current_selectors(current, current_tree)
     kept = set(owner)
     if selectors_impl:
         kept.add(SELECTORS_SELECTOR)  # re-pointed below, not removed
@@ -340,91 +346,93 @@ def run_deploy(ledger_path, redeploy_all: bool = False):
 
     run_deployed: dict[str, dict] = {}  # initcodeHash -> facet entry, shared across proxies this run
 
-    for entry in ledger:
-        proxy = to_checksum_address(entry["address"])
-        deployments = entry.setdefault("deployments", {})
-        history = deployments.setdefault(chain, {})
-        current = history.get("current", {})
-        current_facets = current.get("facets", {})
-        prior_proposed = history.get("proposed", {})
-        prior_proposed_facets = prior_proposed.get("facets", {})
+    with SourceTrees(root) as trees:  # each `current.gitCommit`, for its selectors
+        for entry in ledger:
+            proxy = to_checksum_address(entry["address"])
+            deployments = entry.setdefault("deployments", {})
+            history = deployments.setdefault(chain, {})
+            current = history.get("current", {})
+            current_facets = current.get("facets", {})
+            prior_proposed = history.get("proposed", {})
+            prior_proposed_facets = prior_proposed.get("facets", {})
 
-        facets = resolve_facets(entry["facetSrc"], root)
-        proposed_facets = {}
-        deployed = 0
-        for facet in facets:
-            recorded = (
-                prior_proposed_facets.get(facet.source_id)
-                or current_facets.get(facet.source_id)
-                or {}
-            )
-            initcode, args = facet_initcode(facet, root, recorded.get("constructorArgs"))
-            initcode_hash = keccak_hex(initcode)
+            facets = resolve_facets(entry["facetSrc"], root)
+            proposed_facets = {}
+            deployed = 0
+            for facet in facets:
+                recorded = (
+                    prior_proposed_facets.get(facet.source_id)
+                    or current_facets.get(facet.source_id)
+                    or {}
+                )
+                initcode, args = facet_initcode(facet, root, recorded.get("constructorArgs"))
+                initcode_hash = keccak_hex(initcode)
 
-            # Reuse an existing deployment of this exact bytecode: the installed
-            # facet if it still matches, otherwise one already staged in a prior
-            # `proposed` run (keeps re-runs before promotion idempotent).
-            live = current_facets.get(facet.source_id)
-            staged = prior_proposed_facets.get(facet.source_id)
-            if not redeploy_all:
-                if live and live.get("initcodeHash") == initcode_hash:
-                    proposed_facets[facet.source_id] = live
-                    run_deployed.setdefault(initcode_hash, live)
+                # Reuse an existing deployment of this exact bytecode: the installed
+                # facet if it still matches, otherwise one already staged in a prior
+                # `proposed` run (keeps re-runs before promotion idempotent).
+                live = current_facets.get(facet.source_id)
+                staged = prior_proposed_facets.get(facet.source_id)
+                if not redeploy_all:
+                    if live and live.get("initcodeHash") == initcode_hash:
+                        proposed_facets[facet.source_id] = live
+                        run_deployed.setdefault(initcode_hash, live)
+                        continue
+                    if staged and staged.get("initcodeHash") == initcode_hash and staged.get("address"):
+                        proposed_facets[facet.source_id] = staged
+                        run_deployed.setdefault(initcode_hash, staged)
+                        continue
+
+                shared = run_deployed.get(initcode_hash)
+                if shared and shared.get("address"):
+                    click.echo(f"reusing {shared['address']} for {facet.source_id}")
+                    proposed_facets[facet.source_id] = shared
                     continue
-                if staged and staged.get("initcodeHash") == initcode_hash and staged.get("address"):
-                    proposed_facets[facet.source_id] = staged
-                    run_deployed.setdefault(initcode_hash, staged)
-                    continue
 
-            shared = run_deployed.get(initcode_hash)
-            if shared and shared.get("address"):
-                click.echo(f"reusing {shared['address']} for {facet.source_id}")
-                proposed_facets[facet.source_id] = shared
-                continue
+                click.echo(f"deploying {facet.source_id}")
+                address, sender, tx_hash = deploy_initcode(initcode, root)
+                if facet.kind == "sol":
+                    verify_sourcify(facet, address, chain, root, tx_hash)
+                facet_entry = {
+                    "address": address,
+                    "codehash": code_hash(address),
+                    "initcodeHash": initcode_hash,
+                }
+                if args:
+                    facet_entry["constructorArgs"] = args
+                if deployer_derived(initcode, sender):
+                    facet_entry["from"] = sender  # runtime depends on sender
+                elif recorded.get("from"):
+                    facet_entry["from"] = recorded["from"]
+                proposed_facets[facet.source_id] = facet_entry
+                run_deployed.setdefault(initcode_hash, facet_entry)
+                deployed += 1
 
-            click.echo(f"deploying {facet.source_id}")
-            address, sender, tx_hash = deploy_initcode(initcode, root)
-            if facet.kind == "sol":
-                verify_sourcify(facet, address, chain, root, tx_hash)
-            facet_entry = {
-                "address": address,
-                "codehash": code_hash(address),
-                "initcodeHash": initcode_hash,
-            }
-            if args:
-                facet_entry["constructorArgs"] = args
-            if deployer_derived(initcode, sender):
-                facet_entry["from"] = sender  # runtime depends on sender
-            elif recorded.get("from"):
-                facet_entry["from"] = recorded["from"]
-            proposed_facets[facet.source_id] = facet_entry
-            run_deployed.setdefault(initcode_hash, facet_entry)
-            deployed += 1
+            proposed = {"gitCommit": commit, "facets": proposed_facets}
 
-        proposed = {"gitCommit": commit, "facets": proposed_facets}
+            runtime = selectors_runtime(facets, root)
+            selectors_impl = None
+            if runtime is not None:
+                prior_selectors = prior_proposed.get("selectors") or current.get("selectors")
+                selectors_impl = deploy_selectors_impl(runtime, prior_selectors, root, redeploy_all)
+                proposed["selectors"] = selectors_impl
 
-        runtime = selectors_runtime(facets, root)
-        selectors_impl = None
-        if runtime is not None:
-            prior_selectors = prior_proposed.get("selectors") or current.get("selectors")
-            selectors_impl = deploy_selectors_impl(runtime, prior_selectors, root, redeploy_all)
-            proposed["selectors"] = selectors_impl
-
-        migration = build_migration(
-            proxy, facets, proposed_facets, current, root, selectors_impl=selectors_impl
-        )
-        if migration is not None:
-            proposed["migration"] = deploy_migration(
-                migration, prior_proposed.get("migration"), root
+            current_tree = trees.get(current["gitCommit"]) if current.get("facets") else root
+            migration = build_migration(
+                proxy, facets, proposed_facets, current, current_tree, root, selectors_impl=selectors_impl
             )
-            history["proposed"] = proposed
-        else:
-            history.pop("proposed", None)  # nothing pending: already live on chain
+            if migration is not None:
+                proposed["migration"] = deploy_migration(
+                    migration, prior_proposed.get("migration"), root
+                )
+                history["proposed"] = proposed
+            else:
+                history.pop("proposed", None)  # nothing pending: already live on chain
 
-        notes = [f"{deployed} facet(s) deployed"]
-        if selectors_impl is not None:
-            notes.append("selectors() unchanged" if selectors_impl is prior_selectors else "selectors() generated")
-        notes.append("migration ready" if migration is not None else "no migration needed")
-        click.echo(f"{proxy} chain {chain}: " + ", ".join(notes))
+            notes = [f"{deployed} facet(s) deployed"]
+            if selectors_impl is not None:
+                notes.append("selectors() unchanged" if selectors_impl is prior_selectors else "selectors() generated")
+            notes.append("migration ready" if migration is not None else "no migration needed")
+            click.echo(f"{proxy} chain {chain}: " + ", ".join(notes))
 
     write_ledger(ledger_path, ledger)

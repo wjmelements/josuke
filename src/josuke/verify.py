@@ -1,5 +1,4 @@
 import pathlib
-import tempfile
 from os import environ
 
 import click
@@ -19,10 +18,10 @@ from .ethjsonrpc import chain_id, eth_get_code
 from .evm import EvmRelay
 from .ledger import load_ledger
 from .migration import InvalidMigration, Migration
-from .proc import run
 from .selectors import Selector
 from .storage import ProxyStorage, slot_address as _slot_address
 from .summary import summarize_upgrade
+from .worktree import SourceTrees
 
 ZERO_ADDRESS = to_checksum_address("0x" + "00" * 20)
 
@@ -36,36 +35,6 @@ class Report:
 
     def fail(self, message: str) -> None:
         self.failures.append(f"{self.proxy} {message}")
-
-
-class SourceTrees:
-    """Detached git worktrees, one per commit, each with a completed `forge build`."""
-
-    def __init__(self, root: pathlib.Path):
-        self.root = root
-        self._tmp = tempfile.TemporaryDirectory(prefix="josuke-verify-")
-        self._trees: dict[str, pathlib.Path] = {}
-
-    def get(self, commit: str) -> pathlib.Path:
-        if commit not in self._trees:
-            tree = pathlib.Path(self._tmp.name) / commit
-            run(["git", "worktree", "add", "--detach", str(tree), commit], self.root)
-            self._trees[commit] = tree  # recorded before build so a build failure still cleans up
-            if (tree / ".gitmodules").exists():
-                run(["git", "submodule", "update", "--init", "--recursive"], tree)
-            run(["forge", "build"], tree)
-        return self._trees[commit]
-
-    def close(self) -> None:
-        for tree in self._trees.values():
-            run(["git", "worktree", "remove", "--force", str(tree)], self.root)
-        self._tmp.cleanup()
-
-    def __enter__(self):
-        return self
-
-    def __exit__(self, *exc):
-        self.close()
 
 
 def _onchain_codehash(address: str) -> str:
@@ -177,13 +146,21 @@ def verify_proposed_set(facet_src: list, proposed: dict, tree: pathlib.Path, rep
 
 
 def verify_migration(
-    proxy: str, proposed: dict, current: dict, storage: ProxyStorage, tree: pathlib.Path, report: Report
+    proxy: str,
+    proposed: dict,
+    current: dict,
+    storage: ProxyStorage,
+    current_tree: pathlib.Path | None,
+    tree: pathlib.Path,
+    report: Report,
 ) -> None:
-    """The on-chain migration installs every proposed selector and zeroes removals."""
+    """The on-chain migration installs every proposed selector and zeroes removals.
+
+    `current_tree` checks out `current.gitCommit` (None when nothing is current)."""
     address = proposed["migration"]["address"]
     facets = [facet_from_source_id(source_id) for source_id in proposed["facets"]]
     expected = build_migration(
-        proxy, facets, proposed["facets"], current, tree,
+        proxy, facets, proposed["facets"], current, current_tree, tree,
         storage=storage, selectors_impl=proposed.get("selectors"),
     )
     if expected is None:
@@ -264,7 +241,8 @@ def run_verify(ledger_path):
                 verify_proposed_set(entry["facetSrc"], proposed, tree, report)
                 verify_selectors(proposed, "proposed", tree, report)
                 if "migration" in proposed:
-                    verify_migration(proxy, proposed, current or {}, storage, tree, report)
+                    current_tree = trees.get(current["gitCommit"]) if current else None
+                    verify_migration(proxy, proposed, current or {}, storage, current_tree, tree, report)
                 summarize_upgrade(
                     proxy, chain, current, proposed,
                     trees.get(current["gitCommit"]) if current else None,
