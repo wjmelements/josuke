@@ -6,6 +6,7 @@ run against fabricated ledger states and fabricated log payloads.
 
 import json
 
+import click
 import pytest
 from eth_abi import encode as abi_encode
 from eth_utils import to_checksum_address
@@ -73,9 +74,10 @@ def test_find_deploy_block_bisects_to_first_code(monkeypatch):
     assert audit.find_deploy_block(PROXY, 10) == 5
 
 
-def test_find_deploy_block_returns_none_when_no_code(monkeypatch):
+def test_find_deploy_block_terminates_when_no_code(monkeypatch):
     monkeypatch.setattr(audit, "eth_get_code", lambda addr, block: "0x")
-    assert audit.find_deploy_block(PROXY, 10) is None
+    with pytest.raises(Exception, match="has no code"):
+        audit.find_deploy_block(PROXY, 10)
 
 
 def test_find_deploy_block_wraps_rpc_error(monkeypatch):
@@ -170,6 +172,16 @@ def test_parse_logs_flags_malformed_topics():
     report = _report()
     delegations, calls = audit.parse_logs([log], report)
     assert delegations == []
+    assert any("malformed log" in f for f in report.failures)
+
+
+def test_parse_logs_flags_malformed_migration_calldata():
+    # too short for the length word it claims; eth_abi raises DecodingError
+    log = _migrate_log(MIGRATION)
+    log["data"] = "0x" + "00" * 10
+    report = _report()
+    delegations, calls = audit.parse_logs([log], report)
+    assert calls == []
     assert any("malformed log" in f for f in report.failures)
 
 
@@ -304,11 +316,13 @@ def test_audit_proxy_finds_deploy_block_when_not_given(monkeypatch, _no_worktree
     assert seen["range"] == (42, 100)
 
 
-def test_audit_proxy_fails_when_never_deployed(monkeypatch, _no_worktrees):
-    monkeypatch.setattr(audit, "find_deploy_block", lambda proxy, latest: None)
-    report = _report()
-    audit.audit_proxy(PROXY, {"current": {"facets": {}}}, "314", 100, None, _no_worktrees, report, {})
-    assert any("no code at" in f for f in report.failures)
+def test_audit_proxy_propagates_find_deploy_block_failure(monkeypatch, _no_worktrees):
+    def boom(proxy, latest):
+        raise click.ClickException(f"{proxy} has no code at block {latest}")
+
+    monkeypatch.setattr(audit, "find_deploy_block", boom)
+    with pytest.raises(click.ClickException, match="has no code"):
+        audit.audit_proxy(PROXY, {"current": {"facets": {}}}, "314", 100, None, _no_worktrees, _report(), {})
 
 
 def test_audit_proxy_verifies_each_history_entry(monkeypatch, _no_worktrees):

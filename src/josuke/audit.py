@@ -19,6 +19,7 @@ from os import environ
 
 import click
 from eth_abi import decode as abi_decode
+from eth_abi.exceptions import DecodingError
 from eth_utils import keccak, to_checksum_address
 
 from .ethjsonrpc import RpcError, chain_id, eth_block_number, eth_get_code, eth_get_logs
@@ -54,11 +55,12 @@ class MigrationCall:
     calldata: bytes
 
 
-def find_deploy_block(proxy: str, latest: int) -> int | None:
-    """The first block at which `proxy` has code, or None if it has none at `latest`.
+def find_deploy_block(proxy: str, latest: int) -> int:
+    """The first block at which `proxy` has code.
 
     Bisects `eth_getCode`, so the node must serve historical state; a pruned node
-    errors here rather than answering, which is why `audit --from-block` exists.
+    errors here rather than answering. Also errors if `proxy` has no code at
+    `latest`. `--from-block` is the escape hatch for both cases.
     """
 
     def has_code(block: int) -> bool:
@@ -71,7 +73,9 @@ def find_deploy_block(proxy: str, latest: int) -> int | None:
             )
 
     if not has_code(latest):
-        return None
+        raise click.ClickException(
+            f"{proxy} has no code at block {latest}; pass --from-block to audit it anyway"
+        )
     lo, hi = 0, latest
     while lo < hi:
         mid = (lo + hi) // 2
@@ -126,7 +130,7 @@ def parse_logs(logs: list[dict], report: Report) -> tuple[list[Delegation], list
                     raise ValueError("expected 1 indexed argument")
                 (calldata,) = abi_decode(["bytes"], bytes.fromhex(log["data"].removeprefix("0x")))
                 calls.append(MigrationCall(block, tx, _topic_address(topics[1]), calldata))
-        except ValueError as e:
+        except (ValueError, DecodingError) as e:
             report.fail(f"audit: malformed log at block {block} (tx {tx}): {e}")
     return delegations, calls
 
@@ -187,9 +191,6 @@ def audit_proxy(
     """Audit one proxy; returns how many installed delegates are missing from `history`."""
     if from_block is None:
         from_block = find_deploy_block(proxy, latest)
-        if from_block is None:
-            report.fail(f"audit: no code at {proxy} on chain {chain}")
-            return 0
         origin = f"deployed at block {from_block}"
     else:
         origin = f"from block {from_block} (--from-block)"
