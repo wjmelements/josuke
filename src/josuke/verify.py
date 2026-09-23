@@ -212,13 +212,15 @@ def run_verify(ledger_path):
 
             current = history.get("current")
             proposed = history.get("proposed")
+            current_tree = trees.get(current["gitCommit"]) if current else None
+            proposed_tree = trees.get(proposed["gitCommit"]) if proposed else None
 
             selectors = {}  # selector -> Selector, deduped across current + proposed
             if current:
-                _, current_sels = _selector_owners(current, trees.get(current["gitCommit"]))
+                _, current_sels = _selector_owners(current, current_tree)
                 selectors.update((s.selector, s) for s in current_sels)
             if proposed:
-                _, proposed_sels = _selector_owners(proposed, trees.get(proposed["gitCommit"]))
+                _, proposed_sels = _selector_owners(proposed, proposed_tree)
                 selectors.update((s.selector, s) for s in proposed_sels)
 
             storage = ProxyStorage(proxy)
@@ -226,28 +228,21 @@ def run_verify(ledger_path):
                 storage.fetch(list(selectors.values()))
 
             if current:
-                tree = trees.get(current["gitCommit"])
                 before = len(report.failures)
-                verify_facets(current, "current", tree, report, rpc_cache)
-                verify_dispatch(current, storage, tree, report)
-                verify_selectors(current, "current", tree, report)
+                verify_facets(current, "current", current_tree, report, rpc_cache)
+                verify_dispatch(current, storage, current_tree, report)
+                verify_selectors(current, "current", current_tree, report)
                 if len(report.failures) == before:
                     verified.append(proxy)
                     click.secho(f"✓ {proxy}: current deployment verified", fg="green")
 
             if proposed:
-                tree = trees.get(proposed["gitCommit"])
-                verify_facets(proposed, "proposed", tree, report, rpc_cache)
-                verify_proposed_set(entry["facetSrc"], proposed, tree, report)
-                verify_selectors(proposed, "proposed", tree, report)
+                verify_facets(proposed, "proposed", proposed_tree, report, rpc_cache)
+                verify_proposed_set(entry["facetSrc"], proposed, proposed_tree, report)
+                verify_selectors(proposed, "proposed", proposed_tree, report)
                 if "migration" in proposed:
-                    current_tree = trees.get(current["gitCommit"]) if current else None
-                    verify_migration(proxy, proposed, current or {}, storage, current_tree, tree, report)
-                summarize_upgrade(
-                    proxy, chain, current, proposed,
-                    trees.get(current["gitCommit"]) if current else None,
-                    tree, storage,
-                )
+                    verify_migration(proxy, proposed, current or {}, storage, current_tree, proposed_tree, report)
+                summarize_upgrade(proxy, chain, current, proposed, current_tree, proposed_tree, storage)
 
     if report.failures:
         raise click.ClickException(

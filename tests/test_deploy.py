@@ -96,7 +96,7 @@ def test_facet_initcode_uses_evm_artifact(tmp_path, monkeypatch):
 
 
 @pytest.fixture
-def stub_chain(monkeypatch, tmp_path):
+def stub_chain(monkeypatch, tmp_path, stub_source_trees):
     """Neutralise every chain / toolchain call in deploy; return a mutable log."""
     monkeypatch.chdir(tmp_path)
     monkeypatch.setenv("ETH_RPC_URL", "http://mock.rpc")
@@ -111,17 +111,7 @@ def stub_chain(monkeypatch, tmp_path):
     monkeypatch.setattr(deploy, "deploy_migration", lambda *a, **k: {"address": "0x" + "dd" * 20})
     monkeypatch.setattr(deploy, "selectors_runtime", lambda *a, **k: None)
 
-    class Trees:
-        def __enter__(self):
-            return self
-
-        def __exit__(self, *exc):
-            return False
-
-        def get(self, commit):
-            return pathlib.Path("trees", commit)
-
-    monkeypatch.setattr(deploy, "SourceTrees", lambda root: Trees())
+    stub_source_trees(deploy)
 
     log = {"deployed": []}
     counter = [0]

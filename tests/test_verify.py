@@ -7,12 +7,11 @@ against fabricated ledger states, a fake ProxyStorage, and a fake eth_getCode.
 import json
 import pathlib
 import shutil
-import subprocess
 
 import pytest
 from eth_utils import to_checksum_address
 
-from josuke import deploy, verify, worktree
+from josuke import deploy, verify
 from josuke.migration import Migration
 
 PROXY = "0x2222222222222222222222222222222222222222"
@@ -375,52 +374,6 @@ def test_verify_migration_flags_unzeroed_removal(monkeypatch):
     assert any("does not zero selector 0x99999999" in f for f in report.failures)
 
 
-# -- SourceTrees (real git, stubbed forge) --------------------------------
-
-
-@pytest.mark.skipif(shutil.which("git") is None, reason="requires git")
-def test_source_trees_checks_out_each_commit_and_cleans_up(tmp_path, monkeypatch):
-    def git(*args):
-        subprocess.run(["git", *args], cwd=tmp_path, check=True, capture_output=True)
-
-    git("init", "-q")
-    git("config", "user.email", "t@t.t")
-    git("config", "user.name", "t")
-    (tmp_path / "src").mkdir()
-    (tmp_path / "src" / "A.sol").write_text("contract A { function a() external {} }\n")
-    git("add", "-A")
-    git("commit", "-qm", "one")
-    first = subprocess.run(
-        ["git", "rev-parse", "HEAD"], cwd=tmp_path, check=True, capture_output=True, text=True
-    ).stdout.strip()
-    (tmp_path / "src" / "A.sol").write_text("contract A { function a() external {} function b() external {} }\n")
-    git("add", "-A")
-    git("commit", "-qm", "two")
-
-    builds = []
-    real_run = worktree.run
-    monkeypatch.setattr(
-        worktree,
-        "run",
-        lambda cmd, root=None, stdin=None: builds.append(str(root)) or ""
-        if cmd[:2] == ["forge", "build"]
-        else real_run(cmd, root, stdin),
-    )
-
-    with worktree.SourceTrees(tmp_path) as trees:
-        tree = trees.get(first)
-        assert trees.get(first) is tree  # cached
-        assert (tree / "src" / "A.sol").read_text().count("function") == 1
-        assert builds == [str(tree)]
-        parent = tree.parent
-
-    assert not parent.exists()
-    listed = subprocess.run(
-        ["git", "worktree", "list"], cwd=tmp_path, check=True, capture_output=True, text=True
-    ).stdout
-    assert str(tmp_path / "x") not in listed  # only the main worktree remains
-
-
 # -- run_verify -----------------------------------------------------------
 
 
@@ -431,18 +384,9 @@ def _ledger(tmp_path, entries):
 
 
 @pytest.fixture
-def stub_trees(monkeypatch):
-    class Trees:
-        def __enter__(self):
-            return self
+def stub_trees(monkeypatch, stub_source_trees):
 
-        def __exit__(self, *exc):
-            return False
-
-        def get(self, commit):
-            return "."
-
-    monkeypatch.setattr(verify, "SourceTrees", lambda root: Trees())
+    stub_source_trees(verify)
     monkeypatch.setattr(verify, "chain_id", lambda: "314")
     monkeypatch.setattr(verify, "ProxyStorage", FakeStorage)
     monkeypatch.setattr(verify, "_replay_runtime", lambda initcode, sender, cache: "")
@@ -488,7 +432,7 @@ def test_run_verify_reports_failures(monkeypatch, tmp_path, stub_trees):
         verify.run_verify(_ledger(tmp_path, [entry]))
 
 
-def test_run_verify_flags_function_removed_from_kept_facet(monkeypatch, tmp_path):
+def test_run_verify_flags_function_removed_from_kept_facet(monkeypatch, tmp_path, stub_trees):
     # keep.sol:Keep stays in facetSrc, but fn 0x99999999 was deleted from it between
     # `current` (c0) and `proposed` (c1); a migration that leaves it routed must fail.
     from josuke.delegate import ContractSource, Delegate
@@ -497,24 +441,12 @@ def test_run_verify_flags_function_removed_from_kept_facet(monkeypatch, tmp_path
     monkeypatch.setenv("ETH_RPC_URL", "http://mock.rpc")
     monkeypatch.chdir(tmp_path)
 
-    class Trees:
-        def __enter__(self):
-            return self
-
-        def __exit__(self, *exc):
-            return False
-
-        def get(self, commit):
-            return pathlib.Path("trees", commit)
-
     def selectors(facet, root):
         if root == pathlib.Path("trees", "c0"):
             return [_sel("0x11111111"), _sel("0x99999999")]
         assert root == pathlib.Path("trees", "c1")
         return [_sel("0x11111111")]
 
-    monkeypatch.setattr(verify, "SourceTrees", lambda root: Trees())
-    monkeypatch.setattr(verify, "chain_id", lambda: "314")
     monkeypatch.setattr(verify, "ProxyStorage", lambda addr: FakeStorage(addr, {"0x99999999": _word(OLD)}))
     monkeypatch.setattr(verify, "facet_selectors", selectors)
     monkeypatch.setattr(deploy, "facet_selectors", selectors)

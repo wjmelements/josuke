@@ -188,9 +188,9 @@ def verify_sourcify(
 # -- migration script -----------------------------------------------------
 
 
-def current_selectors(current: dict, current_tree: pathlib.Path) -> dict:
+def current_selectors(current: dict, current_tree: pathlib.Path | None) -> dict:
     """selector -> Selector for everything the installed facet set exposes, read
-    from `current_tree`, the checkout of `current.gitCommit`."""
+    from `current_tree`, the checkout of `current.gitCommit` (None when nothing is current)."""
     out = {}
     for source_id in current.get("facets", {}):
         try:
@@ -218,7 +218,7 @@ def build_migration(
     facets: list,
     proposed_facets: dict,
     current: dict,
-    current_tree: pathlib.Path,
+    current_tree: pathlib.Path | None,
     root: pathlib.Path,
     storage: ProxyStorage | None = None,
     selectors_impl: dict | None = None,
@@ -226,8 +226,9 @@ def build_migration(
     """A Migration that points every proposed selector at its facet and zeroes
     selectors dropped since `current`. Returns None when nothing needs changing.
 
-    `current_tree` is a checkout of `current.gitCommit`: a function deleted from
-    a facet that is still in `facetSrc` only shows up in the old source.
+    `current_tree` is a checkout of `current.gitCommit` (None when nothing is
+    current): a function deleted from a facet that is still in `facetSrc` only
+    shows up in the old source.
 
     `storage` may be a pre-populated ProxyStorage to avoid re-querying slots.
     `selectors_impl` is the generated `selectors()` delegate record (if any);
@@ -417,7 +418,7 @@ def run_deploy(ledger_path, redeploy_all: bool = False):
                 selectors_impl = deploy_selectors_impl(runtime, prior_selectors, root, redeploy_all)
                 proposed["selectors"] = selectors_impl
 
-            current_tree = trees.get(current["gitCommit"]) if current.get("facets") else root
+            current_tree = trees.get(current["gitCommit"]) if current_facets else None
             migration = build_migration(
                 proxy, facets, proposed_facets, current, current_tree, root, selectors_impl=selectors_impl
             )
