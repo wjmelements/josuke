@@ -190,21 +190,10 @@ def test_verify_migrated_passes_with_generated_selectors_routed(monkeypatch):
 
 
 @pytest.fixture
-def stub(monkeypatch):
+def stub(monkeypatch, stub_source_trees):
     """Neutralise worktrees/chain; return a mutable selector -> storage-word map."""
     routes: dict[str, str] = {}
-
-    class Trees:
-        def __enter__(self):
-            return self
-
-        def __exit__(self, *exc):
-            return False
-
-        def get(self, commit):
-            return "."
-
-    monkeypatch.setattr(accept, "SourceTrees", lambda root: Trees())
+    stub_source_trees(accept)
     monkeypatch.setattr(accept, "chain_id", lambda: "314")
     monkeypatch.setattr(accept, "ProxyStorage", lambda addr: FakeStorage(addr, routes))
     monkeypatch.setenv("ETH_RPC_URL", "http://mock.rpc")

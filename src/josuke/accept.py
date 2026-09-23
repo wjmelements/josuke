@@ -7,7 +7,8 @@ from eth_utils import to_checksum_address
 from .ethjsonrpc import chain_id
 from .ledger import load_ledger, write_ledger
 from .storage import ProxyStorage, slot_address as _slot_address
-from .verify import Report, SourceTrees, _selector_owners
+from .verify import Report, _selector_owners
+from .worktree import SourceTrees
 
 
 def verify_migrated(

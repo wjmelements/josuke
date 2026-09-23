@@ -50,12 +50,13 @@ that method from the full selector set (every facet selector plus `selectors()`
 itself), deploys it with the `evm -C` universal constructor, and records it under
 `selectors`.
 
-It then builds the migration script: one `SelectorDelegated` + `SSTORE` per
-selector, pointing each at its facet and zeroing any selector dropped since
-`current`. Selectors are grouped by facet so the event signature is pushed once
-and each facet address once, roughly halving the script's codesize.
-Per-selector storage slots come from simulating a dispatch call
-against the live proxy with `evm -nx`; selectors come from each facet's ABI. The
+It then builds the migration script from the facets' ABIs: each selector the
+proposed facets expose is pointed at its facet, and each selector `current`'s
+facets exposed at its `gitCommit` but the proposed ones don't is zeroed. Every
+route that changes becomes one `SelectorDelegated` + `SSTORE`, to the storage
+slot found by simulating a dispatch call against the live proxy with `evm -nx`.
+Selectors are grouped by facet so the event signature is pushed once and each
+facet address once, roughly halving the script's codesize. The
 script is deployed with the `evm -C` universal constructor unless an identical one
 is already recorded under `proposed`.
 

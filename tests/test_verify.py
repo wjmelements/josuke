@@ -7,7 +7,6 @@ against fabricated ledger states, a fake ProxyStorage, and a fake eth_getCode.
 import json
 import pathlib
 import shutil
-import subprocess
 
 import pytest
 from eth_utils import to_checksum_address
@@ -296,12 +295,12 @@ def test_verify_migration_passes_for_recomputed_bytecode(monkeypatch):
     proposed = _state({"a.sol:A": {"address": A1}})
     storage = _fetched_storage(["0x11111111"])
     expected = deploy.build_migration(
-        PROXY, [deploy.facet_from_source_id("a.sol:A")], proposed["facets"], {}, ".", storage=storage
+        PROXY, [deploy.facet_from_source_id("a.sol:A")], proposed["facets"], {}, ".", ".", storage=storage
     )
     monkeypatch.setattr(verify, "eth_get_code", lambda address: "0x" + expected.encode().hex())
 
     report = _report()
-    verify.verify_migration(PROXY, {**proposed, "migration": {"address": OLD}}, {}, storage, ".", report)
+    verify.verify_migration(PROXY, {**proposed, "migration": {"address": OLD}}, {}, storage, ".", ".", report)
     assert report.failures == []
 
 
@@ -316,12 +315,12 @@ def test_verify_migration_passes_multi_facet_multi_selector(monkeypatch):
     proposed = _state({"a.sol:A": {"address": A1}, "b.sol:B": {"address": B2}})
     storage = _fetched_storage(["0x11111111", "0x33333333", "0x22222222"])
     facets = [deploy.facet_from_source_id("a.sol:A"), deploy.facet_from_source_id("b.sol:B")]
-    expected = deploy.build_migration(PROXY, facets, proposed["facets"], {}, ".", storage=storage)
+    expected = deploy.build_migration(PROXY, facets, proposed["facets"], {}, ".", ".", storage=storage)
     assert len({sd.delegate.address for sd in expected.setdelegates}) == 2  # two groups
     monkeypatch.setattr(verify, "eth_get_code", lambda address: "0x" + expected.encode().hex())
 
     report = _report()
-    verify.verify_migration(PROXY, {**proposed, "migration": {"address": OLD}}, {}, storage, ".", report)
+    verify.verify_migration(PROXY, {**proposed, "migration": {"address": OLD}}, {}, storage, ".", ".", report)
     assert report.failures == []
 
 
@@ -332,7 +331,7 @@ def test_verify_migration_flags_unrecognized_bytecode(monkeypatch):
     monkeypatch.setattr(verify, "eth_get_code", lambda address: "0x" + "60" * 40)
 
     report = _report()
-    verify.verify_migration(PROXY, {**proposed, "migration": {"address": OLD}}, {}, storage, ".", report)
+    verify.verify_migration(PROXY, {**proposed, "migration": {"address": OLD}}, {}, storage, ".", ".", report)
     assert any("not a recognized migration script" in f for f in report.failures)
 
 
@@ -341,13 +340,13 @@ def test_verify_migration_flags_missing_install(monkeypatch):
     proposed = _state({"a.sol:A": {"address": A1}, "b.sol:B": {"address": B2}})
     storage = _fetched_storage(["0x11111111", "0x22222222"])
     facets = [deploy.facet_from_source_id("a.sol:A"), deploy.facet_from_source_id("b.sol:B")]
-    expected = deploy.build_migration(PROXY, facets, proposed["facets"], {}, ".", storage=storage)
+    expected = deploy.build_migration(PROXY, facets, proposed["facets"], {}, ".", ".", storage=storage)
     # on-chain migration only carries the route for 0x11111111
     partial = Migration([sd for sd in expected.setdelegates if sd.selector == "0x11111111"])
     monkeypatch.setattr(verify, "eth_get_code", lambda address: "0x" + partial.encode().hex())
 
     report = _report()
-    verify.verify_migration(PROXY, {**proposed, "migration": {"address": OLD}}, {}, storage, ".", report)
+    verify.verify_migration(PROXY, {**proposed, "migration": {"address": OLD}}, {}, storage, ".", ".", report)
 
     assert any("does not install" in f and "0x22222222" in f for f in report.failures)
 
@@ -362,63 +361,17 @@ def test_verify_migration_flags_unzeroed_removal(monkeypatch):
     # 0x99999999 currently routes somewhere non-zero, so it must be zeroed
     storage = _fetched_storage(["0x11111111", "0x99999999"], {"0x99999999": _word(OLD)})
     facets = [deploy.facet_from_source_id("keep.sol:Keep")]
-    expected = deploy.build_migration(PROXY, facets, proposed["facets"], current, ".", storage=storage)
+    expected = deploy.build_migration(PROXY, facets, proposed["facets"], current, ".", ".", storage=storage)
     # drop the zeroing fragment (the one whose delegate is the zero address)
     kept = [sd for sd in expected.setdelegates if sd.delegate.address != verify.ZERO_ADDRESS]
     monkeypatch.setattr(verify, "eth_get_code", lambda address: "0x" + Migration(kept).encode().hex())
 
     report = _report()
     verify.verify_migration(
-        PROXY, {**proposed, "migration": {"address": OLD}}, current, storage, ".", report
+        PROXY, {**proposed, "migration": {"address": OLD}}, current, storage, ".", ".", report
     )
 
     assert any("does not zero selector 0x99999999" in f for f in report.failures)
-
-
-# -- SourceTrees (real git, stubbed forge) --------------------------------
-
-
-@pytest.mark.skipif(shutil.which("git") is None, reason="requires git")
-def test_source_trees_checks_out_each_commit_and_cleans_up(tmp_path, monkeypatch):
-    def git(*args):
-        subprocess.run(["git", *args], cwd=tmp_path, check=True, capture_output=True)
-
-    git("init", "-q")
-    git("config", "user.email", "t@t.t")
-    git("config", "user.name", "t")
-    (tmp_path / "src").mkdir()
-    (tmp_path / "src" / "A.sol").write_text("contract A { function a() external {} }\n")
-    git("add", "-A")
-    git("commit", "-qm", "one")
-    first = subprocess.run(
-        ["git", "rev-parse", "HEAD"], cwd=tmp_path, check=True, capture_output=True, text=True
-    ).stdout.strip()
-    (tmp_path / "src" / "A.sol").write_text("contract A { function a() external {} function b() external {} }\n")
-    git("add", "-A")
-    git("commit", "-qm", "two")
-
-    builds = []
-    real_run = verify.run
-    monkeypatch.setattr(
-        verify,
-        "run",
-        lambda cmd, root=None, stdin=None: builds.append(str(root)) or ""
-        if cmd[:2] == ["forge", "build"]
-        else real_run(cmd, root, stdin),
-    )
-
-    with verify.SourceTrees(tmp_path) as trees:
-        tree = trees.get(first)
-        assert trees.get(first) is tree  # cached
-        assert (tree / "src" / "A.sol").read_text().count("function") == 1
-        assert builds == [str(tree)]
-        parent = tree.parent
-
-    assert not parent.exists()
-    listed = subprocess.run(
-        ["git", "worktree", "list"], cwd=tmp_path, check=True, capture_output=True, text=True
-    ).stdout
-    assert str(tmp_path / "x") not in listed  # only the main worktree remains
 
 
 # -- run_verify -----------------------------------------------------------
@@ -431,18 +384,9 @@ def _ledger(tmp_path, entries):
 
 
 @pytest.fixture
-def stub_trees(monkeypatch):
-    class Trees:
-        def __enter__(self):
-            return self
+def stub_trees(monkeypatch, stub_source_trees):
 
-        def __exit__(self, *exc):
-            return False
-
-        def get(self, commit):
-            return "."
-
-    monkeypatch.setattr(verify, "SourceTrees", lambda root: Trees())
+    stub_source_trees(verify)
     monkeypatch.setattr(verify, "chain_id", lambda: "314")
     monkeypatch.setattr(verify, "ProxyStorage", FakeStorage)
     monkeypatch.setattr(verify, "_replay_runtime", lambda initcode, sender, cache: "")
@@ -485,4 +429,46 @@ def test_run_verify_reports_failures(monkeypatch, tmp_path, stub_trees):
         },
     }
     with pytest.raises(Exception, match="initcodeHash"):
+        verify.run_verify(_ledger(tmp_path, [entry]))
+
+
+def test_run_verify_flags_function_removed_from_kept_facet(monkeypatch, tmp_path, stub_trees):
+    # keep.sol:Keep stays in facetSrc, but fn 0x99999999 was deleted from it between
+    # `current` (c0) and `proposed` (c1); a migration that leaves it routed must fail.
+    from josuke.delegate import ContractSource, Delegate
+    from josuke.migration import SetDelegate
+
+    monkeypatch.setenv("ETH_RPC_URL", "http://mock.rpc")
+    monkeypatch.chdir(tmp_path)
+
+    def selectors(facet, root):
+        if root == pathlib.Path("trees", "c0"):
+            return [_sel("0x11111111"), _sel("0x99999999")]
+        assert root == pathlib.Path("trees", "c1")
+        return [_sel("0x11111111")]
+
+    monkeypatch.setattr(verify, "ProxyStorage", lambda addr: FakeStorage(addr, {"0x99999999": _word(OLD)}))
+    monkeypatch.setattr(verify, "facet_selectors", selectors)
+    monkeypatch.setattr(deploy, "facet_selectors", selectors)
+    for check in ("verify_facets", "verify_dispatch", "verify_selectors", "verify_proposed_set", "summarize_upgrade"):
+        monkeypatch.setattr(verify, check, lambda *a, **k: None)
+
+    # the recorded migration re-points 0x11111111 but never zeroes 0x99999999
+    installs = SetDelegate("0x11111111", "0x" + "11111111".rjust(64, "e"), Delegate(A1, ContractSource("keep.sol", "Keep")))
+    monkeypatch.setattr(verify, "eth_get_code", lambda address: "0x" + Migration([installs]).encode().hex())
+
+    entry = {
+        "address": PROXY,
+        "facetSrc": ["keep.sol"],
+        "deployments": {
+            "314": {
+                "current": _state({"keep.sol:Keep": {"address": OLD}}, "c0"),
+                "proposed": {
+                    **_state({"keep.sol:Keep": {"address": A1}}, "c1"),
+                    "migration": {"address": B2},
+                },
+            }
+        },
+    }
+    with pytest.raises(Exception, match="does not zero selector 0x99999999"):
         verify.run_verify(_ledger(tmp_path, [entry]))

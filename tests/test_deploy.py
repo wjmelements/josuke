@@ -17,6 +17,7 @@ from josuke.deploy import Facet, coerce_arg, keccak_hex, resolve_facets
 
 A1 = to_checksum_address("0x" + "a1" * 20)  # deploy_initcode always returns checksummed
 B2 = to_checksum_address("0x" + "b2" * 20)
+_build_migration = deploy.build_migration  # stub_chain replaces it; some tests restore it
 
 FIXTURE_ROOT = pathlib.Path(__file__).parent / "fixtures" / "forge-project"
 
@@ -95,7 +96,7 @@ def test_facet_initcode_uses_evm_artifact(tmp_path, monkeypatch):
 
 
 @pytest.fixture
-def stub_chain(monkeypatch, tmp_path):
+def stub_chain(monkeypatch, tmp_path, stub_source_trees):
     """Neutralise every chain / toolchain call in deploy; return a mutable log."""
     monkeypatch.chdir(tmp_path)
     monkeypatch.setenv("ETH_RPC_URL", "http://mock.rpc")
@@ -109,6 +110,8 @@ def stub_chain(monkeypatch, tmp_path):
     monkeypatch.setattr(deploy, "build_migration", lambda *a, **k: object())
     monkeypatch.setattr(deploy, "deploy_migration", lambda *a, **k: {"address": "0x" + "dd" * 20})
     monkeypatch.setattr(deploy, "selectors_runtime", lambda *a, **k: None)
+
+    stub_source_trees(deploy)
 
     log = {"deployed": []}
     counter = [0]
@@ -390,6 +393,37 @@ def test_run_deploy_does_not_reverify_reused_sol_facets(stub_chain, monkeypatch,
     assert len(calls) == 1
 
 
+def test_run_deploy_zeroes_function_removed_from_kept_facet(stub_chain, monkeypatch, tmp_path):
+    # keep.sol:Keep stays in facetSrc, but fn 0x99999999 was deleted from it since
+    # `current` (c0); the proxy still routes it, so the migration must zero it.
+    live = "0x" + "00" * 12 + "cd" * 20
+    monkeypatch.setattr(deploy, "build_migration", _build_migration)
+    monkeypatch.setattr(deploy, "ProxyStorage", lambda addr: FakeStorage(addr, {"0x99999999": live}))
+    migrations = []
+    monkeypatch.setattr(
+        deploy, "deploy_migration", lambda m, prior, root: migrations.append(m) or {"address": "0x" + "dd" * 20}
+    )
+
+    def selectors(facet, root):
+        if root == pathlib.Path("trees", "c0"):  # the `current` commit's worktree
+            return [_sel("0x11111111"), _sel("0x99999999")]
+        assert root == tmp_path  # the checkout being deployed
+        return [_sel("0x11111111")]
+
+    monkeypatch.setattr(deploy, "facet_selectors", selectors)
+    _resolve_to(monkeypatch, ["keep.sol:Keep"])
+    path = _write(tmp_path, [{
+        "address": PROXY,
+        "facetSrc": ["keep.sol"],
+        "deployments": {"314": {"current": {"gitCommit": "c0", "facets": {"keep.sol:Keep": {"address": A1}}}}},
+    }])
+
+    deploy.run_deploy(path)
+
+    zeroed = {sd.selector for sd in migrations[0].setdelegates if int(sd.delegate.address, 16) == 0}
+    assert zeroed == {"0x99999999"}
+
+
 def test_verify_sourcify_calls_forge(monkeypatch):
     calls = []
     monkeypatch.setattr(deploy, "run", lambda cmd, root: calls.append(cmd) or "")
@@ -488,7 +522,7 @@ def test_build_migration_installs_every_proposed_selector(monkeypatch):
         "b.sol:B": {"address": B2},
     }
 
-    migration = deploy.build_migration(PROXY, facets, proposed_facets, {}, ".")
+    migration = deploy.build_migration(PROXY, facets, proposed_facets, {}, ".", ".")
     from josuke.migration import Migration
 
     frags = Migration.decode(migration.encode()).setdelegates
@@ -513,7 +547,7 @@ def test_build_migration_zeroes_dropped_selectors(monkeypatch):
     proposed_facets = {"keep.sol:Keep": {"address": A1}}
     current = {"facets": {"keep.sol:Keep": {}, "old.sol:Old": {}}}
 
-    migration = deploy.build_migration(PROXY, facets, proposed_facets, current, ".")
+    migration = deploy.build_migration(PROXY, facets, proposed_facets, current, ".", ".")
     from josuke.migration import Migration
 
     frags = Migration.decode(migration.encode()).setdelegates
@@ -531,7 +565,7 @@ def test_build_migration_none_when_dropped_selector_already_clear(monkeypatch):
     monkeypatch.setattr(deploy, "facet_selectors", selectors)
     current = {"facets": {"old.sol:Old": {}}}
 
-    assert deploy.build_migration(PROXY, [], {}, current, ".") is None
+    assert deploy.build_migration(PROXY, [], {}, current, ".", ".") is None
 
 
 def test_build_migration_none_when_already_routed(monkeypatch):
@@ -546,7 +580,7 @@ def test_build_migration_none_when_already_routed(monkeypatch):
     proposed_facets = {"a.sol:A": {"address": A1}}
     current = {"facets": {"a.sol:A": {"address": A1}}}
 
-    assert deploy.build_migration(PROXY, facets, proposed_facets, current, ".") is None
+    assert deploy.build_migration(PROXY, facets, proposed_facets, current, ".", ".") is None
 
 
 def test_build_migration_rejects_selector_clash(monkeypatch):
@@ -556,7 +590,7 @@ def test_build_migration_rejects_selector_clash(monkeypatch):
     proposed_facets = {"a.sol:A": {"address": A1}, "b.sol:B": {"address": B2}}
 
     with pytest.raises(Exception, match="claimed by"):
-        deploy.build_migration(PROXY, facets, proposed_facets, {}, ".")
+        deploy.build_migration(PROXY, facets, proposed_facets, {}, ".", ".")
 
 
 def test_build_migration_rejects_duplicate_storage_slot(monkeypatch):
@@ -576,7 +610,7 @@ def test_build_migration_rejects_duplicate_storage_slot(monkeypatch):
     proposed_facets = {"a.sol:A": {"address": A1}, "b.sol:B": {"address": B2}}
 
     with pytest.raises(Exception, match="storage slot"):
-        deploy.build_migration(PROXY, facets, proposed_facets, {}, ".")
+        deploy.build_migration(PROXY, facets, proposed_facets, {}, ".", ".")
 
 
 def test_build_migration_routes_generated_selectors(monkeypatch):
@@ -589,7 +623,7 @@ def test_build_migration_routes_generated_selectors(monkeypatch):
     proposed_facets = {"a.sol:A": {"address": A1}}
 
     migration = deploy.build_migration(
-        PROXY, facets, proposed_facets, {}, ".", selectors_impl={"address": B2}
+        PROXY, facets, proposed_facets, {}, ".", ".", selectors_impl={"address": B2}
     )
     frags = {sd.selector: sd for sd in Migration.decode(migration.encode()).setdelegates}
     assert frags[SELECTORS_SELECTOR].delegate.address == B2
