@@ -48,12 +48,26 @@ class FakeCast:
         return [(cmd, fd) for cmd, fd in self.calls if cmd[1] == "send"]
 
 
+BLOCK = {"number": "0x10", "baseFeePerGas": hex(100)}
+PRIORITY = hex(10)
+FEES = ["--gas-price", "210", "--priority-gas-price", "10"]  # 2 * base fee + priority
+
+
 @pytest.fixture
 def cast(monkeypatch):
     monkeypatch.delenv("ETH_FROM", raising=False)
     monkeypatch.setattr(broadcast, "cast_password", lambda: ([], None))
     fake = FakeCast()
     monkeypatch.setattr(broadcast, "run", fake)
+    fake.batches = []
+
+    def fake_batch(calls):
+        fake.batches.append(calls)
+        answers = {"eth_getBlockByNumber": BLOCK, "eth_maxPriorityFeePerGas": PRIORITY}
+        # each estimate is 1000 + the initcode's length, so tests can tell them apart
+        return [answers.get(m) or hex(1000 + len(p[0]["data"])) for m, p in calls]
+
+    monkeypatch.setattr(broadcast, "rpc_batch", fake_batch)
     return fake
 
 
@@ -85,7 +99,7 @@ def test_create_address_matches_cast(nonce):
 
 
 def test_create_reserves_nonces_without_sending(cast):
-    b = broadcast.Broadcast()
+    b = broadcast.Broadcast("314")
     first = b.create("aa", ".")
     second = b.create("bb", ".")
 
@@ -96,7 +110,7 @@ def test_create_reserves_nonces_without_sending(cast):
 
 
 def test_send_all_sends_in_nonce_order_once(cast):
-    b = broadcast.Broadcast()
+    b = broadcast.Broadcast("314")
     a1, _ = b.create("aa", ".")
     a2, _ = b.create("bb", ".")
 
@@ -104,15 +118,16 @@ def test_send_all_sends_in_nonce_order_once(cast):
     b.send_all(".")  # already sent: nothing more
 
     assert [cmd for cmd, _ in cast.sends()] == [
-        ["cast", "send", "--async", "--nonce", "5", "--create", "0xaa"],
-        ["cast", "send", "--async", "--nonce", "6", "--create", "0xbb"],
+        ["cast", "send", "--async", "--chain", "314", *FEES, "--gas-limit", "1004", "--nonce", "5", "--create", "0xaa"],
+        ["cast", "send", "--async", "--chain", "314", *FEES, "--gas-limit", "1004", "--nonce", "6", "--create", "0xbb"],
     ]
     assert (b.tx_hash(a1), b.tx_hash(a2)) == ("0xtx5", "0xtx6")
+    assert len(cast.batches) == 1  # one round trip prices every send
 
 
 def test_send_all_passes_password_before_create(monkeypatch, cast):
     monkeypatch.setattr(broadcast, "cast_password", lambda: (["--password-file", "/dev/stdin"], 7))
-    b = broadcast.Broadcast()
+    b = broadcast.Broadcast("314")
     b.create("00", ".")
     b.send_all(".")
 
@@ -120,13 +135,56 @@ def test_send_all_passes_password_before_create(monkeypatch, cast):
     assert address_cmd == ["cast", "wallet", "address", "--password-file", "/dev/stdin"]
     assert address_fd == 7
     assert cast.sends() == [
-        (["cast", "send", "--async", "--password-file", "/dev/stdin", "--nonce", "5", "--create", "0x00"], 7)
+        (
+            [
+                "cast", "send", "--async", "--password-file", "/dev/stdin", "--chain", "314", *FEES,
+                "--gas-limit", "1004", "--nonce", "5", "--create", "0x00",
+            ],
+            7,
+        )
     ]
+
+
+def test_send_all_estimates_each_unsent_creation_from_sender(cast):
+    b = broadcast.Broadcast("314")
+    b.create("aa", ".")
+    b.send_all(".")
+    b.create("bbbb", ".")
+    b.send_all(".")
+
+    assert [m for m, _ in cast.batches[1]] == ["eth_getBlockByNumber", "eth_maxPriorityFeePerGas", "eth_estimateGas"]
+    assert cast.batches[1][2][1] == [{"from": SENDER, "data": "0xbbbb"}]  # only the unsent one
+    assert "1006" in cast.sends()[-1][0]
+
+
+def test_send_all_leaves_fees_to_cast_without_base_fee(monkeypatch, cast):
+    monkeypatch.setitem(BLOCK, "baseFeePerGas", None)
+    b = broadcast.Broadcast("314")
+    b.create("aa", ".")
+    b.send_all(".")
+
+    (cmd, _), = cast.sends()
+    assert "--gas-price" not in cmd and "--priority-gas-price" not in cmd
+    assert cmd[cmd.index("--gas-limit") + 1] == "1004"
+
+
+def test_send_all_sends_nothing_when_an_estimate_fails(monkeypatch, cast):
+    b = broadcast.Broadcast("314")
+    b.create("aa", ".")
+    b.create("bb", ".")
+
+    def reverts(calls):
+        raise broadcast.click.ClickException("eth_estimateGas: execution reverted")
+
+    monkeypatch.setattr(broadcast, "rpc_batch", reverts)
+    with pytest.raises(click.ClickException, match="reverted"):
+        b.send_all(".")
+    assert cast.sends() == []
 
 
 def test_create_uses_eth_from_as_sender(monkeypatch, cast):
     monkeypatch.setenv("ETH_FROM", SENDER.lower())
-    address, sender = broadcast.Broadcast().create("00", ".")
+    address, sender = broadcast.Broadcast("314").create("00", ".")
 
     assert sender == SENDER
     assert address == broadcast.create_address(SENDER, 5)
@@ -134,7 +192,7 @@ def test_create_uses_eth_from_as_sender(monkeypatch, cast):
 
 
 def test_send_all_stops_at_a_rejected_send(monkeypatch, cast):
-    b = broadcast.Broadcast()
+    b = broadcast.Broadcast("314")
     a1, _ = b.create("aa", ".")
     a2, _ = b.create("bb", ".")
 
@@ -153,7 +211,7 @@ def test_send_all_stops_at_a_rejected_send(monkeypatch, cast):
 
 
 def _sent(*initcodes):
-    b = broadcast.Broadcast()
+    b = broadcast.Broadcast("314")
     addresses = [b.create(code, ".")[0] for code in initcodes]
     b.send_all(".")
     return b, addresses
@@ -172,7 +230,7 @@ def test_wait_reports_each_confirmation(cast, capsys):
 
 
 def test_wait_ignores_unsent_creations(cast, capsys):
-    b = broadcast.Broadcast()
+    b = broadcast.Broadcast("314")
     b.create("aa", ".")
     b.wait(".")
     assert not any(cmd[1] == "receipt" for cmd, _ in cast.calls)
@@ -206,9 +264,9 @@ def test_create_requires_session():
 
 
 def test_broadcast_session_is_not_reentrant():
-    with broadcast.broadcast_session():
+    with broadcast.broadcast_session("314"):
         with pytest.raises(RuntimeError, match="already active"):
-            with broadcast.broadcast_session():
+            with broadcast.broadcast_session("314"):
                 pass
         assert broadcast._session is not None
     assert broadcast._session is None

@@ -27,6 +27,29 @@ def rpc(method: str, params: list):
     return body["result"]
 
 
+def rpc_batch(calls: list[tuple[str, list]]) -> list:
+    """Results of several `(method, params)` calls, in order, from one HTTP round trip.
+    An error in any call fails the whole batch."""
+    payload = [{"id": i, "jsonrpc": "2.0", "method": m, "params": p} for i, (m, p) in enumerate(calls)]
+    with span(f"rpc batch [{len(calls)}] {', '.join(m for m, _ in calls)}"):
+        resp = requests.post(environ["ETH_RPC_URL"], json=payload)
+    if resp.status_code != 200:
+        raise RpcError(f"batch: HTTP {resp.status_code}")
+    body = resp.json()
+    if not isinstance(body, list):  # some nodes answer a rejected batch with one error object
+        raise RpcError(f"batch: {body.get('error', body)}")
+    by_id = {r.get("id"): r for r in body}
+    results = []
+    for i, (method, params) in enumerate(calls):
+        answer = by_id.get(i)
+        if answer is None:
+            raise RpcError(f"{method}: no response in batch")
+        if answer.get("error"):
+            raise RpcError(f"{method} {brief(params)}: {answer['error']}")
+        results.append(answer["result"])
+    return results
+
+
 def eth_get_code(address: str, block: str = "latest") -> str:
     """The 0x-prefixed runtime bytecode at `address`."""
     return rpc("eth_getCode", [address, block])

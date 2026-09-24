@@ -18,6 +18,7 @@ import click
 import click_spinner
 from eth_utils import keccak, to_checksum_address
 
+from .ethjsonrpc import rpc_batch
 from .proc import run
 from .signer import cast_password
 
@@ -48,7 +49,8 @@ class Creation:
 class Broadcast:
     """Contract creations planned in this session, sent by `send_all`, mined by `wait`."""
 
-    def __init__(self):
+    def __init__(self, chain_id: str):
+        self.chain_id = chain_id  # decimal, passed to `cast` so it need not look it up
         self.sender: str | None = None
         self.next_nonce: int | None = None
         self.creations: list[Creation] = []
@@ -74,16 +76,37 @@ class Broadcast:
     def tx_hash(self, address: str) -> str | None:
         return next((c.tx_hash for c in self.creations if c.address == address), None)
 
+    def _gas(self, unsent: list[Creation]) -> tuple[list[str], list[int]]:
+        """(fee flags shared by every send, gas limit per creation), from one batched
+        request, so each `cast send` needs no lookups of its own. A creation whose
+        constructor reverts fails here, before anything is sent."""
+        block, priority, *limits = rpc_batch(
+            [
+                ("eth_getBlockByNumber", ["latest", False]),
+                ("eth_maxPriorityFeePerGas", []),
+                *(("eth_estimateGas", [{"from": self.sender, "data": "0x" + c.initcode_hex}]) for c in unsent),
+            ]
+        )
+        flags = []
+        if block.get("baseFeePerGas") is not None:  # EIP-1559; otherwise `cast` prices it
+            priority = int(priority, 16)
+            max_fee = 2 * int(block["baseFeePerGas"], 16) + priority  # as `cast` computes it
+            flags = ["--gas-price", str(max_fee), "--priority-gas-price", str(priority)]
+        return flags, [int(limit, 16) for limit in limits]
+
     def send_all(self, root: pathlib.Path) -> None:
         """Send every planned creation, in nonce order, without waiting for any to be mined."""
-        for creation in self.creations:
-            if creation.tx_hash is not None:
-                continue
+        unsent = [c for c in self.creations if c.tx_hash is None]
+        if not unsent:
+            return
+        fee_flags, limits = self._gas(unsent)
+        for creation, limit in zip(unsent, limits):
             password_args, password_fd = cast_password()
             creation.tx_hash = run(
                 [
-                    "cast", "send", "--async", *password_args,
-                    "--nonce", str(creation.nonce), "--create", "0x" + creation.initcode_hex,
+                    "cast", "send", "--async", *password_args, "--chain", self.chain_id, *fee_flags,
+                    "--gas-limit", str(limit), "--nonce", str(creation.nonce),
+                    "--create", "0x" + creation.initcode_hex,
                 ],
                 root,
                 stdin_fd=password_fd,
@@ -117,12 +140,12 @@ class Broadcast:
 
 
 @contextmanager
-def broadcast_session():
-    """Scope for `create`; not reentrant, since one session owns the nonce sequence."""
+def broadcast_session(chain_id: str):
+    """Scope for `create` on `chain_id`; not reentrant, since one session owns the nonce sequence."""
     global _session
     if _session is not None:
         raise RuntimeError("broadcast_session is already active")
-    _session = Broadcast()
+    _session = Broadcast(chain_id)
     try:
         yield _session
     finally:
