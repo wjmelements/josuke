@@ -6,16 +6,19 @@ from os import environ
 import click
 import requests
 
+from .trace import brief, span
+
 
 class RpcError(click.ClickException):
     """The node answered with an HTTP failure or a JSON-RPC error."""
 
 
 def rpc(method: str, params: list):
-    resp = requests.post(
-        environ["ETH_RPC_URL"],
-        json={"id": 1, "jsonrpc": "2.0", "method": method, "params": params},
-    )
+    with span(f"rpc {method} {brief(params)}"):
+        resp = requests.post(
+            environ["ETH_RPC_URL"],
+            json={"id": 1, "jsonrpc": "2.0", "method": method, "params": params},
+        )
     if resp.status_code != 200:
         raise RpcError(f"{method}: HTTP {resp.status_code}")
     body = resp.json()
