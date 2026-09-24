@@ -17,6 +17,8 @@ def load_ledger(ledger_path) -> list:
         return json.loads(ledger_path.read_text())
     except FileNotFoundError:
         raise click.ClickException(f"{ledger_path} not found; run `josuke init` first")
+    except json.JSONDecodeError as e:
+        raise click.ClickException(f"{ledger_path} is not valid JSON: {e}")
 
 
 def write_ledger(ledger_path, ledger) -> None:

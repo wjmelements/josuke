@@ -42,7 +42,7 @@ def _state(facets, commit="c0", **extra):
 
 
 def _facet(initcode_hash="0xaaaa", address="0x" + "11" * 20, **extra):
-    return {"initcodeHash": initcode_hash, "codehash": "0xbbbb", "address": address, **extra}
+    return {"initcodeHash": initcode_hash, "codeHash": "0xbbbb", "address": address, **extra}
 
 
 def _same(selectors_by_source):

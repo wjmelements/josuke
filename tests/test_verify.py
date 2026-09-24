@@ -95,7 +95,7 @@ def _stub_facet_checks(monkeypatch, runtime="rt"):
 
 def test_verify_facets_flags_initcode_hash(monkeypatch):
     _stub_facet_checks(monkeypatch)
-    state = _state({"a.sol:A": {"address": A1, "initcodeHash": "0xWRONG", "codehash": "0xRTHASH"}})
+    state = _state({"a.sol:A": {"address": A1, "initcodeHash": "0xWRONG", "codeHash": "0xRTHASH"}})
     report = _report()
     verify.verify_facets(state, "current", ".", report)
 
@@ -104,16 +104,28 @@ def test_verify_facets_flags_initcode_hash(monkeypatch):
 
 
 def test_verify_facets_flags_codehash_forged_against_source(monkeypatch):
-    # initcodeHash right, on-chain code matches the recorded codehash, but the
-    # runtime rebuilt from source does not: a forged codehash.
+    # initcodeHash right, on-chain code matches the recorded codeHash, but the
+    # runtime rebuilt from source does not: a forged codeHash.
     _stub_facet_checks(monkeypatch)
     monkeypatch.setattr(verify, "_onchain_codehash", lambda addr: "0xFORGED")
-    state = _state({"a.sol:A": {"address": A1, "initcodeHash": "0xICHASH", "codehash": "0xFORGED"}})
+    state = _state({"a.sol:A": {"address": A1, "initcodeHash": "0xICHASH", "codeHash": "0xFORGED"}})
     report = _report()
     verify.verify_facets(state, "current", ".", report)
 
     assert len(report.failures) == 1
     assert "rebuilt from source" in report.failures[0]
+
+
+def test_verify_facets_reports_wrong_recorded_codehash_once(monkeypatch):
+    # Source and chain agree; only the recorded codeHash is off. One failure, not two.
+    _stub_facet_checks(monkeypatch)
+    state = _state({"a.sol:A": {"address": A1, "initcodeHash": "0xICHASH", "codeHash": "0xWRONG"}})
+    report = _report()
+    verify.verify_facets(state, "current", ".", report)
+
+    assert report.failures == [
+        f"{PROXY} current a.sol:A @{A1}: recorded codeHash 0xWRONG != 0xRTHASH rebuilt from source and on chain"
+    ]
 
 
 def test_verify_facets_replays_from_recorded_sender(monkeypatch):
@@ -123,7 +135,7 @@ def test_verify_facets_replays_from_recorded_sender(monkeypatch):
         verify, "_replay_runtime",
         lambda initcode, sender, cache: seen.setdefault("sender", sender) or "rt",
     )
-    state = _state({"a.sol:A": {"address": A1, "initcodeHash": "0xICHASH", "codehash": "0xRTHASH", "from": A1}})
+    state = _state({"a.sol:A": {"address": A1, "initcodeHash": "0xICHASH", "codeHash": "0xRTHASH", "from": A1}})
     verify.verify_facets(state, "current", ".", _report())
 
     assert seen["sender"] == A1
@@ -131,7 +143,7 @@ def test_verify_facets_replays_from_recorded_sender(monkeypatch):
 
 def test_verify_facets_passes_clean(monkeypatch):
     _stub_facet_checks(monkeypatch)
-    state = _state({"a.sol:A": {"address": A1, "initcodeHash": "0xICHASH", "codehash": "0xRTHASH"}})
+    state = _state({"a.sol:A": {"address": A1, "initcodeHash": "0xICHASH", "codeHash": "0xRTHASH"}})
     report = _report()
     verify.verify_facets(state, "current", ".", report)
 
@@ -140,7 +152,7 @@ def test_verify_facets_passes_clean(monkeypatch):
 
 def test_verify_facets_flags_missing_address(monkeypatch):
     _stub_facet_checks(monkeypatch)
-    state = _state({"a.sol:A": {"initcodeHash": "0xICHASH", "codehash": "0xRTHASH"}})
+    state = _state({"a.sol:A": {"initcodeHash": "0xICHASH", "codeHash": "0xRTHASH"}})
     report = _report()
     verify.verify_facets(state, "proposed", ".", report)
 
@@ -168,7 +180,7 @@ def test_verify_facets_rebuilds_runtime_from_source(monkeypatch):
         true_codehash = verify.keccak_hex(verify._replay_runtime(initcode, deployer, {}))
 
     def check(codehash, sender, onchain):
-        rec = {"address": A1, "initcodeHash": verify.keccak_hex(initcode), "codehash": codehash, "from": sender}
+        rec = {"address": A1, "initcodeHash": verify.keccak_hex(initcode), "codeHash": codehash, "from": sender}
         monkeypatch.setattr(verify, "_onchain_codehash", lambda addr: onchain)
         report = _report()
         with patch("josuke.evm.post", MockEthRpc()):
@@ -176,7 +188,7 @@ def test_verify_facets_rebuilds_runtime_from_source(monkeypatch):
         return report.failures
 
     assert check(true_codehash, deployer, true_codehash) == []
-    # codehash forged to match tampered on-chain code — the source rebuild catches it
+    # codeHash forged to match tampered on-chain code — the source rebuild catches it
     assert any("rebuilt from source" in f for f in check("0xFORGED", deployer, "0xFORGED"))
     # `from` dropped: constructor replays from zero, immutable differs, caught
     assert any("rebuilt from source" in f for f in check(true_codehash, None, true_codehash))
@@ -423,7 +435,7 @@ def test_run_verify_reports_failures(monkeypatch, tmp_path, stub_trees):
             "314": {
                 "current": {
                     "gitCommit": "c0",
-                    "facets": {"a.sol:A": {"address": A1, "initcodeHash": "0xgood", "codehash": "0xbad"}},
+                    "facets": {"a.sol:A": {"address": A1, "initcodeHash": "0xgood", "codeHash": "0xbad"}},
                 }
             }
         },

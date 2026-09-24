@@ -193,7 +193,7 @@ def test_history_entries_indexes_facets_by_address():
     state = _state(
         {
             "a.sol:A": {
-                "address": A1, "codehash": "0x1", "initcodeHash": "0x2",
+                "address": A1, "codeHash": "0x1", "initcodeHash": "0x2",
                 "constructorArgs": {"x": 1}, "from": B2,
             }
         },
@@ -202,14 +202,14 @@ def test_history_entries_indexes_facets_by_address():
     assert accept.history_entries(state) == {
         A1: {
             "source": "a.sol:A", "gitCommit": "c1",
-            "codehash": "0x1", "initcodeHash": "0x2",
+            "codeHash": "0x1", "initcodeHash": "0x2",
             "constructorArgs": {"x": 1}, "from": B2,
         }
     }
 
 
 def test_history_entries_skips_facets_with_no_address():
-    state = _state({"a.sol:A": {"codehash": "0x1", "initcodeHash": "0x2"}})
+    state = _state({"a.sol:A": {"codeHash": "0x1", "initcodeHash": "0x2"}})
     assert accept.history_entries(state) == {}
 
 
@@ -260,7 +260,7 @@ def test_run_accept_merges_proposed_into_current(monkeypatch, tmp_path, stub):
 
     proposed = {
         "gitCommit": "c1",
-        "facets": {"a.sol:A": {"address": A1, "initcodeHash": "0x3", "codehash": "0x4"}},
+        "facets": {"a.sol:A": {"address": A1, "initcodeHash": "0x3", "codeHash": "0x4"}},
         "migration": {"address": OLD},
     }
     entry = {
@@ -270,7 +270,7 @@ def test_run_accept_merges_proposed_into_current(monkeypatch, tmp_path, stub):
             "314": {
                 "current": {
                     "gitCommit": "c0",
-                    "facets": {"a.sol:A": {"address": OLD, "initcodeHash": "0x1", "codehash": "0x2"}},
+                    "facets": {"a.sol:A": {"address": OLD, "initcodeHash": "0x1", "codeHash": "0x2"}},
                 },
                 "proposed": proposed,
             }

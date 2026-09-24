@@ -76,7 +76,7 @@ served by `current` are listed up front. The pass/fail checks follow.
 
 `verify` checks the recorded state against the chain, rebuilding each recorded
 `gitCommit` in a throwaway `git worktree`. For `current`: every facet's
-`initcodeHash` recomputes from its commit, its `codehash` matches the code at
+`initcodeHash` recomputes from its commit, its `codeHash` matches the code at
 the recorded address, and the proxy dispatches each of its selectors to that
 address. For `proposed`: the same hash checks, plus `proposed.facets` is exactly
 what `facetSrc` resolves to, and the on-chain `migration` installs every
@@ -130,7 +130,7 @@ The file is an array of proxy entries.
 
 Notes:
 
-- `codehash` answers "is the right code live?" cheaply from-chain; `initcodeHash`
+- `codeHash` answers "is the right code live?" cheaply from-chain; `initcodeHash`
   answers "was it built from this commit with these args?" and is what the
   verifier recomputes from source. A facet with no constructor has
   `initcodeHash == keccak256(initcode)` and omits `constructorArgs`.

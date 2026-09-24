@@ -59,23 +59,39 @@ def verify_facets(
         facet = facet_from_source_id(source_id)
         initcode, _ = facet_initcode(facet, tree, rec.get("constructorArgs"), prompt=False)
         got = keccak_hex(initcode)
-        if got != rec["initcodeHash"]:
-            report.fail(f"{label} {source_id}: initcodeHash {got} != recorded {rec['initcodeHash']}")
+        recorded = rec.get("initcodeHash")
+        if recorded is None:
+            report.fail(f"{label} {source_id}: no recorded initcodeHash; rebuilt {got}")
+        elif got != recorded:
+            report.fail(f"{label} {source_id}: initcodeHash {got} != recorded {recorded}")
 
         # Rebuild the runtime from source and hash that too. The check above only
-        # ties the initcode to source; without this, a codehash recorded to match
+        # ties the initcode to source; without this, a codeHash recorded to match
         # tampered on-chain code would pass.
-        got = keccak_hex(_replay_runtime(initcode, rec.get("from"), rpc_cache))
-        if got != rec["codehash"]:
-            report.fail(f"{label} {source_id}: codehash {got} rebuilt from source != recorded {rec['codehash']}")
-
+        rebuilt = keccak_hex(_replay_runtime(initcode, rec.get("from"), rpc_cache))
+        recorded = rec.get("codeHash")
         address = rec.get("address")
+        onchain = _onchain_codehash(address) if address else None
+
+        if recorded is None:
+            report.fail(f"{label} {source_id}: no recorded codeHash; rebuilt {rebuilt}")
+        elif rebuilt != recorded and onchain == rebuilt:
+            # Source and chain agree; only the recorded value is wrong. Say so once.
+            report.fail(
+                f"{label} {source_id} @{address}: recorded codeHash {recorded} != "
+                f"{rebuilt} rebuilt from source and on chain"
+            )
+            continue
+        elif rebuilt != recorded:
+            report.fail(f"{label} {source_id}: codeHash {rebuilt} rebuilt from source != recorded {recorded}")
+
         if address is None:
             report.fail(f"{label} {source_id}: no recorded address; cannot check deployed code")
-            continue
-        got = _onchain_codehash(address)
-        if got != rec["codehash"]:
-            report.fail(f"{label} {source_id} @{address}: codehash {got} != recorded {rec['codehash']}")
+        elif recorded is None:
+            if onchain != rebuilt:
+                report.fail(f"{label} {source_id} @{address}: codeHash {onchain} != rebuilt {rebuilt}")
+        elif onchain != recorded:
+            report.fail(f"{label} {source_id} @{address}: codeHash {onchain} != recorded {recorded}")
 
 
 def _selector_owners(state: dict, tree: pathlib.Path) -> tuple[dict, list]:

@@ -117,13 +117,13 @@
     "facet": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["codehash", "initcodeHash"],
+      "required": ["codeHash", "initcodeHash"],
       "properties": {
         "address": {
           "$ref": "#/$defs/address",
           "description": "Where this facet is deployed. Recorded for facets (re)deployed by the upgrade script."
         },
-        "codehash": {
+        "codeHash": {
           "$ref": "#/$defs/hash32",
           "description": "keccak-256 of the deployed runtime bytecode, i.e. what EXTCODEHASH returns for `address`."
         },
@@ -147,11 +147,11 @@
     "historicalFacet": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["source", "gitCommit", "codehash", "initcodeHash"],
+      "required": ["source", "gitCommit", "codeHash", "initcodeHash"],
       "properties": {
         "source": { "$ref": "#/$defs/sourceId" },
         "gitCommit": { "$ref": "#/$defs/gitCommit" },
-        "codehash": { "$ref": "#/$defs/hash32" },
+        "codeHash": { "$ref": "#/$defs/hash32" },
         "initcodeHash": { "$ref": "#/$defs/hash32" },
         "constructorArgs": { "$ref": "#/$defs/facet/properties/constructorArgs" },
         "from": { "$ref": "#/$defs/facet/properties/from" }

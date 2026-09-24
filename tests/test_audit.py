@@ -213,12 +213,12 @@ def test_verify_history_entry_delegates_to_verify_facets(monkeypatch):
         audit, "verify_facets",
         lambda state, label, tree, report, cache: seen.update(state=state, label=label),
     )
-    entry = {"source": "a.sol:A", "gitCommit": "c0", "codehash": "0x1", "initcodeHash": "0x2"}
+    entry = {"source": "a.sol:A", "gitCommit": "c0", "codeHash": "0x1", "initcodeHash": "0x2"}
     audit.verify_history_entry(A1, entry, ".", _report(), {})
 
     assert seen["label"] == f"history {A1}"
     assert seen["state"]["facets"]["a.sol:A"] == {
-        "codehash": "0x1", "initcodeHash": "0x2", "address": A1,
+        "codeHash": "0x1", "initcodeHash": "0x2", "address": A1,
     }
 
 
@@ -254,8 +254,8 @@ def test_audit_proxy_passes_when_delegate_is_current_and_archived(monkeypatch, _
     monkeypatch.setattr(audit, "verify_selectors", lambda *a: None)
 
     history = {
-        "current": {"facets": {"a.sol:A": {"address": A1, "codehash": "0x1", "initcodeHash": "0x2"}}},
-        "history": {A1: {"source": "a.sol:A", "gitCommit": "c0", "codehash": "0x1", "initcodeHash": "0x2"}},
+        "current": {"facets": {"a.sol:A": {"address": A1, "codeHash": "0x1", "initcodeHash": "0x2"}}},
+        "history": {A1: {"source": "a.sol:A", "gitCommit": "c0", "codeHash": "0x1", "initcodeHash": "0x2"}},
     }
     report = _report()
     unarchived = audit.audit_proxy(PROXY, history, "314", 10, 0, _no_worktrees, report, {})
@@ -334,7 +334,7 @@ def test_audit_proxy_verifies_each_history_entry(monkeypatch, _no_worktrees):
 
     history = {
         "current": {"facets": {"a.sol:A": {"address": A1}}},
-        "history": {A1: {"source": "a.sol:A", "gitCommit": "c0", "codehash": "0x1", "initcodeHash": "0x2"}},
+        "history": {A1: {"source": "a.sol:A", "gitCommit": "c0", "codeHash": "0x1", "initcodeHash": "0x2"}},
     }
     audit.audit_proxy(PROXY, history, "314", 10, 0, _no_worktrees, _report(), {})
     assert calls == [f"history {A1}"]
@@ -407,7 +407,7 @@ def test_run_audit_passes_clean_ledger(monkeypatch, tmp_path, stub, capsys):
                 "history": {
                     A1: {
                         "source": "a.sol:A", "gitCommit": "c0",
-                        "codehash": "0x1", "initcodeHash": "0x2",
+                        "codeHash": "0x1", "initcodeHash": "0x2",
                     }
                 },
             }

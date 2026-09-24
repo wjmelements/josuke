@@ -169,12 +169,12 @@ def test_run_deploy_carries_unchanged_and_redeploys_changed(stub_chain, monkeypa
     _resolve_to(monkeypatch, ["a.evm", "b.evm"])
     unchanged = {
         "address": "0x" + "ab" * 20,
-        "codehash": "0x" + "11" * 32,
+        "codeHash": "0x" + "11" * 32,
         "initcodeHash": keccak_hex("a.evm".encode().hex()),
     }
     stale = {
         "address": "0x" + "cd" * 20,
-        "codehash": "0x" + "22" * 32,
+        "codeHash": "0x" + "22" * 32,
         "initcodeHash": "0x" + "00" * 32,  # will not match -> redeploy
     }
     path = _write(
@@ -207,7 +207,7 @@ def test_run_deploy_all_redeploys_unchanged_facets(stub_chain, monkeypatch, tmp_
     _resolve_to(monkeypatch, ["a.evm", "b.evm"])
     unchanged = {
         "address": "0x" + "ab" * 20,
-        "codehash": "0x" + "11" * 32,
+        "codeHash": "0x" + "11" * 32,
         "initcodeHash": keccak_hex("a.evm".encode().hex()),
     }
     path = _write(
@@ -286,7 +286,7 @@ def test_run_deploy_records_constructor_args(stub_chain, monkeypatch, tmp_path):
                             "facets": {
                                 "a.evm": {
                                     "address": "0x" + "ab" * 20,
-                                    "codehash": "0x" + "11" * 32,
+                                    "codeHash": "0x" + "11" * 32,
                                     "initcodeHash": "0x" + "00" * 32,
                                     "constructorArgs": {"owner": "0x" + "12" * 20},
                                 }
@@ -320,7 +320,7 @@ def test_run_deploy_carries_from_forward_on_redeploy(stub_chain, monkeypatch, tm
                             "facets": {
                                 "a.evm": {
                                     "address": "0x" + "ab" * 20,
-                                    "codehash": "0x" + "11" * 32,
+                                    "codeHash": "0x" + "11" * 32,
                                     "initcodeHash": "0x" + "00" * 32,  # forces redeploy
                                     "from": deployer,
                                 }
@@ -688,7 +688,7 @@ def test_run_deploy_reuses_selectors_impl_when_runtime_unchanged(stub_chain, mon
                     "314": {
                         "proposed": {
                             "gitCommit": "e" * 40,
-                            "facets": {"a.evm": {"address": "0x" + "ab" * 20, "codehash": "0x" + "11" * 32, "initcodeHash": keccak_hex("a.evm".encode().hex())}},
+                            "facets": {"a.evm": {"address": "0x" + "ab" * 20, "codeHash": "0x" + "11" * 32, "initcodeHash": keccak_hex("a.evm".encode().hex())}},
                             "selectors": prior_impl,
                         }
                     }
@@ -786,7 +786,7 @@ def test_run_deploy_clears_stale_proposed_when_no_migration_needed(stub_chain, m
                     "314": {
                         "proposed": {
                             "gitCommit": "e" * 40,
-                            "facets": {"a.evm": {"address": "0x" + "ab" * 20, "codehash": "0x" + "11" * 32, "initcodeHash": "0x" + "00" * 32}},
+                            "facets": {"a.evm": {"address": "0x" + "ab" * 20, "codeHash": "0x" + "11" * 32, "initcodeHash": "0x" + "00" * 32}},
                             "migration": {"address": "0x" + "77" * 20},
                         }
                     }

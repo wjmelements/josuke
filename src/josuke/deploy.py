@@ -396,7 +396,7 @@ def run_deploy(ledger_path, redeploy_all: bool = False):
                     verify_sourcify(facet, address, chain, root, tx_hash)
                 facet_entry = {
                     "address": address,
-                    "codehash": code_hash(address),
+                    "codeHash": code_hash(address),
                     "initcodeHash": initcode_hash,
                 }
                 if args:
