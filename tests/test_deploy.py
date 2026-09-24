@@ -424,6 +424,25 @@ def test_run_deploy_zeroes_function_removed_from_kept_facet(stub_chain, monkeypa
     assert zeroed == {"0x99999999"}
 
 
+def test_deploy_initcode_passes_password_before_create(monkeypatch):
+    calls = []
+
+    def fake_run(cmd, root, stdin_fd=None):
+        calls.append((cmd, stdin_fd))
+        if cmd[1] == "send":
+            return "0xtx\n"
+        return json.dumps({"contractAddress": A1, "from": A1})
+
+    monkeypatch.setattr(deploy, "cast_password", lambda: (["--password-file", "/dev/stdin"], 7))
+    monkeypatch.setattr(deploy, "run", fake_run)
+
+    deploy.deploy_initcode("00", ".")
+
+    assert calls[0] == (
+        ["cast", "send", "--async", "--password-file", "/dev/stdin", "--create", "0x00"], 7
+    )
+
+
 def test_verify_sourcify_calls_forge(monkeypatch):
     calls = []
     monkeypatch.setattr(deploy, "run", lambda cmd, root: calls.append(cmd) or "")

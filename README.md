@@ -110,12 +110,17 @@ is unaccounted for, not that none could have been installed silently.
 | --- | --- |
 | `ETH_RPC_URL` | Target chain endpoint. Required; also fixes the chain id. |
 | `ETH_KEYSTORE_ACCOUNT` | Keystore account name under `~/.foundry/keystores`. |
-| `ETH_PASSWORD` | Path to that keystore's password file. |
+| `ETH_PASSWORD` | Path to that keystore's password file. Optional; see below. |
 | `ETH_KEYSTORE` | Path to a keystore file or directory (alternative to the above). |
 | `ETH_FROM` | Sender address, e.g. for an unlocked node account. |
 
 The wallet variables are Foundry's own; any wallet `cast` accepts via the
 environment works.
+
+With a keystore and no `ETH_PASSWORD`, `deploy` prompts for the password once,
+before its first transaction, and checks it with `cast` before spending any gas.
+It hands the password to each `cast send` through an anonymous file on stdin,
+never through argv, the environment, or a named file.
 
 ## josuke.json
 
