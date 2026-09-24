@@ -346,7 +346,7 @@ def run_deploy(ledger_path, redeploy_all: bool = False):
 
     # keystore_session: prompt for a keystore password at most once, on the first deploy
     # broadcast_session: plan every deployment, then send them back to back and wait for them together
-    with keystore_session(), broadcast_session() as broadcast, SourceTrees(root) as trees:
+    with keystore_session(), broadcast_session(chain) as broadcast, SourceTrees(root) as trees:
         for entry in ledger:
             proxy = to_checksum_address(entry["address"])
             deployments = entry.setdefault("deployments", {})
