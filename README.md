@@ -115,6 +115,7 @@ environment:
 | `ETH_PASSWORD` | Path to that keystore's password file. Optional; see below. |
 | `ETH_KEYSTORE` | Path to a keystore file or directory (alternative to the above). |
 | `ETH_FROM` | Sender address, e.g. for an unlocked node account. |
+| `JOSUKE_TRACE` | Set to log timestamped RPC calls, `evm` calls and subprocesses to stderr. |
 
 The wallet variables are Foundry's own; any wallet `cast` accepts via the
 environment works.

@@ -7,6 +7,7 @@ import click
 from requests import post
 
 from .proc import run
+from .trace import brief, log, span
 
 # artifact paths already built this process, so repeated facet_abi / facet_initcode
 # calls don't re-invoke make (make no-ops when up to date, but this also keeps its
@@ -58,19 +59,20 @@ class EvmRelay:
         and return evm's output line: the runtime hex for a create, ``""`` on a
         revert. ``on_exchange(rpc_request, rpc_response)`` sees every request/
         response pair, cache hits included."""
-        self._write(json.dumps(request))
-        while True:
-            line = self._proc.stdout.readline()
-            if line == "":
-                raise click.ClickException("evm -nx exited before returning a result")
-            line = line.strip()
-            if line[:1] not in ("{", "["):
-                return line
-            rpc_request = json.loads(line)
-            rpc_response = self._answer(rpc_request)
-            self._write(json.dumps(rpc_response))
-            if on_exchange is not None:
-                on_exchange(rpc_request, rpc_response)
+        with span(f"evm {brief(request)}"):
+            self._write(json.dumps(request))
+            while True:
+                line = self._proc.stdout.readline()
+                if line == "":
+                    raise click.ClickException("evm -nx exited before returning a result")
+                line = line.strip()
+                if line[:1] not in ("{", "["):
+                    return line
+                rpc_request = json.loads(line)
+                rpc_response = self._answer(rpc_request)
+                self._write(json.dumps(rpc_response))
+                if on_exchange is not None:
+                    on_exchange(rpc_request, rpc_response)
 
     def _answer(self, rpc_request):
         """Resolve one JSON-RPC request (object or batch array) from the cache,
@@ -82,11 +84,14 @@ class EvmRelay:
             key = (req["method"], json.dumps(req.get("params", [])))
             if key in self.cache:
                 answers[i] = {"jsonrpc": "2.0", "id": req.get("id"), "result": self.cache[key]}
+                log(f"evm rpc cache hit {req['method']} {brief(req.get('params', []))}")
             else:
                 misses.append((i, req, key))
         if misses:
             payload = [req for _, req, _ in misses]
-            response = post(environ["ETH_RPC_URL"], json=payload if isinstance(rpc_request, list) else payload[0])
+            label = ", ".join(f"{req['method']} {brief(req.get('params', []))}" for req in payload)
+            with span(f"evm rpc [{len(payload)}] {label}"):
+                response = post(environ["ETH_RPC_URL"], json=payload if isinstance(rpc_request, list) else payload[0])
             if response.status_code != 200:
                 raise click.ClickException(f"ETH_RPC_URL: HTTP {response.status_code}")
             fetched = json.loads(response.text)
