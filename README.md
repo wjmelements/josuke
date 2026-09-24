@@ -104,7 +104,9 @@ can run arbitrary code, so a clean audit means no delegate the proxy announced
 is unaccounted for, not that none could have been installed silently.
 `DiamondDelegateCall` invocations are printed but not yet verified.
 
-`deploy` builds with `forge` and broadcasts with `cast`, reading the environment:
+`deploy` builds with `forge` and broadcasts with `cast`, sending its
+deployments together and reporting each as it confirms. It reads the
+environment:
 
 | Variable | Purpose |
 | --- | --- |

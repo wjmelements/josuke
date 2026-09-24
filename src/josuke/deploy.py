@@ -4,10 +4,10 @@ from collections import namedtuple
 from os import environ
 
 import click
-import click_spinner
 from eth_abi import encode as abi_encode
 from eth_utils import keccak, to_checksum_address
 
+from .broadcast import broadcast_session, create
 from .delegate import ContractSource, Delegate
 from .erc8167 import SELECTORS_SELECTOR, generated_selectors, selectors_method
 from .ethjsonrpc import chain_id, eth_get_code
@@ -17,7 +17,7 @@ from .ledger import load_ledger, write_ledger
 from .migration import Migration, SetDelegate
 from .proc import run
 from .selectors import Selector
-from .signer import cast_password, keystore_session
+from .signer import keystore_session
 from .storage import ProxyStorage, slot_address
 from .worktree import SourceTrees
 
@@ -156,19 +156,10 @@ def keccak_hex(data_hex: str) -> str:
     return "0x" + keccak(bytes.fromhex(data_hex.removeprefix("0x"))).hex()
 
 
-def deploy_initcode(initcode_hex: str, root: pathlib.Path) -> tuple[str, str, str]:
-    password_args, password_fd = cast_password()
-    tx_hash = run(
-        ["cast", "send", "--async", *password_args, "--create", "0x" + initcode_hex], root, stdin_fd=password_fd
-    ).strip()
-    click.echo(f"deploying: tx {tx_hash} pending...")
-    with click_spinner.spinner():
-        out = run(["cast", "receipt", tx_hash, "--json"], root)
-    receipt = json.loads(out)
-    address = receipt.get("contractAddress")
-    if not address:
-        raise click.ClickException(f"cast receipt returned no contractAddress:\n{out}")
-    return to_checksum_address(address), to_checksum_address(receipt["from"]), tx_hash
+def deploy_initcode(initcode_hex: str, root: pathlib.Path) -> tuple[str, str]:
+    """(address, sender) of a contract creation planned in the enclosing
+    `broadcast_session`, which sends it and waits for it later."""
+    return create(initcode_hex, root)
 
 
 def code_hash(address: str) -> str:
@@ -350,9 +341,12 @@ def run_deploy(ledger_path, redeploy_all: bool = False):
     run(["forge", "build"], root)
 
     run_deployed: dict[str, dict] = {}  # initcodeHash -> facet entry, shared across proxies this run
+    unmined: list[tuple[Facet, dict, str, str, str | None]] = []  # (facet, entry, initcode, sender, recorded from)
+    summaries: list[str] = []  # one line per proxy, reported once its deployments are mined
 
     # keystore_session: prompt for a keystore password at most once, on the first deploy
-    with keystore_session(), SourceTrees(root) as trees:  # each `current.gitCommit`, for its selectors
+    # broadcast_session: plan every deployment, then send them back to back and wait for them together
+    with keystore_session(), broadcast_session() as broadcast, SourceTrees(root) as trees:
         for entry in ledger:
             proxy = to_checksum_address(entry["address"])
             deployments = entry.setdefault("deployments", {})
@@ -396,22 +390,17 @@ def run_deploy(ledger_path, redeploy_all: bool = False):
                     continue
 
                 click.echo(f"deploying {facet.source_id}")
-                address, sender, tx_hash = deploy_initcode(initcode, root)
-                if facet.kind == "sol":
-                    verify_sourcify(facet, address, chain, root, tx_hash)
+                address, sender = deploy_initcode(initcode, root)
                 facet_entry = {
                     "address": address,
-                    "codeHash": code_hash(address),
+                    "codeHash": None,  # read from chain once mined
                     "initcodeHash": initcode_hash,
                 }
                 if args:
                     facet_entry["constructorArgs"] = args
-                if deployer_derived(initcode, sender):
-                    facet_entry["from"] = sender  # runtime depends on sender
-                elif recorded.get("from"):
-                    facet_entry["from"] = recorded["from"]
                 proposed_facets[facet.source_id] = facet_entry
                 run_deployed.setdefault(initcode_hash, facet_entry)
+                unmined.append((facet, facet_entry, initcode, sender, recorded.get("from")))
                 deployed += 1
 
             proposed = {"gitCommit": commit, "facets": proposed_facets}
@@ -439,6 +428,22 @@ def run_deploy(ledger_path, redeploy_all: bool = False):
             if selectors_impl is not None:
                 notes.append("selectors() unchanged" if selectors_impl is prior_selectors else "selectors() generated")
             notes.append("migration ready" if migration is not None else "no migration needed")
-            click.echo(f"{proxy} chain {chain}: " + ", ".join(notes))
+            summaries.append(f"{proxy} chain {chain}: " + ", ".join(notes))
 
+        broadcast.send_all(root)
+        # Replaying constructors takes RPC round trips, so it runs while the transactions are mined.
+        for facet, facet_entry, initcode, sender, recorded_from in unmined:
+            if deployer_derived(initcode, sender):
+                facet_entry["from"] = sender  # runtime depends on sender
+            elif recorded_from:
+                facet_entry["from"] = recorded_from
+        broadcast.wait(root)
+        for facet, facet_entry, *_ in unmined:
+            facet_entry["codeHash"] = code_hash(facet_entry["address"])
+            if facet.kind == "sol":
+                tx_hash = broadcast.tx_hash(facet_entry["address"])
+                verify_sourcify(facet, facet_entry["address"], chain, root, tx_hash)
+
+    for summary in summaries:
+        click.echo(summary)
     write_ledger(ledger_path, ledger)
