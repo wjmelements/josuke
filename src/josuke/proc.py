@@ -4,12 +4,13 @@ import subprocess
 import click
 
 
-def run(cmd: list, root: pathlib.Path | None = None, stdin: str = None) -> str:
+def run(cmd: list, root: pathlib.Path | None = None, stdin: str = None, stdin_fd: int | None = None) -> str:
     """Run `cmd` (optionally in `root`), returning stdout; raise a ClickException
-    on a missing binary or a non-zero exit."""
+    on a missing binary or a non-zero exit. `stdin` is text to feed it;
+    `stdin_fd` is an open file descriptor to use as its stdin instead."""
     try:
         return subprocess.run(
-            cmd, cwd=root, input=stdin, capture_output=True, text=True, check=True
+            cmd, cwd=root, input=stdin, stdin=stdin_fd, capture_output=True, text=True, check=True
         ).stdout
     except FileNotFoundError:
         raise click.ClickException(f"{cmd[0]}: command not found")

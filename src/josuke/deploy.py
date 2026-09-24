@@ -17,6 +17,7 @@ from .ledger import load_ledger, write_ledger
 from .migration import Migration, SetDelegate
 from .proc import run
 from .selectors import Selector
+from .signer import cast_password, keystore_session
 from .storage import ProxyStorage, slot_address
 from .worktree import SourceTrees
 
@@ -156,7 +157,10 @@ def keccak_hex(data_hex: str) -> str:
 
 
 def deploy_initcode(initcode_hex: str, root: pathlib.Path) -> tuple[str, str, str]:
-    tx_hash = run(["cast", "send", "--async", "--create", "0x" + initcode_hex], root).strip()
+    password_args, password_fd = cast_password()
+    tx_hash = run(
+        ["cast", "send", "--async", *password_args, "--create", "0x" + initcode_hex], root, stdin_fd=password_fd
+    ).strip()
     click.echo(f"deploying: tx {tx_hash} pending...")
     with click_spinner.spinner():
         out = run(["cast", "receipt", tx_hash, "--json"], root)
@@ -347,7 +351,8 @@ def run_deploy(ledger_path, redeploy_all: bool = False):
 
     run_deployed: dict[str, dict] = {}  # initcodeHash -> facet entry, shared across proxies this run
 
-    with SourceTrees(root) as trees:  # each `current.gitCommit`, for its selectors
+    # keystore_session: prompt for a keystore password at most once, on the first deploy
+    with keystore_session(), SourceTrees(root) as trees:  # each `current.gitCommit`, for its selectors
         for entry in ledger:
             proxy = to_checksum_address(entry["address"])
             deployments = entry.setdefault("deployments", {})
