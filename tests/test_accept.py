@@ -186,6 +186,46 @@ def test_verify_migrated_passes_with_generated_selectors_routed(monkeypatch):
     assert report.failures == []
 
 
+# -- history_entries -------------------------------------------------------
+
+
+def test_history_entries_indexes_facets_by_address():
+    state = _state(
+        {
+            "a.sol:A": {
+                "address": A1, "codehash": "0x1", "initcodeHash": "0x2",
+                "constructorArgs": {"x": 1}, "from": B2,
+            }
+        },
+        commit="c1",
+    )
+    assert accept.history_entries(state) == {
+        A1: {
+            "source": "a.sol:A", "gitCommit": "c1",
+            "codehash": "0x1", "initcodeHash": "0x2",
+            "constructorArgs": {"x": 1}, "from": B2,
+        }
+    }
+
+
+def test_history_entries_skips_facets_with_no_address():
+    state = _state({"a.sol:A": {"codehash": "0x1", "initcodeHash": "0x2"}})
+    assert accept.history_entries(state) == {}
+
+
+def test_history_entries_records_generated_selectors_by_facet_set():
+    state = _state({"a.sol:A": {"address": A1}, "b.sol:B": {"address": B2}}, commit="c1")
+    state["selectors"] = {"address": OLD}
+    assert accept.history_entries(state)[OLD] == {
+        "gitCommit": "c1", "selectorsFor": ["a.sol:A", "b.sol:B"],
+    }
+
+
+def test_history_entries_omits_selectors_when_absent():
+    state = _state({"a.sol:A": {"address": A1}})
+    assert OLD not in accept.history_entries(state)
+
+
 # -- run_accept ---------------------------------------------------------
 
 

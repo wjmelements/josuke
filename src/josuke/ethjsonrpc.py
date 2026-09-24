@@ -7,22 +7,45 @@ import click
 import requests
 
 
+class RpcError(click.ClickException):
+    """The node answered with an HTTP failure or a JSON-RPC error."""
+
+
 def rpc(method: str, params: list):
     resp = requests.post(
         environ["ETH_RPC_URL"],
         json={"id": 1, "jsonrpc": "2.0", "method": method, "params": params},
     )
     if resp.status_code != 200:
-        raise click.ClickException(f"{method}: HTTP {resp.status_code}")
+        raise RpcError(f"{method}: HTTP {resp.status_code}")
     body = resp.json()
     if body.get("error"):
-        raise click.ClickException(f"{method}: {body['error']}")
+        raise RpcError(f"{method}: {body['error']}")
     return body["result"]
 
 
 def eth_get_code(address: str, block: str = "latest") -> str:
     """The 0x-prefixed runtime bytecode at `address`."""
     return rpc("eth_getCode", [address, block])
+
+
+def eth_block_number() -> int:
+    return int(rpc("eth_blockNumber", []), 16)
+
+
+def eth_get_logs(address: str, topics: list, from_block: int, to_block: int) -> list:
+    """Logs emitted by `address` over the inclusive block range, matching `topics`."""
+    return rpc(
+        "eth_getLogs",
+        [
+            {
+                "address": address,
+                "topics": topics,
+                "fromBlock": hex(from_block),
+                "toBlock": hex(to_block),
+            }
+        ],
+    )
 
 
 def chain_id() -> str:

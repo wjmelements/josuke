@@ -6,6 +6,7 @@ import click
 from eth_utils import to_checksum_address
 
 from .accept import run_accept
+from .audit import run_audit
 from .deploy import run_deploy
 from .ledger import DEFAULT_LEDGER, load_ledger, parse_address, write_ledger
 from .verify import run_verify
@@ -109,3 +110,23 @@ def accept(ledger_path):
     gitCommit in a temporary worktree.
     """
     run_accept(ledger_path)
+
+
+@main.command()
+@ledger_option
+@click.option(
+    "--from-block",
+    type=click.IntRange(min=0),
+    default=None,
+    help="Scan logs from this block instead of finding the proxy's deployment "
+    "(which needs a node with historical state).",
+)
+def audit(ledger_path, from_block):
+    """Audit every delegate each proxy has installed, per $ETH_RPC_URL.
+
+    Reads the proxy's SelectorDelegated and DiamondDelegateCall logs from its
+    deployment onward. Every delegate installed must be recorded in the ledger,
+    and each `history` entry is verified against its recorded commit, which is
+    rebuilt in a temporary worktree. Migrations are listed but not verified.
+    """
+    run_audit(ledger_path, from_block)

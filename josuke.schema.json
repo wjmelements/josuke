@@ -66,6 +66,17 @@
         "proposed": {
           "$ref": "#/$defs/deploymentState",
           "description": "A pending upgrade awaiting execution. Merged into \"current\" by `josuke accept` once the migration is confirmed on chain."
+        },
+        "history": {
+          "type": "object",
+          "propertyNames": { "$ref": "#/$defs/address" },
+          "additionalProperties": {
+            "oneOf": [
+              { "$ref": "#/$defs/historicalFacet" },
+              { "$ref": "#/$defs/historicalSelectors" }
+            ]
+          },
+          "description": "Every delegate ever installed on the proxy, keyed by address, each with enough to rebuild it from source and verify it against the chain."
         }
       }
     },
@@ -131,6 +142,38 @@
           "description": "Deployer address, supplied as msg.sender when the verifier re-simulates the constructor. Record it when an immutable is derived from the deployer; omit it otherwise."
         }
       }
+    },
+
+    "historicalFacet": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["source", "gitCommit", "codehash", "initcodeHash"],
+      "properties": {
+        "source": { "$ref": "#/$defs/sourceId" },
+        "gitCommit": { "$ref": "#/$defs/gitCommit" },
+        "codehash": { "$ref": "#/$defs/hash32" },
+        "initcodeHash": { "$ref": "#/$defs/hash32" },
+        "constructorArgs": { "$ref": "#/$defs/facet/properties/constructorArgs" },
+        "from": { "$ref": "#/$defs/facet/properties/from" }
+      },
+      "description": "A facet, as in deploymentState.facets, plus the source it was built from and the commit to build it at. Its address is the key of the enclosing \"history\" map."
+    },
+
+    "historicalSelectors": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["gitCommit", "selectorsFor"],
+      "properties": {
+        "gitCommit": { "$ref": "#/$defs/gitCommit" },
+        "selectorsFor": {
+          "type": "array",
+          "minItems": 1,
+          "uniqueItems": true,
+          "items": { "$ref": "#/$defs/sourceId" },
+          "description": "The facet set whose selectors the generated selectors() delegate returns. Its bytecode is fully determined by these facets at gitCommit, so nothing else is recorded."
+        }
+      },
+      "description": "A generated selectors() delegate; see deploymentState.selectors."
     }
   }
 }
