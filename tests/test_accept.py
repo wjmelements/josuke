@@ -226,6 +226,31 @@ def test_history_entries_omits_selectors_when_absent():
     assert OLD not in accept.history_entries(state)
 
 
+# -- retired_entries -------------------------------------------------------
+
+
+def test_retired_entries_archives_only_replaced_delegates():
+    current = _state({"a.sol:A": {"address": A1}, "b.sol:B": {"address": OLD}}, commit="c0")
+    accepted = _state({"a.sol:A": {"address": A1}, "b.sol:B": {"address": B2}}, commit="c1")
+    assert accept.retired_entries(current, accepted) == {
+        OLD: {"source": "b.sol:B", "gitCommit": "c0"},
+    }
+
+
+def test_retired_entries_archives_replaced_selectors_under_old_facet_set():
+    current = _state({"a.sol:A": {"address": A1}}, commit="c0")
+    current["selectors"] = {"address": OLD}
+    accepted = _state({"a.sol:A": {"address": A1}, "b.sol:B": {"address": B2}}, commit="c1")
+    accepted["selectors"] = {"address": to_checksum_address("0x" + "5e" * 20)}
+    assert accept.retired_entries(current, accepted) == {
+        OLD: {"gitCommit": "c0", "selectorsFor": ["a.sol:A"]},
+    }
+
+
+def test_retired_entries_empty_without_current():
+    assert accept.retired_entries({}, _state({"a.sol:A": {"address": A1}})) == {}
+
+
 # -- run_accept ---------------------------------------------------------
 
 
@@ -283,6 +308,9 @@ def test_run_accept_merges_proposed_into_current(monkeypatch, tmp_path, stub):
     history = json.loads(path.read_text())[0]["deployments"]["314"]
     assert "proposed" not in history
     assert history["current"] == proposed
+    assert history["history"] == {
+        OLD: {"source": "a.sol:A", "gitCommit": "c0", "initcodeHash": "0x1", "codeHash": "0x2"},
+    }
 
 
 def test_run_accept_first_deployment_has_no_current(monkeypatch, tmp_path, stub):
@@ -310,6 +338,7 @@ def test_run_accept_first_deployment_has_no_current(monkeypatch, tmp_path, stub)
     history = json.loads(path.read_text())[0]["deployments"]["314"]
     assert "proposed" not in history
     assert history["current"]["gitCommit"] == "c1"
+    assert "history" not in history  # nothing replaced, nothing archived
 
 
 def test_run_accept_leaves_ledger_untouched_on_failure(monkeypatch, tmp_path, stub):

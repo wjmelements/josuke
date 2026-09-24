@@ -89,16 +89,17 @@ chain that the migration took effect — every `proposed` selector now routes to
 its facet (new and unchanged alike) and every selector dropped since `current`
 is cleared — then merges `proposed` into `current` so the ledger's `current`
 matches the live code, and removes `proposed`. It exits non-zero without
-touching the ledger if any check fails. It also archives every delegate of the
-accepted state into `history`, keyed by address, so `audit` has a source to
-check a delegate against even after a later upgrade replaces it.
+touching the ledger if any check fails. It also archives each delegate of the
+old `current` that the accepted state no longer installs into `history`, keyed
+by address, so `audit` still has a source to check it against.
 
 `audit` reads the proxy's `SelectorDelegated` and `DiamondDelegateCall` logs
 from its deployment onward (bisecting `eth_getCode` to find that block, unless
 `--from-block` is given) and requires every delegate they name to be recorded
-somewhere in the ledger — `current`, `proposed`, or `history`. Each `history`
-entry is then verified against its recorded commit the same way `verify` checks
-`current`. `SelectorDelegated` is only RECOMMENDED by ERC-8167 and a migration
+somewhere in the ledger — `current` or `history`. A delegate recorded only in
+`proposed` is a warning: the migration has run, so `accept` it. Each `current`
+facet and `history` entry is then verified against its recorded commit the same
+way `verify` checks `current`. `SelectorDelegated` is only RECOMMENDED by ERC-8167 and a migration
 can run arbitrary code, so a clean audit means no delegate the proxy announced
 is unaccounted for, not that none could have been installed silently.
 `DiamondDelegateCall` invocations are printed but not yet verified.
@@ -149,9 +150,8 @@ Notes:
 - `selectors` carries no hashes for the same reason: it is the `selectors()`
   method generated from the set of selectors the `deploymentState` installs. It
   is absent when a facet implements `selectors()` itself.
-- `history` records every delegate a proxy has ever had installed, keyed by
-  address, so it can still be verified against source after a later upgrade
-  replaces it. `accept` adds to it; `audit` reads it.
+- `history` records every former delegate of a proxy, keyed by address, so it
+  can still be verified against source. `accept` adds to it; `audit` reads it.
 
 ### Example
 

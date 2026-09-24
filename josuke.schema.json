@@ -76,7 +76,7 @@
               { "$ref": "#/$defs/historicalSelectors" }
             ]
           },
-          "description": "Every delegate ever installed on the proxy, keyed by address, each with enough to rebuild it from source and verify it against the chain."
+          "description": "Every former delegate of the proxy, keyed by address, each with enough to rebuild it from source and verify it against the chain."
         }
       }
     },

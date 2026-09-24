@@ -57,8 +57,7 @@ def accepted_state(current: dict, proposed: dict) -> dict:
     `proposed.facets` is already the complete resolved facet set — `deploy`
     copies unchanged facets forward — so acceptance is a wholesale swap.
     `current`'s prior contents are dropped from `current`, not from the ledger:
-    every delegate it installed was archived by `history_entries` when it was
-    itself accepted.
+    `retired_entries` archives the delegates it replaces into `history`.
     """
     accepted = {"gitCommit": proposed["gitCommit"], "facets": proposed["facets"]}
     if "selectors" in proposed:
@@ -91,6 +90,17 @@ def history_entries(state: dict) -> dict:
             "selectorsFor": sorted(state["facets"]),
         }
     return entries
+
+
+def retired_entries(current: dict, accepted: dict) -> dict:
+    """`history` entries for the delegates `current` installs that `accepted` does not.
+
+    Delegates still installed stay recorded only in `current`; each one moves to
+    `history` when a later `accept` replaces it."""
+    if not current:
+        return {}  # no `current` recorded: nothing to retire
+    kept = history_entries(accepted).keys()
+    return {a: e for a, e in history_entries(current).items() if a not in kept}
 
 
 def run_accept(ledger_path):
@@ -131,7 +141,7 @@ def run_accept(ledger_path):
             if len(report.failures) > before:
                 continue  # leave this proxy's proposed state untouched
 
-            pending.append((proxy, history, accepted_state(current or {}, proposed)))
+            pending.append((proxy, history, current or {}, accepted_state(current or {}, proposed)))
 
     if report.failures:
         raise click.ClickException(
@@ -143,9 +153,11 @@ def run_accept(ledger_path):
         click.echo("nothing to accept")
         return
 
-    for proxy, history, accepted in pending:
+    for proxy, history, current, accepted in pending:
         history["current"] = accepted
         del history["proposed"]
-        history.setdefault("history", {}).update(history_entries(accepted))
+        retired = retired_entries(current, accepted)
+        if retired:
+            history.setdefault("history", {}).update(retired)
         click.echo(f"{proxy} chain {chain}: accepted proposed -> current")
     write_ledger(ledger_path, ledger)

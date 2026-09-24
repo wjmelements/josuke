@@ -4,8 +4,8 @@
 later swapped out leaves no trace in storage, but its `SelectorDelegated` event
 is still in the logs. `audit` reads those logs from the proxy's deployment
 onward, requires every delegate they name to be recorded in the ledger
-(`current`, `proposed`, or `history`), and verifies each `history` entry against
-its source the way `verify` does `current` and `proposed`.
+(`current`, `history`, or — pending `accept` — `proposed`), and verifies each
+`current` facet and `history` entry against its source the way `verify` does.
 
 `SelectorDelegated` is only RECOMMENDED by ERC-8167, and a migration is arbitrary
 code, so a clean audit shows that no *announced* delegate is unaccounted for, not
@@ -139,25 +139,32 @@ def _topic_address(topic: str) -> str:
     return to_checksum_address("0x" + topic[-40:])
 
 
+def _state_delegates(name: str, state: dict | None) -> dict[str, str]:
+    """address -> `<name> <source>` for every delegate a deployment state records."""
+    if not state:
+        return {}
+    delegates = {
+        to_checksum_address(rec["address"]): f"{name} {source_id}"
+        for source_id, rec in state["facets"].items()
+        if rec.get("address")
+    }
+    if state.get("selectors"):
+        delegates[to_checksum_address(state["selectors"]["address"])] = f"{name} selectors()"
+    return delegates
+
+
 def recorded_delegates(history: dict) -> dict[str, str]:
-    """address -> where the ledger records it, across `current`, `proposed` and `history`."""
-    recorded: dict[str, str] = {}
-    for name in ("current", "proposed"):
-        state = history.get(name)
-        if not state:
-            continue
-        for source_id, rec in state["facets"].items():
-            if rec.get("address"):
-                recorded.setdefault(to_checksum_address(rec["address"]), f"{name} {source_id}")
-        if state.get("selectors"):
-            recorded.setdefault(
-                to_checksum_address(state["selectors"]["address"]), f"{name} selectors()"
-            )
-    for address, entry in history.get("history", {}).items():
-        recorded.setdefault(
-            to_checksum_address(address), f"history {entry.get('source', 'selectors()')}"
-        )
-    return recorded
+    """address -> where the ledger records it, preferring `current`, then `history`,
+    then `proposed`, so a `proposed` label means it is recorded nowhere else."""
+    archived = {
+        to_checksum_address(address): f"history {entry.get('source', 'selectors()')}"
+        for address, entry in history.get("history", {}).items()
+    }
+    return (
+        _state_delegates("proposed", history.get("proposed"))
+        | archived
+        | _state_delegates("current", history.get("current"))
+    )
 
 
 def verify_history_entry(address: str, entry: dict, tree: pathlib.Path, report: Report, rpc_cache: dict) -> None:
@@ -188,7 +195,7 @@ def audit_proxy(
     report: Report,
     rpc_cache: dict,
 ) -> int:
-    """Audit one proxy; returns how many installed delegates are missing from `history`."""
+    """Audit one proxy; returns how many installed delegates are recorded only in `proposed`."""
     if from_block is None:
         from_block = find_deploy_block(proxy, latest)
         origin = f"deployed at block {from_block}"
@@ -208,8 +215,7 @@ def audit_proxy(
         if d.delegate != ZERO_ADDRESS:
             installs.setdefault(d.delegate, []).append(d)
 
-    archived = {to_checksum_address(a) for a in history.get("history", {})}
-    unarchived = 0
+    unaccepted = 0
 
     for delegate, ds in installs.items():
         first = ds[0]
@@ -217,9 +223,12 @@ def audit_proxy(
         summary = f"{len(ds)} selector install(s), first at block {first.block}"
         if where:
             click.echo(f"  delegate {delegate} {where}: {summary}")
-            if delegate not in archived:
-                unarchived += 1
-                click.echo(f"warning: delegate {delegate} ({where}) is not in history", err=True)
+            if where.startswith("proposed "):
+                unaccepted += 1
+                click.echo(
+                    f"warning: delegate {delegate} ({where}) is installed but only recorded in proposed",
+                    err=True,
+                )
         else:
             click.echo(f"  delegate {delegate} UNRECORDED: {summary}")
             report.fail(
@@ -227,12 +236,22 @@ def audit_proxy(
                 f"{first.block} (tx {first.tx}) is not recorded in current, proposed or history"
             )
 
+    # SelectorDelegated is only RECOMMENDED, so a delegate missing from the logs is not a failure.
+    current = history.get("current")
+    if current:
+        for address, where in _state_delegates("current", current).items():
+            if address not in installs:
+                click.echo(f"warning: {where} {address} was never installed per the logs", err=True)
+        tree = trees.get(current["gitCommit"])
+        verify_facets(current, "current", tree, report, rpc_cache)
+        verify_selectors(current, "current", tree, report)
+
     for address, entry in history.get("history", {}).items():
         address = to_checksum_address(address)
-        if address not in installs:  # SelectorDelegated is only RECOMMENDED, so not a failure
+        if address not in installs:
             click.echo(f"warning: history {address} was never installed per the logs", err=True)
         verify_history_entry(address, entry, trees.get(entry["gitCommit"]), report, rpc_cache)
-    return unarchived
+    return unaccepted
 
 
 def run_audit(ledger_path, from_block: int | None = None):
@@ -246,7 +265,7 @@ def run_audit(ledger_path, from_block: int | None = None):
     report = Report()
     rpc_cache: dict = {}
     audited = 0
-    unarchived = 0
+    unaccepted = 0
 
     with SourceTrees(root) as trees:
         for entry in ledger:
@@ -256,17 +275,17 @@ def run_audit(ledger_path, from_block: int | None = None):
                 click.echo(f"{proxy}: nothing recorded on chain {chain}")
                 continue
             before = len(report.failures)
-            unarchived += audit_proxy(
+            unaccepted += audit_proxy(
                 proxy, history, chain, latest, from_block, trees, report, rpc_cache
             )
             if len(report.failures) == before:
                 audited += 1
                 click.secho(f"✓ {proxy}: every installed delegate is recorded and verified", fg="green")
 
-    if unarchived:
+    if unaccepted:
         click.echo(
-            f"warning: {unarchived} installed delegate(s) are not in history; "
-            f"`josuke accept` records the delegates it accepts",
+            f"warning: {unaccepted} installed delegate(s) are recorded only in proposed; "
+            f"run `josuke accept` to move them into current",
             err=True,
         )
 

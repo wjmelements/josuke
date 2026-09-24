@@ -204,6 +204,17 @@ def test_recorded_delegates_covers_current_proposed_and_history():
     assert recorded[to_checksum_address("0x" + "cc" * 20)] == "history old.sol:Old"
 
 
+def test_recorded_delegates_prefers_current_then_history_over_proposed():
+    history = {
+        "current": {"facets": {"a.sol:A": {"address": A1}}},
+        "proposed": {"facets": {"a.sol:A": {"address": A1}, "old.sol:Old": {"address": OLD}}},
+        "history": {OLD: {"source": "old.sol:Old"}},
+    }
+    recorded = audit.recorded_delegates(history)
+    assert recorded[A1] == "current a.sol:A"
+    assert recorded[OLD] == "history old.sol:Old"
+
+
 # -- verify_history_entry ------------------------------------------------------
 
 
@@ -248,41 +259,40 @@ def _no_worktrees(monkeypatch):
     return Trees()
 
 
-def test_audit_proxy_passes_when_delegate_is_current_and_archived(monkeypatch, _no_worktrees):
+def test_audit_proxy_passes_when_delegate_is_current(monkeypatch, _no_worktrees):
     monkeypatch.setattr(audit, "get_logs", lambda *a: [_delegated_log("0x11111111", A1)])
     monkeypatch.setattr(audit, "verify_facets", lambda *a, **k: None)
     monkeypatch.setattr(audit, "verify_selectors", lambda *a: None)
 
     history = {
-        "current": {"facets": {"a.sol:A": {"address": A1, "codeHash": "0x1", "initcodeHash": "0x2"}}},
-        "history": {A1: {"source": "a.sol:A", "gitCommit": "c0", "codeHash": "0x1", "initcodeHash": "0x2"}},
+        "current": _state({"a.sol:A": {"address": A1, "codeHash": "0x1", "initcodeHash": "0x2"}}),
     }
     report = _report()
-    unarchived = audit.audit_proxy(PROXY, history, "314", 10, 0, _no_worktrees, report, {})
+    unaccepted = audit.audit_proxy(PROXY, history, "314", 10, 0, _no_worktrees, report, {})
 
     assert report.failures == []
-    assert unarchived == 0
+    assert unaccepted == 0
 
 
 def test_audit_proxy_flags_unrecorded_delegate(monkeypatch, _no_worktrees):
     monkeypatch.setattr(audit, "get_logs", lambda *a: [_delegated_log("0x11111111", A1)])
 
-    history = {"current": {"facets": {}}}
+    history = {"current": _state({})}
     report = _report()
     audit.audit_proxy(PROXY, history, "314", 10, 0, _no_worktrees, report, {})
 
     assert any("not recorded" in f for f in report.failures)
 
 
-def test_audit_proxy_counts_recorded_but_unarchived_delegate(monkeypatch, _no_worktrees):
+def test_audit_proxy_counts_delegate_recorded_only_in_proposed(monkeypatch, _no_worktrees):
     monkeypatch.setattr(audit, "get_logs", lambda *a: [_delegated_log("0x11111111", A1)])
 
-    history = {"current": {"facets": {"a.sol:A": {"address": A1}}}}
+    history = {"proposed": _state({"a.sol:A": {"address": A1}})}
     report = _report()
-    unarchived = audit.audit_proxy(PROXY, history, "314", 10, 0, _no_worktrees, report, {})
+    unaccepted = audit.audit_proxy(PROXY, history, "314", 10, 0, _no_worktrees, report, {})
 
-    assert report.failures == []  # recorded in current, so not a failure
-    assert unarchived == 1
+    assert report.failures == []  # recorded in proposed, so not a failure
+    assert unaccepted == 1
 
 
 def test_audit_proxy_ignores_removal_delegations(monkeypatch, _no_worktrees):
@@ -293,12 +303,12 @@ def test_audit_proxy_ignores_removal_delegations(monkeypatch, _no_worktrees):
             _delegated_log("0x11111111", ZERO, block=2),
         ],
     )
-    history = {"current": {"facets": {"a.sol:A": {"address": A1}}}}
+    history = {"proposed": _state({"a.sol:A": {"address": A1}})}
     report = _report()
-    unarchived = audit.audit_proxy(PROXY, history, "314", 10, 0, _no_worktrees, report, {})
+    unaccepted = audit.audit_proxy(PROXY, history, "314", 10, 0, _no_worktrees, report, {})
 
     assert report.failures == []
-    assert unarchived == 1  # only the install is tallied, not the removal
+    assert unaccepted == 1  # only the install is tallied, not the removal
 
 
 def test_audit_proxy_finds_deploy_block_when_not_given(monkeypatch, _no_worktrees):
@@ -311,7 +321,7 @@ def test_audit_proxy_finds_deploy_block_when_not_given(monkeypatch, _no_worktree
 
     monkeypatch.setattr(audit, "get_logs", fake_get_logs)
 
-    history = {"current": {"facets": {}}}
+    history = {"current": _state({})}
     audit.audit_proxy(PROXY, history, "314", 100, None, _no_worktrees, _report(), {})
     assert seen["range"] == (42, 100)
 
@@ -322,22 +332,28 @@ def test_audit_proxy_propagates_find_deploy_block_failure(monkeypatch, _no_workt
 
     monkeypatch.setattr(audit, "find_deploy_block", boom)
     with pytest.raises(click.ClickException, match="has no code"):
-        audit.audit_proxy(PROXY, {"current": {"facets": {}}}, "314", 100, None, _no_worktrees, _report(), {})
+        audit.audit_proxy(PROXY, {"current": _state({})}, "314", 100, None, _no_worktrees, _report(), {})
 
 
-def test_audit_proxy_verifies_each_history_entry(monkeypatch, _no_worktrees):
-    monkeypatch.setattr(audit, "get_logs", lambda *a: [_delegated_log("0x11111111", A1)])
+def test_audit_proxy_verifies_current_and_each_history_entry(monkeypatch, _no_worktrees):
+    monkeypatch.setattr(
+        audit, "get_logs",
+        lambda *a: [_delegated_log("0x11111111", OLD, block=1), _delegated_log("0x11111111", A1, block=2)],
+    )
     calls = []
     monkeypatch.setattr(
         audit, "verify_facets", lambda state, label, tree, report, cache: calls.append(label)
     )
+    monkeypatch.setattr(audit, "verify_selectors", lambda state, label, tree, report: calls.append(f"{label}.selectors"))
 
     history = {
-        "current": {"facets": {"a.sol:A": {"address": A1}}},
-        "history": {A1: {"source": "a.sol:A", "gitCommit": "c0", "codeHash": "0x1", "initcodeHash": "0x2"}},
+        "current": _state({"a.sol:A": {"address": A1}}),
+        "history": {OLD: {"source": "a.sol:A", "gitCommit": "c0", "codeHash": "0x1", "initcodeHash": "0x2"}},
     }
-    audit.audit_proxy(PROXY, history, "314", 10, 0, _no_worktrees, _report(), {})
-    assert calls == [f"history {A1}"]
+    report = _report()
+    audit.audit_proxy(PROXY, history, "314", 10, 0, _no_worktrees, report, {})
+    assert report.failures == []
+    assert calls == ["current", "current.selectors", f"history {OLD}"]
 
 
 # -- run_audit -----------------------------------------------------------------
@@ -402,15 +418,7 @@ def test_run_audit_passes_clean_ledger(monkeypatch, tmp_path, stub, capsys):
         "address": PROXY,
         "facetSrc": ["*.sol"],
         "deployments": {
-            "314": {
-                "current": {"gitCommit": "c0", "facets": {"a.sol:A": {"address": A1}}},
-                "history": {
-                    A1: {
-                        "source": "a.sol:A", "gitCommit": "c0",
-                        "codeHash": "0x1", "initcodeHash": "0x2",
-                    }
-                },
-            }
+            "314": {"current": {"gitCommit": "c0", "facets": {"a.sol:A": {"address": A1}}}}
         },
     }
     audit.run_audit(_ledger(tmp_path, [entry]), from_block=0)
@@ -418,7 +426,22 @@ def test_run_audit_passes_clean_ledger(monkeypatch, tmp_path, stub, capsys):
     assert "every installed delegate is recorded and verified" in out
 
 
-def test_run_audit_warns_once_for_unarchived_delegates(monkeypatch, tmp_path, stub, capsys):
+def test_run_audit_suggests_accept_once_for_proposed_delegates(monkeypatch, tmp_path, stub, capsys):
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr(audit, "get_logs", lambda *a: [_delegated_log("0x11111111", A1)])
+    entry = {
+        "address": PROXY,
+        "facetSrc": ["*.sol"],
+        "deployments": {
+            "314": {"proposed": {"gitCommit": "c1", "facets": {"a.sol:A": {"address": A1}}}}
+        },
+    }
+    audit.run_audit(_ledger(tmp_path, [entry]), from_block=0)
+    err = capsys.readouterr().err
+    assert err.count("run `josuke accept`") == 1
+
+
+def test_run_audit_does_not_suggest_accept_for_current_delegates(monkeypatch, tmp_path, stub, capsys):
     monkeypatch.chdir(tmp_path)
     monkeypatch.setattr(audit, "get_logs", lambda *a: [_delegated_log("0x11111111", A1)])
     entry = {
@@ -429,5 +452,4 @@ def test_run_audit_warns_once_for_unarchived_delegates(monkeypatch, tmp_path, st
         },
     }
     audit.run_audit(_ledger(tmp_path, [entry]), from_block=0)
-    err = capsys.readouterr().err
-    assert err.count("`josuke accept` records the delegates it accepts") == 1
+    assert "josuke accept" not in capsys.readouterr().err
