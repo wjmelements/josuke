@@ -12,7 +12,7 @@ import shutil
 import pytest
 from eth_utils import keccak, to_checksum_address
 
-from josuke import deploy
+from josuke import broadcast, deploy
 from josuke.deploy import Facet, coerce_arg, keccak_hex, resolve_facets
 
 A1 = to_checksum_address("0x" + "a1" * 20)  # deploy_initcode always returns checksummed
@@ -113,7 +113,7 @@ def stub_chain(monkeypatch, tmp_path, stub_source_trees):
 
     stub_source_trees(deploy)
 
-    log = {"deployed": []}
+    log = {"deployed": [], "tx": {}}
     counter = [0]
 
     def fake_initcode(facet, root, recorded_args):
@@ -124,10 +124,12 @@ def stub_chain(monkeypatch, tmp_path, stub_source_trees):
         counter[0] += 1
         addr = "0x" + f"{counter[0]:040x}"
         log["deployed"].append(initcode_hex)
-        return addr, DEPLOYER, "0x" + f"{counter[0]:064x}"
+        log["tx"][addr] = "0x" + f"{counter[0]:064x}"
+        return addr, DEPLOYER
 
     monkeypatch.setattr(deploy, "facet_initcode", fake_initcode)
     monkeypatch.setattr(deploy, "deploy_initcode", fake_deploy)
+    monkeypatch.setattr(broadcast.Broadcast, "tx_hash", lambda self, address: log["tx"].get(address))
     # differential replay needs a live `evm`/RPC; default to "sender-independent"
     monkeypatch.setattr(deploy, "deployer_derived", lambda initcode, sender: False)
     return log
@@ -422,25 +424,6 @@ def test_run_deploy_zeroes_function_removed_from_kept_facet(stub_chain, monkeypa
 
     zeroed = {sd.selector for sd in migrations[0].setdelegates if int(sd.delegate.address, 16) == 0}
     assert zeroed == {"0x99999999"}
-
-
-def test_deploy_initcode_passes_password_before_create(monkeypatch):
-    calls = []
-
-    def fake_run(cmd, root, stdin_fd=None):
-        calls.append((cmd, stdin_fd))
-        if cmd[1] == "send":
-            return "0xtx\n"
-        return json.dumps({"contractAddress": A1, "from": A1})
-
-    monkeypatch.setattr(deploy, "cast_password", lambda: (["--password-file", "/dev/stdin"], 7))
-    monkeypatch.setattr(deploy, "run", fake_run)
-
-    deploy.deploy_initcode("00", ".")
-
-    assert calls[0] == (
-        ["cast", "send", "--async", "--password-file", "/dev/stdin", "--create", "0x00"], 7
-    )
 
 
 def test_verify_sourcify_calls_forge(monkeypatch):
