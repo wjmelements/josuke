@@ -212,6 +212,46 @@ def verify_sourcify(
         click.echo(f"warning: Sourcify verification failed for {contract}: {e}", err=True)
 
 
+# -- reuse ------------------------------------------------------------------
+
+
+def recorded_facet(source_id: str, current_facets: dict, proposed_facets: dict) -> dict:
+    """The record whose `constructorArgs` and `from` a (re)deploy of `source_id`
+    reuses: the staged one, else the installed one."""
+    return proposed_facets.get(source_id) or current_facets.get(source_id) or {}
+
+
+def existing_deployment(
+    source_id: str,
+    initcode_hash: str,
+    current_facets: dict,
+    proposed_facets: dict,
+    run_deployed: dict,
+    redeploy_all: bool = False,
+) -> tuple[dict | None, bool]:
+    """(record, shared) for a deployment of this exact bytecode that `deploy`
+    reuses instead of deploying: the installed facet if it still matches, else
+    one staged by a prior `proposed` run (keeps re-runs before promotion
+    idempotent), else one already made this run for another source or proxy
+    (`shared`). (None, False) when a new deployment is needed.
+
+    `run_deployed` maps initcodeHash -> record across the run; a reused
+    installed or staged record is registered in it here."""
+    if not redeploy_all:
+        live = current_facets.get(source_id)
+        if live and live.get("initcodeHash") == initcode_hash:
+            run_deployed.setdefault(initcode_hash, live)
+            return live, False
+        staged = proposed_facets.get(source_id)
+        if staged and staged.get("initcodeHash") == initcode_hash and staged.get("address"):
+            run_deployed.setdefault(initcode_hash, staged)
+            return staged, False
+    shared = run_deployed.get(initcode_hash)
+    if shared and shared.get("address"):
+        return shared, True
+    return None, False
+
+
 # -- migration script -----------------------------------------------------
 
 
@@ -396,33 +436,17 @@ def run_deploy(ledger_path, redeploy_all: bool = False):
             proposed_facets = {}
             deployed = 0
             for facet in facets:
-                recorded = (
-                    prior_proposed_facets.get(facet.source_id)
-                    or current_facets.get(facet.source_id)
-                    or {}
-                )
+                recorded = recorded_facet(facet.source_id, current_facets, prior_proposed_facets)
                 initcode, args = facet_initcode(facet, root, recorded.get("constructorArgs"))
                 initcode_hash = keccak_hex(initcode)
 
-                # Reuse an existing deployment of this exact bytecode: the installed
-                # facet if it still matches, otherwise one already staged in a prior
-                # `proposed` run (keeps re-runs before promotion idempotent).
-                live = current_facets.get(facet.source_id)
-                staged = prior_proposed_facets.get(facet.source_id)
-                if not redeploy_all:
-                    if live and live.get("initcodeHash") == initcode_hash:
-                        proposed_facets[facet.source_id] = live
-                        run_deployed.setdefault(initcode_hash, live)
-                        continue
-                    if staged and staged.get("initcodeHash") == initcode_hash and staged.get("address"):
-                        proposed_facets[facet.source_id] = staged
-                        run_deployed.setdefault(initcode_hash, staged)
-                        continue
-
-                shared = run_deployed.get(initcode_hash)
-                if shared and shared.get("address"):
-                    click.echo(f"reusing {shared['address']} for {facet.source_id}")
-                    proposed_facets[facet.source_id] = shared
+                existing, shared = existing_deployment(
+                    facet.source_id, initcode_hash, current_facets, prior_proposed_facets, run_deployed, redeploy_all
+                )
+                if existing is not None:
+                    if shared:
+                        click.echo(f"reusing {existing['address']} for {facet.source_id}")
+                    proposed_facets[facet.source_id] = existing
                     continue
 
                 click.echo(f"deploying {facet.source_id}")
