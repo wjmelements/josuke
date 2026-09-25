@@ -2,7 +2,7 @@
 name = "josuke"
 version = "0.0.1"
 requires-python = ">=3.10"
-dependencies = ["click", "click-spinner", "eth-abi", "eth-utils", "eth-hash[pycryptodome]", "requests"]
+dependencies = ["click", "click-spinner", "eth-abi", "eth-utils", "eth-hash[pycryptodome]", "jsonschema", "requests"]
 
 [project.optional-dependencies]
 test = ["pytest", "pytest-timeout"]
@@ -13,6 +13,9 @@ josuke = "josuke.cli:main"
 [build-system]
 requires = ["setuptools>=61"]
 build-backend = "setuptools.build_meta"
+
+[tool.setuptools.package-data]
+josuke = ["josuke.schema.json"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

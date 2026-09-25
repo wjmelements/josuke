@@ -14,6 +14,7 @@ import pytest
 from eth_utils import keccak, to_checksum_address
 
 from josuke import broadcast, deploy
+from josuke.ledger import validate_ledger
 from josuke.deploy import Facet, coerce_arg, coerce_input, keccak_hex, resolve_facets
 
 A1 = to_checksum_address("0x" + "a1" * 20)  # deploy_initcode always returns checksummed
@@ -195,6 +196,7 @@ def test_run_deploy_first_time_deploys_all_into_proposed(stub_chain, monkeypatch
     assert proposed["gitCommit"] == "f" * 40
     assert set(proposed["facets"]) == {"a.evm", "b.evm"}
     assert len(stub_chain["deployed"]) == 2
+    assert validate_ledger(json.loads(path.read_text())) == []
 
 
 def test_run_deploy_records_create_tx_hash(stub_chain, monkeypatch, tmp_path):
