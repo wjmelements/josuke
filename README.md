@@ -34,6 +34,7 @@ josuke deploy                    # deploy changed/new facets, record them under 
 josuke verify                    # check the ledger against the chain in $ETH_RPC_URL
 josuke accept                    # after migrating, merge `proposed` into `current`
 josuke audit                     # cross-check every delegate ever installed against the ledger
+josuke check                     # offline: what the working tree would change, for pull requests
 ```
 
 Pass `-f/--file` to any command to point at a ledger other than `./josuke.json`.
@@ -103,6 +104,18 @@ way `verify` checks `current`. `SelectorDelegated` is only RECOMMENDED by ERC-81
 can run arbitrary code, so a clean audit means no delegate the proxy announced
 is unaccounted for, not that none could have been installed silently.
 `DiamondDelegateCall` invocations are printed but not yet verified.
+
+`check` needs no RPC and no keys: it builds the working tree with `forge` and
+compares it with the ledger, so it fits a pull-request job. It fails when the
+ledger breaks the schema or lists a proxy twice, when `facetSrc` doesn't resolve
+to facets with creation code, when facets `deploy` would put at different
+addresses export the same selector, or when recorded constructor args don't
+encode. It lists each facet as new, changed, unchanged or removed against
+`current`, and the constructor args `deploy` will ask for. It also compares HEAD
+with the staged deployment (`proposed`, else `current`); `--strict` makes a
+difference there fail, for release branches. `--chain` limits it to one chain,
+and `--format markdown` suits `$GITHUB_STEP_SUMMARY`. It trusts the recorded
+hashes; `verify` is what ties them to the chain.
 
 `deploy` builds with `forge` and broadcasts with `cast`, sending its
 deployments together and reporting each as it confirms. It reads the
