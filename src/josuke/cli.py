@@ -7,6 +7,7 @@ from eth_utils import to_checksum_address
 
 from .accept import run_accept
 from .audit import run_audit
+from .check import run_check
 from .deploy import run_deploy
 from .ledger import DEFAULT_LEDGER, load_ledger, parse_address, write_ledger
 from .verify import run_verify
@@ -130,3 +131,30 @@ def audit(ledger_path, from_block):
     rebuilt in a temporary worktree. Migrations are listed but not verified.
     """
     run_audit(ledger_path, from_block)
+
+
+@main.command()
+@ledger_option
+@click.option("--chain", default=None, help="Check only this chain id (default: every chain in the ledger).")
+@click.option(
+    "--strict",
+    is_flag=True,
+    help="Also fail when HEAD differs from the staged deployment (`proposed`, else `current`).",
+)
+@click.option(
+    "--format",
+    "fmt",
+    type=click.Choice(["text", "markdown"]),
+    default="text",
+    show_default=True,
+    help="markdown suits a PR comment or $GITHUB_STEP_SUMMARY.",
+)
+def check(ledger_path, chain, strict, fmt):
+    """Check the source in the working tree against the ledger, offline.
+
+    Builds with `forge` and needs no RPC or keys. Fails when the ledger breaks
+    the schema, `facetSrc` doesn't resolve, two facets export one selector, or
+    a facet's recorded constructor args can't produce its creation code. Lists
+    each facet as new, changed, unchanged or removed against `current`.
+    """
+    run_check(ledger_path, chain, strict, fmt)
