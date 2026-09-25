@@ -1,14 +1,20 @@
 // SPDX-License-Identifier: MIT
 pragma solidity 0.8.28;
 
+import {Layout} from "./facets/Layout.sol";
+
 // Exports `owner()` too, so it clashes with Ownable in one proxy.
-contract Clash {
-    address public owner;
+contract Clash is Layout {
+    function owner() external view returns (address) {
+        return owner_;
+    }
 }
 
 // Same bytecode as Clash under another name.
-contract ClashTwin {
-    address public owner;
+contract ClashTwin is Layout {
+    function owner() external view returns (address) {
+        return owner_;
+    }
 }
 
 interface IClash {

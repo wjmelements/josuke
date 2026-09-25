@@ -109,8 +109,13 @@ is unaccounted for, not that none could have been installed silently.
 compares it with the ledger, so it fits a pull-request job. It fails when the
 ledger breaks the schema or lists a proxy twice, when `facetSrc` doesn't resolve
 to facets with creation code, when facets `deploy` would put at different
-addresses export the same selector, or when recorded constructor args don't
-encode. It lists each facet as new, changed, unchanged or removed against
+addresses export the same selector, when two facets declare different state
+variables over the same storage bytes, or when recorded constructor args don't
+encode. The storage check reads solc's storage layout, which lists declared
+state variables only: ERC-7201 namespaced structs, fixed-slot access and `.evm`
+facets are invisible to it. It builds with `--extra-output storageLayout`; set
+`extra_output = ["storageLayout"]` in `foundry.toml` so that isn't a second
+full compile after the project's own build. It lists each facet as new, changed, unchanged or removed against
 `current`, and the constructor args `deploy` will ask for. It also compares HEAD
 with the staged deployment (`proposed`, else `current`); `--strict` makes a
 difference there fail, for release branches. `--chain` limits it to one chain,

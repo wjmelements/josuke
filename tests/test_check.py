@@ -191,3 +191,71 @@ def test_struct_selectors_match_solc():
     assert {s.selector for s in facet_selectors(facet_from_source_id(CONFIGURED), ROOT)} == {
         "0x" + selector for selector in identifiers.values()
     }
+
+
+# -- storage -----------------------------------------------------------------
+
+
+def test_facets_sharing_one_layout_pass(tmp_path):
+    result = _check(tmp_path, [_entry(["src/facets/*.sol", "src/Storage.sol:Tally", "src/Storage.sol:TallyToo"])])
+    assert result.exit_code == 0, result.output
+    assert "storage      4 facets checked, 3 slots shared" in result.output
+
+
+def test_different_variables_appended_at_one_slot_fail(tmp_path):
+    result = _check(tmp_path, [_entry(["src/facets/*.sol", "src/Storage.sol:Tally", "src/Storage.sol:Flag"])])
+    assert result.exit_code == 1
+    assert (
+        f"{PROXY} storage slot 2: src/Storage.sol:Flag declares address flag_ "
+        "over src/Storage.sol:Tally's uint64 tally_ at slot 2"
+    ) in result.output
+
+
+def test_facet_ignoring_the_shared_layout_fails(tmp_path):
+    result = _check(tmp_path, [_entry([OWNABLE, "src/Storage.sol:Standalone"])])
+    assert result.exit_code == 1
+    assert f"{PROXY} storage slot 0: src/Storage.sol:Standalone declares uint256 total_" in result.output
+    assert f"over {OWNABLE}'s address owner_ at slot 0" in result.output
+
+
+def test_facets_without_a_layout_are_listed_as_not_visible():
+    from josuke.check import Findings, _check_storage
+
+    layout = {
+        "storage": [{"label": "owner_", "offset": 0, "slot": "0", "type": "t_address"}],
+        "types": {"t_address": {"label": "address", "numberOfBytes": "20"}},
+    }
+    findings = Findings()
+    line = _check_storage(PROXY, {"a.sol:A": (None, [], layout), "impl.evm": (None, [], None)}, findings)
+    assert findings.failures == []
+    assert line == "  storage      1 facet checked, 0 slots shared; not visible: impl.evm"
+
+
+def test_packed_variables_overlapping_at_different_offsets_fail():
+    from josuke.check import Findings, _check_storage
+
+    types = {"t_uint64": {"label": "uint64", "numberOfBytes": "8"}, "t_uint128": {"label": "uint128", "numberOfBytes": "16"}}
+    packed = {"storage": [
+        {"label": "a", "offset": 0, "slot": "3", "type": "t_uint64"},
+        {"label": "b", "offset": 8, "slot": "3", "type": "t_uint64"},
+    ], "types": types}
+    wide = {"storage": [{"label": "c", "offset": 0, "slot": "3", "type": "t_uint128"}], "types": types}
+    findings = Findings()
+    _check_storage(PROXY, {"p.sol:P": (None, [], packed), "w.sol:W": (None, [], wide)}, findings)
+    assert len(findings.failures) == 2
+    assert any("storage slot 3 offset 8: p.sol:P declares uint64 b over w.sol:W's uint128 c at slot 3" in f
+               for f in findings.failures)
+
+
+def test_rebuilds_when_the_cache_hides_missing_layouts(tmp_path):
+    ledger = [_entry(["src/facets/*.sol"])]
+    assert _check(tmp_path, ledger).exit_code == 0
+    artifact = ROOT / "out" / "Counter.sol" / "Counter.json"
+    stripped = json.loads(artifact.read_text())
+    del stripped["storageLayout"]
+    artifact.write_text(json.dumps(stripped))
+
+    result = _check(tmp_path, ledger)
+    assert result.exit_code == 0, result.output
+    assert "rebuilt with --force" in result.output
+    assert "storageLayout" in json.loads(artifact.read_text())

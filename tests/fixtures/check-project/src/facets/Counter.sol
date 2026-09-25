@@ -1,10 +1,14 @@
 // SPDX-License-Identifier: MIT
 pragma solidity 0.8.28;
 
-contract Counter {
-    uint256 public count;
+import {Layout} from "./Layout.sol";
+
+contract Counter is Layout {
+    function count() external view returns (uint256) {
+        return count_;
+    }
 
     function increment() external {
-        count += 1;
+        count_ += 1;
     }
 }

@@ -6,13 +6,14 @@ recorded hashes; `josuke verify` is what ties those to the chain.
 
 Blocking: the ledger breaks the schema or lists a proxy twice; `facetSrc` does
 not resolve to buildable facets; two facets `deploy` would put at different
-addresses export one selector; a facet's creation code can't be assembled
-from its recorded constructor args (so `deploy` would prompt or crash).
+addresses export one selector; two facets declare different variables over
+the same storage bytes; a facet's recorded constructor args don't encode.
 
 Reported, and blocking only with `--strict`: HEAD differs from the deployment
 the ledger stages (`proposed`, else `current`).
 """
 
+import json
 import pathlib
 from collections import Counter
 from os import environ
@@ -39,6 +40,9 @@ from .proc import run
 # traced to the build rather than the source.
 BUILD_SETTINGS = ("solc", "via_ir", "evm_version", "bytecode_hash", "cbor_metadata")
 
+# What `forge inspect` says when an artifact was built without the storage layout.
+STALE_LAYOUT = "storage layout missing from artifact"
+
 
 class Findings:
     def __init__(self):
@@ -48,10 +52,6 @@ class Findings:
     def fail(self, message: str) -> None:
         if message not in self.failures:  # the same fault shows up once per chain
             self.failures.append(message)
-
-
-def _short(address: str) -> str:
-    return f"{address[:6]}…{address[-4:]}"
 
 
 def _plural(count: int, word: str) -> str:
@@ -80,8 +80,16 @@ def _build_context(root: pathlib.Path) -> str:
     return " · ".join(parts)
 
 
+def _storage_layout(facet, root: pathlib.Path) -> dict | None:
+    """solc's storage layout for a Solidity facet; None for a `.evm` facet, which has none."""
+    if facet.kind != "sol":
+        return None
+    return json.loads(run(["forge", "inspect", facet.source_id, "storageLayout", "--json"], root))
+
+
 def _resolve(entry: dict, root: pathlib.Path, findings: Findings) -> dict | None:
-    """source_id -> (Facet, [Selector]) at HEAD, or None if `facetSrc` doesn't resolve."""
+    """source_id -> (Facet, [Selector], storage layout) at HEAD, or None if
+    `facetSrc` doesn't resolve."""
     proxy = to_checksum_address(entry["address"])
     try:
         facets = resolve_facets(entry["facetSrc"], root)
@@ -91,10 +99,61 @@ def _resolve(entry: dict, root: pathlib.Path, findings: Findings) -> dict | None
     out = {}
     for facet in facets:
         try:
-            out[facet.source_id] = (facet, facet_selectors(facet, root))
+            selectors = facet_selectors(facet, root)
         except click.ClickException as e:
             findings.fail(f"{proxy} {facet.source_id}: cannot read its ABI: {e.message}")
+            continue
+        try:
+            out[facet.source_id] = (facet, selectors, _storage_layout(facet, root))
+        except click.ClickException as e:
+            findings.fail(f"{proxy} {facet.source_id}: cannot read its storage layout: {e.message}")
     return out if len(out) == len(facets) else None
+
+
+def _position(start: int) -> str:
+    slot, offset = divmod(start, 32)
+    return f"slot {slot}" + (f" offset {offset}" if offset else "")
+
+
+def _check_storage(proxy: str, resolved: dict, findings: Findings) -> str:
+    """Every facet runs against the proxy's one storage, so storage bytes that two
+    facets both declare must hold the same variable (name and type) in both.
+
+    Sees only declared state variables: ERC-7201 namespaced structs, assembly
+    `sstore`s and `.evm` facets are invisible to it."""
+    declared = []  # (first byte, end byte, source_id, name, type)
+    unseen = []
+    for source_id, (_, _, layout) in resolved.items():
+        if layout is None:
+            unseen.append(source_id)
+            continue
+        types = layout.get("types") or {}
+        for var in layout.get("storage") or []:
+            kind = types[var["type"]]
+            start = int(var["slot"]) * 32 + var["offset"]
+            declared.append((start, start + int(kind["numberOfBytes"]), source_id, var["label"], kind["label"]))
+
+    declared.sort()
+    shared = set()  # slots declared identically by more than one facet
+    for i, a in enumerate(declared):
+        for b in declared[i + 1 :]:
+            if b[0] >= a[1]:
+                break  # sorted by first byte: nothing later overlaps `a`
+            if a[2] == b[2]:
+                continue
+            if (a[0], a[1], a[3], a[4]) == (b[0], b[1], b[3], b[4]):
+                shared.add(a[0] // 32)
+                continue
+            findings.fail(
+                f"{proxy} storage {_position(b[0])}: {b[2]} declares {b[4]} {b[3]} "
+                f"over {a[2]}'s {a[4]} {a[3]} at {_position(a[0])}"
+            )
+
+    checked = len(resolved) - len(unseen)
+    line = f"  storage      {_plural(checked, 'facet')} checked, {_plural(len(shared), 'slot')} shared"
+    if unseen:
+        line += f"; not visible: {', '.join(unseen)}"
+    return line
 
 
 def _initcode_hash(facet, root, recorded: dict, proxy: str, findings: Findings) -> tuple[str | None, list[str]]:
@@ -140,7 +199,7 @@ def _differences(head: dict, reference: dict) -> list[str]:
     return out
 
 
-def _check_proxy(entry, chain, resolved, root, run_deployed, findings) -> list[str]:
+def _check_proxy(entry, chain, resolved, storage_line, root, run_deployed, findings) -> list[str]:
     """Check one proxy on one chain (None: nothing deployed anywhere yet) and
     render its section of the report."""
     proxy = to_checksum_address(entry["address"])
@@ -162,7 +221,7 @@ def _check_proxy(entry, chain, resolved, root, run_deployed, findings) -> list[s
     owners = {}  # selector -> (source_id, deployment address)
     fresh = set()  # initcodeHashes `deploy` would deploy
     prompts = 0  # facets whose constructor args `deploy` would ask for
-    for source_id, (facet, selectors) in resolved.items():
+    for source_id, (facet, selectors, _) in resolved.items():
         initcode_hash, missing = _initcode_hash(
             facet, root, recorded_facet(source_id, current_facets, proposed_facets), proxy, findings
         )
@@ -217,6 +276,7 @@ def _check_proxy(entry, chain, resolved, root, run_deployed, findings) -> list[s
         )
     else:
         lines.append(f"  selectors()  generated · returns {_plural(len(owners) + 1, 'selector')}")
+    lines.append(storage_line)
 
     if len(head_hashes) == len(resolved):
         if proposed:
@@ -256,24 +316,42 @@ def check_ledger(ledger_path, root: pathlib.Path, chain: str | None) -> tuple[li
         if count > 1:
             findings.fail(f"{address} is listed {count} times")
 
+    # Storage layouts aren't in artifacts by default; the extra output leaves bytecode unchanged.
+    build = ["forge", "build", "--extra-output", "storageLayout"]
     try:
-        run(["forge", "build"], root)
+        run(build, root)
         lines.append(f"build  {_build_context(root)}")
     except click.ClickException as e:
         findings.fail(f"build: {e.message}")
         return lines, findings
 
-    resolved = [_resolve(entry, root, findings) for entry in ledger]
+    resolving = Findings()
+    resolved = [_resolve(entry, root, resolving) for entry in ledger]
+    if any(STALE_LAYOUT in failure for failure in resolving.failures):
+        # forge's cache can claim artifacts are current while they lack the layout.
+        lines.append("build  artifacts had no storage layout although the cache said current; rebuilt with --force")
+        try:
+            run([*build, "--force"], root)
+        except click.ClickException as e:
+            findings.fail(f"build: {e.message}")
+            return lines, findings
+        resolving = Findings()
+        resolved = [_resolve(entry, root, resolving) for entry in ledger]
+    findings.failures.extend(resolving.failures)
+    storage_lines = [
+        _check_storage(to_checksum_address(entry["address"]), facets, findings) if facets is not None else None
+        for entry, facets in zip(ledger, resolved)
+    ]
 
     recorded_chains = {c for entry in ledger for c in entry.get("deployments", {})}
     chains = [chain] if chain else sorted(recorded_chains, key=int) or [None]
     for c in chains:
         run_deployed: dict = {}  # initcodeHash -> record, shared across proxies as `deploy` does
-        for entry, facets in zip(ledger, resolved):
+        for entry, facets, storage_line in zip(ledger, resolved, storage_lines):
             if facets is None:
                 lines.extend(["", f"{to_checksum_address(entry['address'])}  ·  facetSrc does not resolve"])
                 continue
-            lines.extend(_check_proxy(entry, c, facets, root, run_deployed, findings))
+            lines.extend(_check_proxy(entry, c, facets, storage_line, root, run_deployed, findings))
     return lines, findings
 
 
