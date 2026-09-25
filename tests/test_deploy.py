@@ -14,7 +14,7 @@ import pytest
 from eth_utils import keccak, to_checksum_address
 
 from josuke import broadcast, deploy
-from josuke.deploy import Facet, coerce_arg, keccak_hex, resolve_facets
+from josuke.deploy import Facet, coerce_arg, coerce_input, keccak_hex, resolve_facets
 
 A1 = to_checksum_address("0x" + "a1" * 20)  # deploy_initcode always returns checksummed
 B2 = to_checksum_address("0x" + "b2" * 20)
@@ -46,6 +46,25 @@ def test_keccak_hex_matches_keccak():
 )
 def test_coerce_arg(abi_type, value, expected):
     assert coerce_arg(abi_type, value) == expected
+
+
+_STRUCT = {
+    "type": "tuple",
+    "components": [{"name": "who", "type": "address"}, {"name": "tag", "type": "bytes4"}],
+}
+
+
+def test_coerce_input_struct_by_name_or_position():
+    who = "0x" + "11" * 20
+    expected = (who, b"\xde\xad\xbe\xef")
+    assert coerce_input(_STRUCT, {"who": who, "tag": "0xdeadbeef"}) == expected
+    assert coerce_input(_STRUCT, [who, "0xdeadbeef"]) == expected
+
+
+def test_coerce_input_struct_array():
+    arg = {**_STRUCT, "type": "tuple[]"}
+    who = "0x" + "22" * 20
+    assert coerce_input(arg, [[who, "0x00000000"]]) == [(who, b"\x00" * 4)]
 
 
 # -- resolve_facets ---------------------------------------------------------
@@ -557,15 +576,11 @@ def _sel(hex4):
 
 @pytest.fixture(autouse=True)
 def _isolate_maps():
-    from josuke import selectors as _s
     from josuke import delegate as _d
 
-    sm, dm = dict(_s.selector_map), dict(_d.source_map)
-    _s.selector_map.clear()
+    dm = dict(_d.source_map)
     _d.source_map.clear()
     yield
-    _s.selector_map.clear()
-    _s.selector_map.update(sm)
     _d.source_map.clear()
     _d.source_map.update(dm)
 

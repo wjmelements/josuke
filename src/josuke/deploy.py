@@ -16,7 +16,7 @@ from .forge import get_forge_config
 from .ledger import load_ledger, write_ledger
 from .migration import Migration, SetDelegate
 from .proc import run
-from .selectors import Selector
+from .selectors import Selector, canonical_type
 from .signer import keystore_session
 from .storage import ProxyStorage, slot_address
 from .worktree import SourceTrees
@@ -132,6 +132,21 @@ def coerce_arg(abi_type: str, value):
     return value
 
 
+def coerce_input(arg: dict, value):
+    """`coerce_arg` for an ABI input, recursing into struct components. A struct
+    value is a JSON object keyed by component name, or a list in component order."""
+    abi_type = arg["type"]
+    if not abi_type.startswith("tuple"):
+        return coerce_arg(abi_type, value)
+    if abi_type.endswith("]"):
+        inner = {**arg, "type": abi_type[: abi_type.rindex("[")]}
+        return [coerce_input(inner, v) for v in value]
+    components = arg["components"]
+    if isinstance(value, dict):
+        value = [value[component["name"]] for component in components]
+    return tuple(coerce_input(component, v) for component, v in zip(components, value, strict=True))
+
+
 def _prompt_arg(source_id: str, name: str, abi_type: str):
     raw = click.prompt(f"{source_id} constructor arg {name} ({abi_type})")
     try:
@@ -163,8 +178,8 @@ def facet_initcode(facet: Facet, root: pathlib.Path, recorded_args, prompt: bool
 
     args = {arg["name"]: resolve(arg) for arg in inputs}
     encoded_args = abi_encode(
-        [arg["type"] for arg in inputs],
-        [coerce_arg(arg["type"], args[arg["name"]]) for arg in inputs],
+        [canonical_type(arg) for arg in inputs],
+        [coerce_input(arg, args[arg["name"]]) for arg in inputs],
     ).hex()
     return initcode + encoded_args, args
 
