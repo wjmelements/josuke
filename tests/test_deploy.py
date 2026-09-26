@@ -104,6 +104,7 @@ def stub_chain(monkeypatch, tmp_path, stub_source_trees):
     monkeypatch.setattr(deploy, "git_commit", lambda root: "f" * 40)
     monkeypatch.setattr(deploy, "run", lambda *a, **k: "")  # forge build
     monkeypatch.setattr(deploy, "code_hash", lambda addr: "0x" + "cc" * 32)
+    monkeypatch.setattr(deploy, "get_forge_config", lambda root: {"bytecode_hash": "none"})
     # A truthy stand-in for "migration ready": most of these tests care about
     # facet/selectors handling, not migration content, but `proposed` is now
     # only recorded when a migration is needed, so it must not be None here.
@@ -393,6 +394,42 @@ def test_run_deploy_does_not_reverify_reused_sol_facets(stub_chain, monkeypatch,
     deploy.run_deploy(path)  # nothing changed: reused, must not re-verify
 
     assert len(calls) == 1
+
+
+@pytest.mark.parametrize(
+    "config, warns",
+    [
+        ({"bytecode_hash": "ipfs"}, True),
+        ({"bytecode_hash": "bzzr1"}, True),
+        ({}, True),
+        ({"bytecode_hash": "none"}, False),
+    ],
+)
+def test_warn_metadata_hash(config, warns, capsys):
+    deploy.warn_metadata_hash(config)
+    assert ("comment changes will redeploy facets" in capsys.readouterr().err) == warns
+
+
+def test_run_deploy_warns_once_about_metadata_hash_for_sol_facets(stub_chain, monkeypatch, tmp_path, capsys):
+    monkeypatch.setattr(deploy, "get_forge_config", lambda root: {"bytecode_hash": "ipfs"})
+    monkeypatch.setattr(deploy, "resolve_facets", lambda facet_src, root: [_facet("a.sol:A")])
+    monkeypatch.setattr(deploy, "verify_sourcify", lambda *a, **k: None)
+    other = "0x" + "33" * 20
+    path = _write(tmp_path, [{"address": PROXY, "facetSrc": ["*.sol"]}, {"address": other, "facetSrc": ["*.sol"]}])
+
+    deploy.run_deploy(path)
+
+    assert capsys.readouterr().err.count("comment changes will redeploy facets") == 1
+
+
+def test_run_deploy_skips_metadata_hash_warning_without_sol_facets(stub_chain, monkeypatch, tmp_path, capsys):
+    monkeypatch.setattr(deploy, "get_forge_config", lambda root: {"bytecode_hash": "ipfs"})
+    _resolve_to(monkeypatch, ["a.evm"])
+    path = _write(tmp_path, [{"address": PROXY, "facetSrc": ["*.evm"]}])
+
+    deploy.run_deploy(path)
+
+    assert "comment changes" not in capsys.readouterr().err
 
 
 def test_run_deploy_zeroes_function_removed_from_kept_facet(stub_chain, monkeypatch, tmp_path):

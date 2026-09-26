@@ -37,6 +37,23 @@ def git_commit(root: pathlib.Path) -> str:
     return run(["git", "rev-parse", "HEAD"], root).strip()
 
 
+def warn_metadata_hash(config: dict) -> None:
+    """Warn when solc appends a metadata hash, which changes with every comment edit.
+
+    One `gitCommit` must rebuild every facet of a deployment, so a facet whose
+    metadata changed is redeployed even when its code did not. `cbor_metadata`
+    needs no check: solc rejects `appendCBOR: false` with any hash but "none"."""
+    if config.get("bytecode_hash", "ipfs") != "none":
+        click.echo(
+            'warning: comment changes will redeploy facets; set bytecode_hash = "none" to avoid',
+            err=True,
+        )
+
+
+def warn_metadata_hash_at(root: pathlib.Path) -> None:
+    warn_metadata_hash(get_forge_config(root))
+
+
 def universal_constructor() -> str:
     """`evm -C` with no code: the length-agnostic constructor prefix it prepends."""
     return run(["evm", "-C"], stdin="").strip().removeprefix("0x")
@@ -343,6 +360,7 @@ def run_deploy(ledger_path, redeploy_all: bool = False):
     run_deployed: dict[str, dict] = {}  # initcodeHash -> facet entry, shared across proxies this run
     unmined: list[tuple[Facet, dict, str, str, str | None]] = []  # (facet, entry, initcode, sender, recorded from)
     summaries: list[str] = []  # one line per proxy, reported once its deployments are mined
+    checked_metadata = False  # warn_metadata_hash runs once, and only for Solidity facets
 
     # keystore_session: prompt for a keystore password at most once, on the first deploy
     # broadcast_session: plan every deployment, then send them back to back and wait for them together
@@ -357,6 +375,9 @@ def run_deploy(ledger_path, redeploy_all: bool = False):
             prior_proposed_facets = prior_proposed.get("facets", {})
 
             facets = resolve_facets(entry["facetSrc"], root)
+            if not checked_metadata and any(facet.kind == "sol" for facet in facets):
+                warn_metadata_hash_at(root)
+                checked_metadata = True
             proposed_facets = {}
             deployed = 0
             for facet in facets:

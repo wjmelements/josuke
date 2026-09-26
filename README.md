@@ -150,6 +150,11 @@ Notes:
   unchanged facets keep their existing entries, so a long-lived `current` can
   contain facets whose bytecode predates its `gitCommit`; only the facets
   redeployed in that upgrade are guaranteed to match it.
+- For that reason, a facet whose metadata hash changed is redeployed even when
+  its code did not. By default solc's metadata hash covers every source file's
+  contents, so a comment or NatSpec edit redeploys the facet. `deploy` warns
+  about this; set `bytecode_hash = "none"` in `foundry.toml` to redeploy only
+  when code changes, or keep the hash to ship documentation updates as upgrades.
 - The proxy `address` is assumed identical across chains; per-chain divergence
   would need a per-deployment address field.
 - The migration script carries no hashes because its bytecode is recomputable
