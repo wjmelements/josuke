@@ -8,6 +8,7 @@ with the chain-touching helpers monkeypatched out.
 import json
 import pathlib
 import shutil
+from contextlib import contextmanager
 
 import pytest
 from eth_utils import keccak, to_checksum_address
@@ -114,7 +115,7 @@ def stub_chain(monkeypatch, tmp_path, stub_source_trees):
 
     stub_source_trees(deploy)
 
-    log = {"deployed": [], "tx": {}}
+    log = {"deployed": [], "tx": {}, "session_tx": {}}
     counter = [0]
 
     def fake_initcode(facet, root, recorded_args):
@@ -125,12 +126,21 @@ def stub_chain(monkeypatch, tmp_path, stub_source_trees):
         counter[0] += 1
         addr = "0x" + f"{counter[0]:040x}"
         log["deployed"].append(initcode_hex)
-        log["tx"][addr] = "0x" + f"{counter[0]:064x}"
+        log["tx"][addr] = log["session_tx"][addr] = "0x" + f"{counter[0]:064x}"
         return addr, DEPLOYER
 
     monkeypatch.setattr(deploy, "facet_initcode", fake_initcode)
     monkeypatch.setattr(deploy, "deploy_initcode", fake_deploy)
-    monkeypatch.setattr(broadcast.Broadcast, "tx_hash", lambda self, address: log["tx"].get(address))
+    monkeypatch.setattr(broadcast.Broadcast, "tx_hash", lambda self, address: log["session_tx"].get(address))
+
+    # Like the real Broadcast, each session knows only the transactions it sent.
+    @contextmanager
+    def fresh_session(chain):
+        log["session_tx"] = {}
+        with broadcast.broadcast_session(chain) as session:
+            yield session
+
+    monkeypatch.setattr(deploy, "broadcast_session", fresh_session)
     # differential replay needs a live `evm`/RPC; default to "sender-independent"
     monkeypatch.setattr(deploy, "deployer_derived", lambda initcode, sender: False)
     return log
@@ -166,6 +176,22 @@ def test_run_deploy_first_time_deploys_all_into_proposed(stub_chain, monkeypatch
     assert proposed["gitCommit"] == "f" * 40
     assert set(proposed["facets"]) == {"a.evm", "b.evm"}
     assert len(stub_chain["deployed"]) == 2
+
+
+def test_run_deploy_records_create_tx_hash(stub_chain, monkeypatch, tmp_path):
+    _resolve_to(monkeypatch, ["a.evm"])
+    path = _write(tmp_path, [{"address": PROXY, "facetSrc": ["*.evm"]}])
+
+    def recorded():
+        return json.loads(path.read_text())[0]["deployments"]["314"]["proposed"]["facets"]["a.evm"]
+
+    deploy.run_deploy(path)
+    first = recorded()
+    assert first["createTxHash"] == stub_chain["tx"][first["address"]]
+
+    deploy.run_deploy(path)  # unchanged: reused, not redeployed, so it keeps its hash
+    assert recorded() == first
+    assert len(stub_chain["deployed"]) == 1
 
 
 def test_run_deploy_carries_unchanged_and_redeploys_changed(stub_chain, monkeypatch, tmp_path):

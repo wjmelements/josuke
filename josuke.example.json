@@ -53,6 +53,7 @@
                             "codeHash": "0x8642864286428642864286428642864286428642864286428642864286428642",
                             "initcodeHash": "0x70cc70cc70cc70cc70cc70cc70cc70cc70cc70cc70cc70cc70cc70cc70cc70cc",
                             "from": "0x4a6f6B9fF1fc974096f9063a45Fd12bD5B928AD1",
+                            "createTxHash": "0x7a117a117a117a117a117a117a117a117a117a117a117a117a117a117a117a11",
                             "constructorArgs": {
                                 "supply": 10000000000000000000000000,
                                 "name": "NewWorldOrder",
@@ -67,6 +68,7 @@
                         "gitCommit": "d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0",
                         "codeHash": "0xb0b1b0b1b0b1b0b1b0b1b0b1b0b1b0b1b0b1b0b1b0b1b0b1b0b1b0b1b0b1b0b1",
                         "initcodeHash": "0xc0c1c0c1c0c1c0c1c0c1c0c1c0c1c0c1c0c1c0c1c0c1c0c1c0c1c0c1c0c1c0c1",
+                        "createTxHash": "0xd0d1d0d1d0d1d0d1d0d1d0d1d0d1d0d1d0d1d0d1d0d1d0d1d0d1d0d1d0d1d0d1",
                         "constructorArgs": {
                             "supply": 5000000000000000000000000,
                             "name": "OldWorldOrder",

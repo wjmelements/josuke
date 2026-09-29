@@ -140,6 +140,10 @@
         "from": {
           "$ref": "#/$defs/address",
           "description": "Deployer address, supplied as msg.sender when the verifier re-simulates the constructor. Record it when an immutable is derived from the deployer; omit it otherwise."
+        },
+        "createTxHash": {
+          "$ref": "#/$defs/hash32",
+          "description": "Hash of the transaction that created this facet."
         }
       }
     },
@@ -154,7 +158,8 @@
         "codeHash": { "$ref": "#/$defs/hash32" },
         "initcodeHash": { "$ref": "#/$defs/hash32" },
         "constructorArgs": { "$ref": "#/$defs/facet/properties/constructorArgs" },
-        "from": { "$ref": "#/$defs/facet/properties/from" }
+        "from": { "$ref": "#/$defs/facet/properties/from" },
+        "createTxHash": { "$ref": "#/$defs/facet/properties/createTxHash" }
       },
       "description": "A facet, as in deploymentState.facets, plus the source it was built from and the commit to build it at. Its address is the key of the enclosing \"history\" map."
     },

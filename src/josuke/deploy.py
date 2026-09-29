@@ -460,9 +460,10 @@ def run_deploy(ledger_path, redeploy_all: bool = False):
                 facet_entry["from"] = recorded_from
         broadcast.wait(root)
         for facet, facet_entry, *_ in unmined:
+            tx_hash = broadcast.tx_hash(facet_entry["address"])
             facet_entry["codeHash"] = code_hash(facet_entry["address"])
+            facet_entry["createTxHash"] = tx_hash
             if facet.kind == "sol":
-                tx_hash = broadcast.tx_hash(facet_entry["address"])
                 verify_sourcify(facet, facet_entry["address"], chain, root, tx_hash)
 
     for summary in summaries:
