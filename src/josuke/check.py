@@ -148,7 +148,7 @@ def _shape(types: dict, type_id: str) -> tuple:
         return ("struct", size, members)
     if "base" in t:
         return ("array", size, _shape(types, t["base"]))
-    label = t["label"].removesuffix(" payable")
+    label = t.get("underlying", t["label"]).removesuffix(" payable")
     if label.startswith("contract "):
         label = "address"
     elif label.startswith("enum "):

@@ -196,3 +196,20 @@ def test_growing_array_elements_shifts_them():
     assert not _fit(("dynamic_array", 32, small), ("dynamic_array", 32, big), set())
     assert _fit(("mapping", 32, ("value", 32, "uint256"), small), ("mapping", 32, ("value", 32, "uint256"), big), notes := set())
     assert notes == {"grown"}
+
+
+UDVT = "type {name} is {underlying};\n{name} internal amount_;"
+READ_AMOUNT = "function amount() external view returns (bytes32) { return bytes32(uint256(uint160(address(this)))) ^ keccak256(abi.encode(amount_)); }"
+
+
+def test_retyping_a_user_defined_value_type_fails(deployed):
+    check = deployed(UDVT.format(name="Amount", underlying="uint256"), {"A": READ_AMOUNT})
+    result = check(UDVT.format(name="Amount", underlying="int256"), {"A": READ_AMOUNT})
+    assert result.exit_code == 1, result.output
+    assert "declares Layout.Amount amount_ over Layout.Amount amount_" in result.output
+
+
+def test_renaming_a_user_defined_value_type_passes(deployed):
+    check = deployed(UDVT.format(name="Amount", underlying="uint256"), {"A": READ_AMOUNT})
+    result = check(UDVT.format(name="Balance", underlying="uint256"), {"A": READ_AMOUNT})
+    assert result.exit_code == 0, result.output

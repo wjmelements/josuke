@@ -17,6 +17,7 @@ from .forge import get_forge_config
 from .proc import run
 
 _VERSION = re.compile(r"^\d+\.\d+\.\d+$")
+_UDVT = re.compile(r"^t_userDefinedValueType\(.*\)(\d+)$")
 
 
 def _svm_dirs() -> list[pathlib.Path]:
@@ -58,9 +59,25 @@ def compiler_version(artifact: pathlib.Path) -> str | None:
         return None
 
 
+def _underlying_types(node, out: dict) -> dict:
+    """AST id -> underlying type of every user-defined value type under `node`."""
+    if isinstance(node, dict):
+        if node.get("nodeType") == "UserDefinedValueTypeDefinition":
+            out[node["id"]] = node["underlyingType"]["typeDescriptions"]["typeString"]
+        for child in node.values():
+            _underlying_types(child, out)
+    elif isinstance(node, list):
+        for child in node:
+            _underlying_types(child, out)
+    return out
+
+
 def storage_layouts(root: pathlib.Path, facets: list, fallback_version: str | None = None) -> dict:
     """source_id -> solc's storage layout, for the Solidity facets among `facets`,
-    as the sources in `root` declare them. One solc run covers them all."""
+    as the sources in `root` declare them. One solc run covers them all.
+
+    A user-defined value type's entry gains `underlying`: solc labels it by
+    name only, so `type Amount is uint256` and `is int256` look alike."""
     wanted = [facet for facet in facets if facet.kind == "sol"]
     if not wanted:
         return {}
@@ -72,7 +89,8 @@ def storage_layouts(root: pathlib.Path, facets: list, fallback_version: str | No
         "sources": {path: {"urls": [path]} for path in selection},
         "settings": {
             "remappings": run(["forge", "remappings"], root).split(),
-            "outputSelection": selection,
+            # The AST holds UDVTs' underlying types.
+            "outputSelection": {"*": {"": ["ast"]}, **selection},
         },
     }
     solc = solc_binary(root, fallback_version)
@@ -83,10 +101,15 @@ def storage_layouts(root: pathlib.Path, facets: list, fallback_version: str | No
     if errors:
         raise click.ClickException("solc: " + "\n".join(errors))
 
+    underlying = _underlying_types([source.get("ast") for source in out.get("sources", {}).values()], {})
     layouts = {}
     for facet in wanted:
         contract = out.get("contracts", {}).get(facet.path, {}).get(facet.contract)
         if contract is None:
             raise click.ClickException(f"{facet.source_id}: no such contract")
-        layouts[facet.source_id] = contract["storageLayout"]
+        layout = contract["storageLayout"]
+        for type_id, t in (layout.get("types") or {}).items():
+            if (match := _UDVT.match(type_id)) and int(match[1]) in underlying:
+                t["underlying"] = underlying[int(match[1])]
+        layouts[facet.source_id] = layout
     return layouts
