@@ -7,7 +7,7 @@ class StubTrees:
     """Stands in for `SourceTrees`: each commit "checks out" to `trees/<commit>`,
     with no git and no build."""
 
-    def __init__(self, root=None):
+    def __init__(self, root=None, build=True):
         pass
 
     def __enter__(self):

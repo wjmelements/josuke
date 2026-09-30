@@ -124,7 +124,8 @@ def test_recorded_args_that_do_not_encode_fail(tmp_path):
     assert f"{CONFIGURED}: recorded constructorArgs do not encode" in result.output
 
 
-def test_plan_against_current_and_strict_drift(tmp_path):
+def test_plan_against_current_and_strict_drift(tmp_path, monkeypatch):
+    monkeypatch.setattr("josuke.check.Baselines.declarations", lambda self, commit, source_ids: [])  # no git history
     current = {
         OWNABLE: _record(OWNABLE, "0x" + "0a" * 20),
         COUNTER: {**_record(COUNTER, "0x" + "0c" * 20), "initcodeHash": "0x" + "ee" * 32},  # stale
@@ -223,7 +224,7 @@ def test_facets_without_a_layout_are_listed_as_not_visible():
 
     layout = {
         "storage": [{"label": "owner_", "offset": 0, "slot": "0", "type": "t_address"}],
-        "types": {"t_address": {"label": "address", "numberOfBytes": "20"}},
+        "types": {"t_address": {"encoding": "inplace", "label": "address", "numberOfBytes": "20"}},
     }
     findings = Findings()
     line = _check_storage(PROXY, {"a.sol:A": (None, [], layout), "impl.evm": (None, [], None)}, findings)
@@ -234,7 +235,10 @@ def test_facets_without_a_layout_are_listed_as_not_visible():
 def test_packed_variables_overlapping_at_different_offsets_fail():
     from josuke.check import Findings, _check_storage
 
-    types = {"t_uint64": {"label": "uint64", "numberOfBytes": "8"}, "t_uint128": {"label": "uint128", "numberOfBytes": "16"}}
+    types = {
+        "t_uint64": {"encoding": "inplace", "label": "uint64", "numberOfBytes": "8"},
+        "t_uint128": {"encoding": "inplace", "label": "uint128", "numberOfBytes": "16"},
+    }
     packed = {"storage": [
         {"label": "a", "offset": 0, "slot": "3", "type": "t_uint64"},
         {"label": "b", "offset": 8, "slot": "3", "type": "t_uint64"},
@@ -245,17 +249,3 @@ def test_packed_variables_overlapping_at_different_offsets_fail():
     assert len(findings.failures) == 2
     assert any("storage slot 3 offset 8: p.sol:P declares uint64 b over w.sol:W's uint128 c at slot 3" in f
                for f in findings.failures)
-
-
-def test_rebuilds_when_the_cache_hides_missing_layouts(tmp_path):
-    ledger = [_entry(["src/facets/*.sol"])]
-    assert _check(tmp_path, ledger).exit_code == 0
-    artifact = ROOT / "out" / "Counter.sol" / "Counter.json"
-    stripped = json.loads(artifact.read_text())
-    del stripped["storageLayout"]
-    artifact.write_text(json.dumps(stripped))
-
-    result = _check(tmp_path, ledger)
-    assert result.exit_code == 0, result.output
-    assert "rebuilt with --force" in result.output
-    assert "storageLayout" in json.loads(artifact.read_text())

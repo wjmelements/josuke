@@ -7,15 +7,19 @@ recorded hashes; `josuke verify` is what ties those to the chain.
 Blocking: the ledger breaks the schema or lists a proxy twice; `facetSrc` does
 not resolve to buildable facets; two facets `deploy` would put at different
 addresses export one selector; two facets declare different variables over
-the same storage bytes; a facet's recorded constructor args don't encode.
+the same storage bytes; storage that a recorded deployment (`current` or
+`proposed`) declares reads back differently at HEAD; a facet's recorded
+constructor args don't encode.
+
+Warned about: a variable renamed, or dropped with its data left behind.
 
 Reported, and blocking only with `--strict`: HEAD differs from the deployment
 the ledger stages (`proposed`, else `current`).
 """
 
-import json
 import pathlib
-from collections import Counter
+import re
+from collections import Counter, namedtuple
 from os import environ
 
 import click
@@ -25,6 +29,7 @@ from eth_utils import to_checksum_address
 from .deploy import (
     constructor_inputs,
     existing_deployment,
+    facet_from_source_id,
     facet_initcode,
     facet_selectors,
     keccak_hex,
@@ -33,25 +38,35 @@ from .deploy import (
 )
 from .erc8167 import SELECTORS_SELECTOR
 from .forge import get_forge_config
+from .layout import compiler_version, storage_layouts
 from .ledger import load_ledger, validate_ledger
 from .proc import run
+from .worktree import SourceTrees
 
 # Compiler settings that change bytecode, shown so a hash difference can be
 # traced to the build rather than the source.
 BUILD_SETTINGS = ("solc", "via_ir", "evm_version", "bytecode_hash", "cbor_metadata")
 
-# What `forge inspect` says when an artifact was built without the storage layout.
-STALE_LAYOUT = "storage layout missing from artifact"
+_ELEMENTARY = re.compile(r"^(u?int\d*|bool|address|bytes\d+)$")
+
+# One declared state variable, covering bytes [start, end) of storage counted
+# from slot 0; `type` is solc's label, `shape` the comparable form of the type.
+Decl = namedtuple("Decl", "start end source label type shape")
 
 
 class Findings:
     def __init__(self):
         self.failures: list[str] = []
+        self.warnings: list[str] = []
         self.drift: list[str] = []
 
     def fail(self, message: str) -> None:
         if message not in self.failures:  # the same fault shows up once per chain
             self.failures.append(message)
+
+    def warn(self, message: str) -> None:
+        if message not in self.warnings:
+            self.warnings.append(message)
 
 
 def _plural(count: int, word: str) -> str:
@@ -80,39 +95,115 @@ def _build_context(root: pathlib.Path) -> str:
     return " · ".join(parts)
 
 
-def _storage_layout(facet, root: pathlib.Path) -> dict | None:
-    """solc's storage layout for a Solidity facet; None for a `.evm` facet, which has none."""
-    if facet.kind != "sol":
-        return None
-    return json.loads(run(["forge", "inspect", facet.source_id, "storageLayout", "--json"], root))
+def _built_solc_version(root: pathlib.Path) -> str | None:
+    """The solc version of the build in `root`, for projects that don't pin one."""
+    out = root / get_forge_config(root).get("out", "out")
+    return next(filter(None, map(compiler_version, sorted(out.glob("*/*.json")))), None)
 
 
-def _resolve(entry: dict, root: pathlib.Path, findings: Findings) -> dict | None:
-    """source_id -> (Facet, [Selector], storage layout) at HEAD, or None if
-    `facetSrc` doesn't resolve."""
+def _resolve(entry: dict, root: pathlib.Path, solc_version: str | None, findings: Findings) -> dict | None:
+    """source_id -> (Facet, [Selector], storage layout or None for `.evm`) at
+    HEAD, or None if `facetSrc` doesn't resolve."""
     proxy = to_checksum_address(entry["address"])
     try:
         facets = resolve_facets(entry["facetSrc"], root)
     except click.ClickException as e:
         findings.fail(f"{proxy} facetSrc: {e.message}")
         return None
-    out = {}
+    selectors = {}
     for facet in facets:
         try:
-            selectors = facet_selectors(facet, root)
+            selectors[facet.source_id] = facet_selectors(facet, root)
         except click.ClickException as e:
             findings.fail(f"{proxy} {facet.source_id}: cannot read its ABI: {e.message}")
-            continue
-        try:
-            out[facet.source_id] = (facet, selectors, _storage_layout(facet, root))
-        except click.ClickException as e:
-            findings.fail(f"{proxy} {facet.source_id}: cannot read its storage layout: {e.message}")
-    return out if len(out) == len(facets) else None
+    if len(selectors) != len(facets):
+        return None
+    try:
+        layouts = storage_layouts(root, facets, solc_version)
+    except click.ClickException as e:
+        findings.fail(f"{proxy}: cannot read storage layouts: {e.message}")
+        return None
+    return {f.source_id: (f, selectors[f.source_id], layouts.get(f.source_id)) for f in facets}
 
 
 def _position(start: int) -> str:
     slot, offset = divmod(start, 32)
     return f"slot {slot}" + (f" offset {offset}" if offset else "")
+
+
+def _shape(types: dict, type_id: str) -> tuple:
+    """A type as it sits in storage, comparable across commits: solc's type ids
+    carry AST ids, and struct labels the contract that happens to define them."""
+    t = types[type_id]
+    size = int(t["numberOfBytes"])
+    encoding = t["encoding"]
+    if encoding == "mapping":
+        return ("mapping", size, _shape(types, t["key"]), _shape(types, t["value"]))
+    if encoding == "bytes":
+        return ("bytes", size)
+    if encoding == "dynamic_array":
+        return ("dynamic_array", size, _shape(types, t["base"]))
+    if "members" in t:
+        members = tuple((m["label"], int(m["slot"]), m["offset"], _shape(types, m["type"])) for m in t["members"])
+        return ("struct", size, members)
+    if "base" in t:
+        return ("array", size, _shape(types, t["base"]))
+    label = t["label"].removesuffix(" payable")
+    if label.startswith("contract "):
+        label = "address"
+    elif label.startswith("enum "):
+        label = "enum"
+    elif not _ELEMENTARY.match(label):
+        label = "value"  # a user-defined value type
+    return ("value", size, label)
+
+
+def _fit(old: tuple, new: tuple, notes: set) -> bool:
+    """Whether storage written as shape `old` reads back correctly as `new`.
+    Adds "renamed" or "grown" to `notes` for the differences that allows."""
+    if old == new:
+        return True
+    kind = old[0]
+    if kind != new[0]:
+        return False
+    if kind == "mapping":
+        # Every value has slots of its own, so a value may grow.
+        return old[2] == new[2] and _fit(old[3], new[3], notes)
+    if kind in ("array", "dynamic_array"):
+        # Elements sit one after another: an element may change only in place.
+        if old[2][1] != new[2][1] or new[1] < old[1] or not _fit(old[2], new[2], notes):
+            return False
+        if new[1] > old[1]:
+            notes.add("grown")
+        return True
+    if kind == "struct":
+        if len(new[2]) < len(old[2]):
+            return False
+        for (old_label, *old_at, old_shape), (new_label, *new_at, new_shape) in zip(old[2], new[2]):
+            if old_at != new_at or not _fit(old_shape, new_shape, notes):
+                return False
+            if old_label != new_label:
+                notes.add("renamed")
+        if new[1] != old[1] or len(new[2]) > len(old[2]):
+            notes.add("grown")
+        return True
+    return False
+
+
+def _declarations(layouts: dict) -> list[Decl]:
+    """Every state variable the layouts (source_id -> solc layout, None for none)
+    declare, sorted by position."""
+    out = []
+    for source_id, layout in layouts.items():
+        if layout is None:
+            continue
+        types = layout.get("types") or {}
+        for var in layout.get("storage") or []:
+            kind = types[var["type"]]
+            start = int(var["slot"]) * 32 + var["offset"]
+            end = start + int(kind["numberOfBytes"])
+            out.append(Decl(start, end, source_id, var["label"], kind["label"], _shape(types, var["type"])))
+    return sorted(out, key=lambda d: (d.start, d.end, d.source))
 
 
 def _check_storage(proxy: str, resolved: dict, findings: Findings) -> str:
@@ -121,32 +212,22 @@ def _check_storage(proxy: str, resolved: dict, findings: Findings) -> str:
 
     Sees only declared state variables: ERC-7201 namespaced structs, assembly
     `sstore`s and `.evm` facets are invisible to it."""
-    declared = []  # (first byte, end byte, source_id, name, type)
-    unseen = []
-    for source_id, (_, _, layout) in resolved.items():
-        if layout is None:
-            unseen.append(source_id)
-            continue
-        types = layout.get("types") or {}
-        for var in layout.get("storage") or []:
-            kind = types[var["type"]]
-            start = int(var["slot"]) * 32 + var["offset"]
-            declared.append((start, start + int(kind["numberOfBytes"]), source_id, var["label"], kind["label"]))
+    declared = _declarations({source_id: layout for source_id, (_, _, layout) in resolved.items()})
+    unseen = [source_id for source_id, (_, _, layout) in resolved.items() if layout is None]
 
-    declared.sort()
     shared = set()  # slots declared identically by more than one facet
     for i, a in enumerate(declared):
         for b in declared[i + 1 :]:
-            if b[0] >= a[1]:
+            if b.start >= a.end:
                 break  # sorted by first byte: nothing later overlaps `a`
-            if a[2] == b[2]:
+            if a.source == b.source:
                 continue
-            if (a[0], a[1], a[3], a[4]) == (b[0], b[1], b[3], b[4]):
-                shared.add(a[0] // 32)
+            if (a.start, a.end, a.label, a.shape) == (b.start, b.end, b.label, b.shape):
+                shared.add(a.start // 32)
                 continue
             findings.fail(
-                f"{proxy} storage {_position(b[0])}: {b[2]} declares {b[4]} {b[3]} "
-                f"over {a[2]}'s {a[4]} {a[3]} at {_position(a[0])}"
+                f"{proxy} storage {_position(b.start)}: {b.source} declares {b.type} {b.label} "
+                f"over {a.source}'s {a.type} {a.label} at {_position(a.start)}"
             )
 
     checked = len(resolved) - len(unseen)
@@ -154,6 +235,94 @@ def _check_storage(proxy: str, resolved: dict, findings: Findings) -> str:
     if unseen:
         line += f"; not visible: {', '.join(unseen)}"
     return line
+
+
+def _compare_storage(proxy: str, label: str, old: list[Decl], new: list[Decl], findings: Findings) -> str:
+    """Storage the facets at `label` declared must read back the same at HEAD:
+    same position, same shape. A struct or fixed array may grow where its new
+    bytes overlap nothing declared before; a rename or a dropped variable warns."""
+    old = list({(d.start, d.end, d.label, d.shape): d for d in reversed(old)}.values())[::-1]
+    new = list({(d.start, d.end, d.label, d.shape): d for d in reversed(new)}.values())[::-1]
+    grown = renamed = dropped = 0
+    where = {d.label: d.start for d in new}
+    for o in old:
+        was = f"{o.type} {o.label} ({o.source} at {label})"
+        if where.get(o.label, o.start) != o.start:
+            # Otherwise a variable inserted before it reads as its rename.
+            findings.fail(f"{proxy} storage {_position(o.start)}: {was} moves to {_position(where[o.label])}")
+        overlapping = [n for n in new if n.start < o.end and o.start < n.end]
+        if not overlapping:
+            dropped += 1
+            findings.warn(f"{proxy} storage {_position(o.start)}: nothing declares {was} any more; its data stays")
+        for n in overlapping:
+            notes: set = set()
+            if n.start != o.start or not _fit(o.shape, n.shape, notes):
+                findings.fail(f"{proxy} storage {_position(n.start)}: {n.source} declares {n.type} {n.label} over {was}")
+                continue
+            if (n.label != o.label and o.label not in where) or "renamed" in notes:
+                renamed += 1
+                findings.warn(f"{proxy} storage {_position(n.start)}: {was} is renamed in {n.type} {n.label}")
+            if "grown" in notes or n.end > o.end:
+                grown += 1
+    line = f"  layout       vs {label}: {_plural(len(old), 'variable')} checked"
+    extras = [f"{count} {word}" for count, word in ((grown, "grown"), (renamed, "renamed"), (dropped, "dropped")) if count]
+    return line + (f", {', '.join(extras)}" if extras else "")
+
+
+class Baselines:
+    """The storage recorded deployments declared, read from their commits checked
+    out without a build: solc's analysis alone yields the layout."""
+
+    def __init__(self, root: pathlib.Path, solc_version: str | None):
+        self.root = root
+        self.solc_version = solc_version
+        self._trees: SourceTrees | None = None
+        self._layouts: dict = {}  # (commit, source_id) -> solc layout
+
+    def declarations(self, commit: str, source_ids: list[str]) -> list[Decl]:
+        missing = [source_id for source_id in source_ids if (commit, source_id) not in self._layouts]
+        if missing:
+            try:
+                if self._trees is None:
+                    self._trees = SourceTrees(self.root, build=False)
+                tree = self._trees.get(commit)
+            except click.ClickException as e:
+                raise click.ClickException(
+                    f"cannot check out {commit[:7]} (a shallow clone needs it fetched): {e.message}"
+                )
+            layouts = storage_layouts(tree, [facet_from_source_id(s) for s in missing], self.solc_version)
+            self._layouts.update(((commit, source_id), layout) for source_id, layout in layouts.items())
+        return _declarations({source_id: self._layouts[(commit, source_id)] for source_id in source_ids})
+
+    def close(self) -> None:
+        if self._trees is not None:
+            self._trees.close()
+
+
+def _check_storage_history(proxy, states, resolved, head_hashes, baselines, findings) -> list[str]:
+    """Compare HEAD's storage with each recorded state's. A state whose Solidity
+    facets are all still at HEAD with the same bytecode needs no checkout: the
+    union check on HEAD already covers it."""
+    lines = []
+    head = _declarations({source_id: layout for source_id, (_, _, layout) in resolved.items()})
+    seen = set()
+    for name, state in states:
+        if not state or state["gitCommit"] in seen:
+            continue
+        seen.add(state["gitCommit"])
+        label = f"{name} {state['gitCommit'][:7]}"
+        recorded = {s: r for s, r in state.get("facets", {}).items() if not s.endswith(".evm")}
+        if all(head_hashes.get(s) is not None and head_hashes[s] == r.get("initcodeHash") for s, r in recorded.items()):
+            lines.append(f"  layout       vs {label}: recorded facets unchanged")
+            continue
+        try:
+            old = baselines.declarations(state["gitCommit"], list(recorded))
+        except click.ClickException as e:
+            findings.fail(f"{proxy}: cannot read the storage at {label}: {e.message}")
+            lines.append(f"  layout       vs {label}: not readable")
+            continue
+        lines.append(_compare_storage(proxy, label, old, head, findings))
+    return lines
 
 
 def _initcode_hash(facet, root, recorded: dict, proxy: str, findings: Findings) -> tuple[str | None, list[str]]:
@@ -199,7 +368,7 @@ def _differences(head: dict, reference: dict) -> list[str]:
     return out
 
 
-def _check_proxy(entry, chain, resolved, storage_line, root, run_deployed, findings) -> list[str]:
+def _check_proxy(entry, chain, resolved, storage_line, root, run_deployed, baselines, findings) -> list[str]:
     """Check one proxy on one chain (None: nothing deployed anywhere yet) and
     render its section of the report."""
     proxy = to_checksum_address(entry["address"])
@@ -277,6 +446,11 @@ def _check_proxy(entry, chain, resolved, storage_line, root, run_deployed, findi
     else:
         lines.append(f"  selectors()  generated · returns {_plural(len(owners) + 1, 'selector')}")
     lines.append(storage_line)
+    lines.extend(
+        _check_storage_history(
+            proxy, (("current", current), ("proposed", proposed)), resolved, head_hashes, baselines, findings
+        )
+    )
 
     if len(head_hashes) == len(resolved):
         if proposed:
@@ -316,28 +490,15 @@ def check_ledger(ledger_path, root: pathlib.Path, chain: str | None) -> tuple[li
         if count > 1:
             findings.fail(f"{address} is listed {count} times")
 
-    # Storage layouts aren't in artifacts by default; the extra output leaves bytecode unchanged.
-    build = ["forge", "build", "--extra-output", "storageLayout"]
     try:
-        run(build, root)
+        run(["forge", "build"], root)
         lines.append(f"build  {_build_context(root)}")
     except click.ClickException as e:
         findings.fail(f"build: {e.message}")
         return lines, findings
 
-    resolving = Findings()
-    resolved = [_resolve(entry, root, resolving) for entry in ledger]
-    if any(STALE_LAYOUT in failure for failure in resolving.failures):
-        # forge's cache can claim artifacts are current while they lack the layout.
-        lines.append("build  artifacts had no storage layout although the cache said current; rebuilt with --force")
-        try:
-            run([*build, "--force"], root)
-        except click.ClickException as e:
-            findings.fail(f"build: {e.message}")
-            return lines, findings
-        resolving = Findings()
-        resolved = [_resolve(entry, root, resolving) for entry in ledger]
-    findings.failures.extend(resolving.failures)
+    solc_version = _built_solc_version(root)
+    resolved = [_resolve(entry, root, solc_version, findings) for entry in ledger]
     storage_lines = [
         _check_storage(to_checksum_address(entry["address"]), facets, findings) if facets is not None else None
         for entry, facets in zip(ledger, resolved)
@@ -345,13 +506,17 @@ def check_ledger(ledger_path, root: pathlib.Path, chain: str | None) -> tuple[li
 
     recorded_chains = {c for entry in ledger for c in entry.get("deployments", {})}
     chains = [chain] if chain else sorted(recorded_chains, key=int) or [None]
-    for c in chains:
-        run_deployed: dict = {}  # initcodeHash -> record, shared across proxies as `deploy` does
-        for entry, facets, storage_line in zip(ledger, resolved, storage_lines):
-            if facets is None:
-                lines.extend(["", f"{to_checksum_address(entry['address'])}  ·  facetSrc does not resolve"])
-                continue
-            lines.extend(_check_proxy(entry, c, facets, storage_line, root, run_deployed, findings))
+    baselines = Baselines(root, solc_version)
+    try:
+        for c in chains:
+            run_deployed: dict = {}  # initcodeHash -> record, shared across proxies as `deploy` does
+            for entry, facets, storage_line in zip(ledger, resolved, storage_lines):
+                if facets is None:
+                    lines.extend(["", f"{to_checksum_address(entry['address'])}  ·  facetSrc does not resolve"])
+                    continue
+                lines.extend(_check_proxy(entry, c, facets, storage_line, root, run_deployed, baselines, findings))
+    finally:
+        baselines.close()
     return lines, findings
 
 
@@ -366,6 +531,9 @@ def _render(lines: list[str], findings: Findings, strict: bool) -> list[str]:
         out.append("OK  no blocking findings")
     if findings.drift and not strict:
         out.append(f"  ({_plural(len(findings.drift), 'staged-deployment difference')}; blocking with --strict)")
+    if findings.warnings:
+        out.append(f"WARNING  {_plural(len(findings.warnings), 'warning')}")
+        out.extend(f"  - {message}" for message in findings.warnings)
     return out
 
 

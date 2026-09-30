@@ -59,11 +59,17 @@ def _clone_nested(checkout: pathlib.Path, source: pathlib.Path) -> None:
 
 
 class SourceTrees:
-    """Detached git worktrees, one per commit, each with a completed `forge build`."""
+    """Detached git worktrees, one per commit, each with a completed `forge build`
+    unless `build` is off. `root` may be a subdirectory of its repository; each
+    commit then resolves to the same subdirectory of its worktree."""
 
-    def __init__(self, root: pathlib.Path):
+    def __init__(self, root: pathlib.Path, build: bool = True):
         self.root = root
+        self.build = build
+        self._top = pathlib.Path(run(["git", "rev-parse", "--show-toplevel"], root).strip())
+        self._prefix = run(["git", "rev-parse", "--show-prefix"], root).strip()
         self._tmp = tempfile.TemporaryDirectory(prefix="josuke-")
+        self._checkouts: list[pathlib.Path] = []
         self._trees: dict[str, pathlib.Path] = {}
         dirty = run(["git", "status", "--porcelain", "--ignore-submodules=none"], root).strip()
         submodules = run(["git", "submodule", "status", "--recursive"], root).splitlines()
@@ -73,28 +79,30 @@ class SourceTrees:
 
     def get(self, commit: str) -> pathlib.Path:
         if commit == self._root_commit:
-            if not self._root_built:
+            if self.build and not self._root_built:
                 run(["forge", "build"], self.root)  # a no-op when the caller already built
                 self._root_built = True
             return self.root
         if commit not in self._trees:
-            tree = pathlib.Path(self._tmp.name) / commit
-            run(["git", "worktree", "add", "--detach", str(tree), commit], self.root)
-            self._trees[commit] = tree  # recorded before build so a build failure still cleans up
-            if (tree / ".gitmodules").exists():
+            checkout = pathlib.Path(self._tmp.name) / commit
+            run(["git", "worktree", "add", "--detach", str(checkout), commit], self.root)
+            self._checkouts.append(checkout)  # recorded before build so a build failure still cleans up
+            if (checkout / ".gitmodules").exists():
                 try:
-                    _clone_submodules(tree, self.root)
+                    _clone_submodules(checkout, self._top)
                 except click.ClickException:
                     # A recorded submodule commit the root's copies lack: start over from the remotes.
-                    run(["git", "worktree", "remove", "--force", str(tree)], self.root)
-                    run(["git", "worktree", "add", "--detach", str(tree), commit], self.root)
-                    run(["git", "submodule", "update", "--init", "--recursive"], tree)
-            run(["forge", "build"], tree)
+                    run(["git", "worktree", "remove", "--force", str(checkout)], self.root)
+                    run(["git", "worktree", "add", "--detach", str(checkout), commit], self.root)
+                    run(["git", "submodule", "update", "--init", "--recursive"], checkout)
+            tree = self._trees[commit] = checkout / self._prefix
+            if self.build:
+                run(["forge", "build"], tree)
         return self._trees[commit]
 
     def close(self) -> None:
-        for tree in self._trees.values():
-            run(["git", "worktree", "remove", "--force", str(tree)], self.root)
+        for checkout in self._checkouts:
+            run(["git", "worktree", "remove", "--force", str(checkout)], self.root)
         self._tmp.cleanup()
 
     def __enter__(self):
