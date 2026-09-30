@@ -96,16 +96,25 @@ def deployed(tmp_path, monkeypatch):
 
 
 READ_COUNT = "function count() external view returns (uint256) { return uint256(count_); }"
-# Unchanged bytecode means unchanged storage access, which `check` doesn't revisit.
-TOUCH = "\nfunction touched() external pure {}"
 
 
-def test_unchanged_facets_need_no_checkout(deployed):
+def test_unchanged_storage_passes(deployed):
     check = deployed("address internal owner_;\nuint256 internal count_;", {"A": READ_COUNT})
     result = check("address internal owner_;\nuint256 internal count_;", {"A": READ_COUNT})
     assert result.exit_code == 0, result.output
     assert "layout       vs current" in result.output
-    assert "recorded facets unchanged" in result.output
+    assert "2 variables checked" in result.output
+
+
+def test_retyping_a_variable_no_recorded_facet_reads_fails(deployed):
+    # A never reads `spare_`, so its bytecode stays the same when the type changes.
+    check = deployed("address internal owner_;\nuint256 internal spare_;", {"A": ""})
+    result = check(
+        "address internal owner_;\nint256 internal spare_;",
+        {"A": "", "B": "function spare() external view returns (int256) { return spare_; }"},
+    )
+    assert result.exit_code == 1, result.output
+    assert "declares int256 spare_ over uint256 spare_ (src/A.sol:A at current" in result.output
 
 
 def test_appending_storage_passes(deployed):
@@ -121,7 +130,7 @@ def test_appending_storage_passes(deployed):
 
 def test_changing_a_type_fails(deployed):
     check = deployed("address internal owner_;\nuint256 internal count_;", {"A": READ_COUNT})
-    result = check("address internal owner_;\nint256 internal count_;", {"A": READ_COUNT + TOUCH})
+    result = check("address internal owner_;\nint256 internal count_;", {"A": READ_COUNT})
     assert result.exit_code == 1, result.output
     assert "storage slot 1: src/A.sol:A declares int256 count_ over uint256 count_ (src/A.sol:A at current" in result.output
 
@@ -162,14 +171,14 @@ READ_STRUCT = "function a(uint256 id) external view returns (uint256) { return b
 
 def test_growing_a_struct_passes_where_its_new_bytes_are_free(deployed):
     check = deployed(STRUCT.format(more="", after=""), {"A": READ_STRUCT})
-    result = check(STRUCT.format(more="uint256 b;", after=""), {"A": READ_STRUCT + TOUCH})
+    result = check(STRUCT.format(more="uint256 b;", after=""), {"A": READ_STRUCT})
     assert result.exit_code == 0, result.output
     assert "2 grown" in result.output  # the mapping's values and `single_`
 
 
 def test_growing_a_struct_over_the_next_variable_fails(deployed):
     check = deployed(STRUCT.format(more="", after="uint256 internal next_;"), {"A": READ_STRUCT})
-    result = check(STRUCT.format(more="uint256 b;", after="uint256 internal next_;"), {"A": READ_STRUCT + TOUCH})
+    result = check(STRUCT.format(more="uint256 b;", after="uint256 internal next_;"), {"A": READ_STRUCT})
     assert result.exit_code == 1, result.output
     assert "uint256 next_ (src/A.sol:A at current" in result.output
     assert "moves to slot 3" in result.output

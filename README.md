@@ -119,9 +119,8 @@ its new bytes were free; a moved, retyped or overlapped variable fails.
 The storage checks read solc's storage layout, which lists declared state
 variables only: ERC-7201 namespaced structs, fixed-slot access and `.evm` facets
 are invisible to them. solc produces a layout from analysis alone, so neither
-HEAD nor a recorded commit gets a second build for it. A recorded commit is
-checked out only when one of its facets changed or went away at HEAD; a shallow
-CI clone then needs that commit fetched (`fetch-depth: 0`). It lists each facet as new, changed, unchanged or removed against
+HEAD nor a recorded commit gets a second build for it. Each recorded commit is
+checked out, so a shallow CI clone needs them fetched (`fetch-depth: 0`). It lists each facet as new, changed, unchanged or removed against
 `current`, and the constructor args `deploy` will ask for. It also compares HEAD
 with the staged deployment (`proposed`, else `current`); `--strict` makes a
 difference there fail, for release branches. `--chain` limits it to one chain,

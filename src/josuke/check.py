@@ -1,7 +1,7 @@
 """`josuke check`: what the source in the working tree would do to the ledger,
 worked out offline, for pull requests.
 
-Needs only the build: no RPC, no keys, no worktrees. It trusts the ledger's
+Needs only the build and git history: no RPC, no keys. It trusts the ledger's
 recorded hashes; `josuke verify` is what ties those to the chain.
 
 Blocking: the ledger breaks the schema or lists a proxy twice; `facetSrc` does
@@ -299,10 +299,10 @@ class Baselines:
             self._trees.close()
 
 
-def _check_storage_history(proxy, states, resolved, head_hashes, baselines, findings) -> list[str]:
-    """Compare HEAD's storage with each recorded state's. A state whose Solidity
-    facets are all still at HEAD with the same bytecode needs no checkout: the
-    union check on HEAD already covers it."""
+def _check_storage_history(proxy, states, resolved, baselines, findings) -> list[str]:
+    """Compare HEAD's storage with each recorded state's. Unchanged bytecode
+    doesn't mean unchanged storage: a facet that never touches a variable
+    compiles the same whatever type it declares there."""
     lines = []
     head = _declarations({source_id: layout for source_id, (_, _, layout) in resolved.items()})
     seen = set()
@@ -311,12 +311,9 @@ def _check_storage_history(proxy, states, resolved, head_hashes, baselines, find
             continue
         seen.add(state["gitCommit"])
         label = f"{name} {state['gitCommit'][:7]}"
-        recorded = {s: r for s, r in state.get("facets", {}).items() if not s.endswith(".evm")}
-        if all(head_hashes.get(s) is not None and head_hashes[s] == r.get("initcodeHash") for s, r in recorded.items()):
-            lines.append(f"  layout       vs {label}: recorded facets unchanged")
-            continue
+        recorded = [s for s in state.get("facets", {}) if not s.endswith(".evm")]
         try:
-            old = baselines.declarations(state["gitCommit"], list(recorded))
+            old = baselines.declarations(state["gitCommit"], recorded)
         except click.ClickException as e:
             findings.fail(f"{proxy}: cannot read the storage at {label}: {e.message}")
             lines.append(f"  layout       vs {label}: not readable")
@@ -448,7 +445,7 @@ def _check_proxy(entry, chain, resolved, storage_line, root, run_deployed, basel
     lines.append(storage_line)
     lines.extend(
         _check_storage_history(
-            proxy, (("current", current), ("proposed", proposed)), resolved, head_hashes, baselines, findings
+            proxy, (("current", current), ("proposed", proposed)), resolved, baselines, findings
         )
     )
 

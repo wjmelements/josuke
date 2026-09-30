@@ -26,6 +26,8 @@ ARGS = {"limits": {"admin": "0x" + "ad" * 20, "level": 3}}
 @pytest.fixture(autouse=True)
 def _in_fixture(monkeypatch):
     monkeypatch.chdir(ROOT)
+    # COMMIT isn't in git; test_check_history.py covers recorded storage.
+    monkeypatch.setattr("josuke.check.Baselines.declarations", lambda self, commit, source_ids: [])
 
 
 def _record(source_id, address, args=None):
@@ -124,8 +126,7 @@ def test_recorded_args_that_do_not_encode_fail(tmp_path):
     assert f"{CONFIGURED}: recorded constructorArgs do not encode" in result.output
 
 
-def test_plan_against_current_and_strict_drift(tmp_path, monkeypatch):
-    monkeypatch.setattr("josuke.check.Baselines.declarations", lambda self, commit, source_ids: [])  # no git history
+def test_plan_against_current_and_strict_drift(tmp_path):
     current = {
         OWNABLE: _record(OWNABLE, "0x" + "0a" * 20),
         COUNTER: {**_record(COUNTER, "0x" + "0c" * 20), "initcodeHash": "0x" + "ee" * 32},  # stale
