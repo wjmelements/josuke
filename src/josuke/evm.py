@@ -164,10 +164,15 @@ _SENDER_OPS = {"CALLER", "ORIGIN"}
 
 @dataclass
 class Replay:
-    runtime: str  # hex, no 0x; "" when the constructor reverted
+    runtime: str | None  # hex, no 0x; None when the constructor reverted
     reads_sender: bool  # msg.sender or tx.origin: the replay needs `from`
     reads_address: bool  # its own address: the replay needs `from` and `nonce`
     block_overrides: dict  # the block values it read, as `evm` reports them
+    revert_data: str = ""  # hex, no 0x; what a reverting constructor returned
+
+    def revert_detail(self) -> str:
+        """" with 0x<data>" for a revert that returned data, else ""."""
+        return f" with 0x{self.revert_data}" if self.revert_data else ""
 
 
 def replay_create(initcode_hex: str, request: dict | None = None, cache: dict | None = None, trace: bool = False) -> Replay:
@@ -188,11 +193,14 @@ def replay_create(initcode_hex: str, request: dict | None = None, cache: dict | 
 
     with EvmRelay(cache=cache, json_output=True, on_trace=note if trace else None) as relay:
         result = json.loads(relay.call({**(request or {}), "data": initcode_hex}))
+    data = result["returnData"].removeprefix("0x")
+    reverted = int(result["status"], 16) == 0
     return Replay(
-        result["returnData"].removeprefix("0x"),
+        None if reverted else data,
         reads["sender"],
         reads["address"],
         result.get("blockOverrides", {}),
+        data if reverted else "",
     )
 
 

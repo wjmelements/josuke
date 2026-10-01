@@ -169,6 +169,20 @@ def test_replay_create_without_trace_reports_no_reads(eth_rpc):
 
 
 @needs_evm
+@pytest.mark.parametrize(
+    "initcode, runtime, revert_data",
+    [
+        ("60aa5f5360015ffd", None, "aa"),  # REVERT(0, 1) with 0xaa
+        ("5f5ffd", None, ""),  # REVERT(0, 0)
+        ("5f5ff3", "", ""),  # RETURN(0, 0): created, with no code
+    ],
+)
+def test_replay_create_tells_a_revert_from_runtime(eth_rpc, initcode, runtime, revert_data):
+    replay = replay_create(initcode, DEPLOY)
+    assert (replay.runtime, replay.revert_data) == (runtime, revert_data)
+
+
+@needs_evm
 def test_evm_relay_returns_json_results_without_forwarding_them(eth_rpc):
     with EvmRelay(json_output=True) as relay:
         result = json.loads(relay.call({"from": DEPLOYER, "data": _initcode("NoArgs")}))

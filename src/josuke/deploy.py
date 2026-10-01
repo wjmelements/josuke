@@ -11,7 +11,7 @@ from .broadcast import broadcast_session, create
 from .delegate import ContractSource, Delegate
 from .erc8167 import SELECTORS_SELECTOR, generated_selectors, selectors_method
 from .ethjsonrpc import chain_id, eth_get_code
-from .evm import evm_artifact, replay_create
+from .evm import Replay, evm_artifact, replay_create
 from .forge import get_forge_config
 from .ledger import load_ledger, write_ledger
 from .migration import Migration, SetDelegate
@@ -215,9 +215,9 @@ def block_overrides(block: dict) -> dict:
     return {BLOCK_OVERRIDE_KEYS[key]: value for key, value in block.items()}
 
 
-def deploy_environment(initcode_hex: str, sender: str, nonce: int, block: int) -> tuple[dict, str]:
-    """(facet fields to record, rebuilt runtime hex) from replaying a mined creation
-    where it ran: from `sender` at `nonce`, in `block`.
+def deploy_environment(initcode_hex: str, sender: str, nonce: int, block: int) -> tuple[dict, Replay]:
+    """(facet fields to record, the replay) from replaying a mined creation where it
+    ran: from `sender` at `nonce`, in `block`.
 
     Only what the constructor read is recorded: `from` if it read its sender or its
     own address, `nonce` if its own address, and the block values it read as
@@ -234,7 +234,7 @@ def deploy_environment(initcode_hex: str, sender: str, nonce: int, block: int) -
         environment["nonce"] = nonce
     if replay.block_overrides:
         environment["block"] = block_from_overrides(replay.block_overrides)
-    return environment, replay.runtime
+    return environment, replay
 
 
 def verify_sourcify(
@@ -513,11 +513,13 @@ def run_deploy(ledger_path, redeploy_all: bool = False):
             creation = broadcast.deployment(address)
             facet_entry["codeHash"] = code_hash(address)
             facet_entry["createTxHash"] = creation.tx_hash
-            environment, runtime = deploy_environment(initcode, sender, creation.nonce, creation.block)
+            environment, replay = deploy_environment(initcode, sender, creation.nonce, creation.block)
             facet_entry.update(environment)
-            if keccak_hex(runtime) != facet_entry["codeHash"]:
+            if replay.runtime is None:
+                unreproduced.append(f"{facet.source_id} @{address}: constructor reverted{replay.revert_detail()}")
+            elif keccak_hex(replay.runtime) != facet_entry["codeHash"]:
                 unreproduced.append(
-                    f"{facet.source_id} @{address}: replay rebuilt {keccak_hex(runtime)}, "
+                    f"{facet.source_id} @{address}: replay rebuilt {keccak_hex(replay.runtime)}, "
                     f"on chain {facet_entry['codeHash']}"
                 )
             if facet.kind == "sol":

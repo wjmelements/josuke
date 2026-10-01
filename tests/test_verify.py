@@ -90,7 +90,7 @@ _HASHES = {"ic": "0xICHASH", "rt": "0xRTHASH"}
 
 def _stub_facet_checks(monkeypatch, runtime="rt"):
     monkeypatch.setattr(verify, "facet_initcode", lambda f, root, args, prompt: ("ic", None))
-    monkeypatch.setattr(verify, "_replay_runtime", lambda initcode, rec, cache: runtime)
+    monkeypatch.setattr(verify, "_replay_runtime", lambda initcode, rec, cache: Replay(runtime, False, False, {}))
     monkeypatch.setattr(verify, "keccak_hex", lambda h: _HASHES.get(h, "0x" + h))
     monkeypatch.setattr(verify, "_onchain_codehash", lambda addr: "0xRTHASH")
 
@@ -135,8 +135,8 @@ def test_replay_runtime_replays_the_recorded_environment(monkeypatch):
     monkeypatch.setattr(verify, "replay_create", lambda initcode, request, cache: seen.append(request) or Replay("rt", False, False, {}))
     rec = {"from": A1, "nonce": 5, "block": {"timestamp": "0x6700", "coinbase": B2}, "codeHash": "0xRTHASH"}
 
-    assert verify._replay_runtime("ic", rec, None) == "rt"
-    assert verify._replay_runtime("ic", {"codeHash": "0xRTHASH"}, None) == "rt"
+    assert verify._replay_runtime("ic", rec, None).runtime == "rt"
+    assert verify._replay_runtime("ic", {"codeHash": "0xRTHASH"}, None).runtime == "rt"
     assert seen == [{"from": A1, "nonce": "0x5", "blockOverrides": {"time": "0x6700", "feeRecipient": B2}}, {}]
 
 
@@ -165,6 +165,17 @@ def test_verify_facets_flags_nonce_without_from(monkeypatch):
     verify.verify_facets(_state({"a.sol:A": rec}), "current", ".", report)
 
     assert report.failures == [f"{PROXY} current a.sol:A: nonce recorded without from"]
+
+
+@pytest.mark.parametrize("revert_data, detail", [("08c379a0", " with 0x08c379a0"), ("", "")])
+def test_verify_facets_reports_a_constructor_that_reverts_on_replay(monkeypatch, revert_data, detail):
+    _stub_facet_checks(monkeypatch)
+    monkeypatch.setattr(verify, "_replay_runtime", lambda initcode, rec, cache: Replay(None, False, False, {}, revert_data))
+    state = _state({"a.sol:A": {"address": A1, "initcodeHash": "0xICHASH", "codeHash": "0xRTHASH"}})
+    report = _report()
+    verify.verify_facets(state, "current", ".", report)
+
+    assert report.failures == [f"{PROXY} current a.sol:A: constructor reverted when replayed from source{detail}"]
 
 
 def test_verify_facets_passes_clean(monkeypatch):
@@ -203,7 +214,7 @@ def test_verify_facets_rebuilds_runtime_from_source(monkeypatch):
     facet = deploy.facet_from_source_id(source_id)
     initcode, _ = deploy.facet_initcode(facet, root, None, prompt=False)
     with patch("josuke.evm.post", MockEthRpc()):
-        true_codehash = verify.keccak_hex(verify._replay_runtime(initcode, {"from": deployer}, {}))
+        true_codehash = verify.keccak_hex(verify._replay_runtime(initcode, {"from": deployer}, {}).runtime)
 
     def check(codehash, sender, onchain):
         rec = {"address": A1, "initcodeHash": verify.keccak_hex(initcode), "codeHash": codehash, "from": sender}
@@ -241,7 +252,7 @@ def test_verify_facets_replays_own_address_at_recorded_nonce(monkeypatch):
     initcode, _ = deploy.facet_initcode(facet, root, None, prompt=False)
     rpc = MockEthRpc()
     with patch("josuke.evm.post", rpc):
-        deployed = verify._replay_runtime(initcode, {"from": deployer, "nonce": 5}, {})
+        deployed = verify._replay_runtime(initcode, {"from": deployer, "nonce": 5}, {}).runtime
     rpc.set_code(address, deployed)  # live at its address, as after deploy
     rpc.nonce[address.lower()] = "0x1"
     codehash = verify.keccak_hex(deployed)
@@ -466,7 +477,7 @@ def stub_trees(monkeypatch, stub_source_trees):
     stub_source_trees(verify)
     monkeypatch.setattr(verify, "chain_id", lambda: "314")
     monkeypatch.setattr(verify, "ProxyStorage", FakeStorage)
-    monkeypatch.setattr(verify, "_replay_runtime", lambda initcode, sender, cache: "")
+    monkeypatch.setattr(verify, "_replay_runtime", lambda initcode, rec, cache: Replay("", False, False, {}))
 
 
 def test_run_verify_requires_rpc_url(monkeypatch, tmp_path):

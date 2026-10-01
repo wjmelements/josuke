@@ -431,6 +431,18 @@ def test_run_deploy_does_not_carry_from_forward_on_redeploy(stub_chain, monkeypa
     assert not {"from", "nonce"} & facet.keys()  # this constructor reads neither
 
 
+def test_run_deploy_records_then_fails_when_the_replayed_constructor_reverts(stub_chain, monkeypatch, tmp_path):
+    _resolve_to(monkeypatch, ["a.evm"])
+    stub_chain["replay"] = Replay(None, False, False, {}, "08c379a0")
+    path = _write(tmp_path, [{"address": PROXY, "facetSrc": ["*.evm"]}])
+
+    with pytest.raises(click.ClickException, match="a.evm @0x0+1: constructor reverted with 0x08c379a0"):
+        deploy.run_deploy(path)
+
+    facet = json.loads(path.read_text())[0]["deployments"]["314"]["proposed"]["facets"]["a.evm"]
+    assert facet["address"] == "0x" + f"{1:040x}"  # the deployment is still recorded
+
+
 def test_run_deploy_records_then_fails_when_replay_does_not_reproduce(stub_chain, monkeypatch, tmp_path):
     _resolve_to(monkeypatch, ["a.evm"])
     stub_chain["replay"] = Replay("6001", False, False, {})  # not what code_hash reports

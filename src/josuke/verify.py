@@ -17,7 +17,7 @@ from .deploy import (
 from .erc8167 import SELECTORS_SELECTOR
 from .ethjsonrpc import chain_id, eth_get_code
 from .broadcast import create_address
-from .evm import replay_create
+from .evm import Replay, replay_create
 from .ledger import load_ledger
 from .migration import InvalidMigration, Migration
 from .selectors import Selector
@@ -43,10 +43,10 @@ def _onchain_codehash(address: str) -> str:
     return keccak_hex(eth_get_code(address))
 
 
-def _replay_runtime(initcode: str, rec: dict, cache: dict | None) -> str:
-    """The runtime bytecode `initcode`'s constructor leaves on chain, replayed
-    against live state in the environment `deploy` recorded for it: its `from`,
-    `nonce` and `block`, each present only when the constructor read it."""
+def _replay_runtime(initcode: str, rec: dict, cache: dict | None) -> Replay:
+    """`initcode`'s constructor replayed against live state, in the environment
+    `deploy` recorded for it: its `from`, `nonce` and `block`, each present only
+    when the constructor read it."""
     request = {}
     if rec.get("from"):
         request["from"] = rec["from"]
@@ -54,7 +54,7 @@ def _replay_runtime(initcode: str, rec: dict, cache: dict | None) -> str:
         request["nonce"] = hex(rec["nonce"])
     if rec.get("block"):
         request["blockOverrides"] = block_overrides(rec["block"])
-    return replay_create(initcode, request, cache).runtime
+    return replay_create(initcode, request, cache)
 
 
 def verify_facets(
@@ -87,7 +87,11 @@ def verify_facets(
         # Rebuild the runtime from source and hash that too. The check above only
         # ties the initcode to source; without this, a codeHash recorded to match
         # tampered on-chain code would pass.
-        rebuilt = keccak_hex(_replay_runtime(initcode, rec, rpc_cache))
+        replay = _replay_runtime(initcode, rec, rpc_cache)
+        if replay.runtime is None:
+            report.fail(f"{label} {source_id}: constructor reverted when replayed from source{replay.revert_detail()}")
+            continue
+        rebuilt = keccak_hex(replay.runtime)
         recorded = rec.get("codeHash")
         address = rec.get("address")
         onchain = _onchain_codehash(address) if address else None
