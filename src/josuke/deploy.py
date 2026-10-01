@@ -11,7 +11,7 @@ from .broadcast import broadcast_session, create
 from .delegate import ContractSource, Delegate
 from .erc8167 import SELECTORS_SELECTOR, generated_selectors, selectors_method
 from .ethjsonrpc import chain_id, eth_get_code
-from .evm import deployer_derived, evm_artifact
+from .evm import Replay, evm_artifact, replay_create
 from .forge import get_forge_config
 from .ledger import load_ledger, write_ledger
 from .migration import Migration, SetDelegate
@@ -181,6 +181,60 @@ def deploy_initcode(initcode_hex: str, root: pathlib.Path) -> tuple[str, str]:
 
 def code_hash(address: str) -> str:
     return keccak_hex(eth_get_code(address))
+
+
+# A facet's `block` records the block values its constructor read. Naming rule: each
+# key is the camelCase of the Solidity `block.<member>` that reads the value, splitting
+# Solidity's run-together lowercase words (`block.basefee` -> `baseFee`, `block.gaslimit`
+# -> `gasLimit`, `block.timestamp` -> `timestamp`). These are also `evm`'s own block
+# field names. `evm` takes and reports them under geth's `eth_call` blockOverrides keys
+# instead, so this table translates at the ledger's edge, in both directions. The chain
+# id (`block.chainid`) is deliberately absent: the ledger is keyed by it.
+BLOCK_OVERRIDE_KEYS = {
+    "number": "number",
+    "timestamp": "time",
+    "gasLimit": "gasLimit",
+    "baseFee": "baseFeePerGas",
+    "blobBaseFee": "blobBaseFee",
+    "prevRandao": "prevRandao",
+    "coinbase": "feeRecipient",
+}
+_BLOCK_KEYS = {override: key for key, override in BLOCK_OVERRIDE_KEYS.items()}
+
+
+def block_from_overrides(overrides: dict) -> dict:
+    """A facet's `block` record from the blockOverrides `evm` reports."""
+    unknown = overrides.keys() - _BLOCK_KEYS.keys()
+    if unknown:
+        raise click.ClickException(f"evm reported block values josuke cannot record: {sorted(unknown)}")
+    return {_BLOCK_KEYS[override]: value for override, value in overrides.items()}
+
+
+def block_overrides(block: dict) -> dict:
+    """The blockOverrides that replay a facet's recorded `block`."""
+    return {BLOCK_OVERRIDE_KEYS[key]: value for key, value in block.items()}
+
+
+def deploy_environment(initcode_hex: str, sender: str, nonce: int, block: int) -> tuple[dict, Replay]:
+    """(facet fields to record, the replay) from replaying a mined creation where it
+    ran: from `sender` at `nonce`, in `block`.
+
+    Only what the constructor read is recorded: `from` if it read its sender or its
+    own address, `nonce` if its own address, and the block values it read as
+    `block`, so `verify` can replay it the same way on any node."""
+    replay = replay_create(
+        initcode_hex,
+        {"from": sender, "nonce": hex(nonce), "blockOverrides": block_overrides({"number": hex(block)})},
+        trace=True,
+    )
+    environment = {}
+    if replay.reads_sender or replay.reads_address:
+        environment["from"] = sender
+    if replay.reads_address:
+        environment["nonce"] = nonce
+    if replay.block_overrides:
+        environment["block"] = block_from_overrides(replay.block_overrides)
+    return environment, replay
 
 
 def verify_sourcify(
@@ -358,7 +412,7 @@ def run_deploy(ledger_path, redeploy_all: bool = False):
     run(["forge", "build"], root)
 
     run_deployed: dict[str, dict] = {}  # initcodeHash -> facet entry, shared across proxies this run
-    unmined: list[tuple[Facet, dict, str, str, str | None]] = []  # (facet, entry, initcode, sender, recorded from)
+    unmined: list[tuple[Facet, dict, str, str]] = []  # (facet, entry, initcode, sender)
     summaries: list[str] = []  # one line per proxy, reported once its deployments are mined
     checked_metadata = False  # warn_metadata_hash runs once, and only for Solidity facets
 
@@ -421,7 +475,7 @@ def run_deploy(ledger_path, redeploy_all: bool = False):
                     facet_entry["constructorArgs"] = args
                 proposed_facets[facet.source_id] = facet_entry
                 run_deployed.setdefault(initcode_hash, facet_entry)
-                unmined.append((facet, facet_entry, initcode, sender, recorded.get("from")))
+                unmined.append((facet, facet_entry, initcode, sender))
                 deployed += 1
 
             proposed = {"gitCommit": commit, "facets": proposed_facets}
@@ -452,20 +506,30 @@ def run_deploy(ledger_path, redeploy_all: bool = False):
             summaries.append(f"{proxy} chain {chain}: " + ", ".join(notes))
 
         broadcast.send_all(root)
-        # Replaying constructors takes RPC round trips, so it runs while the transactions are mined.
-        for facet, facet_entry, initcode, sender, recorded_from in unmined:
-            if deployer_derived(initcode, sender):
-                facet_entry["from"] = sender  # runtime depends on sender
-            elif recorded_from:
-                facet_entry["from"] = recorded_from
         broadcast.wait(root)
-        for facet, facet_entry, *_ in unmined:
-            tx_hash = broadcast.tx_hash(facet_entry["address"])
-            facet_entry["codeHash"] = code_hash(facet_entry["address"])
-            facet_entry["createTxHash"] = tx_hash
+        unreproduced = []
+        for facet, facet_entry, initcode, sender in unmined:
+            address = facet_entry["address"]
+            creation = broadcast.deployment(address)
+            facet_entry["codeHash"] = code_hash(address)
+            facet_entry["createTxHash"] = creation.tx_hash
+            environment, replay = deploy_environment(initcode, sender, creation.nonce, creation.block)
+            facet_entry.update(environment)
+            if replay.runtime is None:
+                unreproduced.append(f"{facet.source_id} @{address}: constructor reverted{replay.revert_detail()}")
+            elif keccak_hex(replay.runtime) != facet_entry["codeHash"]:
+                unreproduced.append(
+                    f"{facet.source_id} @{address}: replay rebuilt {keccak_hex(replay.runtime)}, "
+                    f"on chain {facet_entry['codeHash']}"
+                )
             if facet.kind == "sol":
-                verify_sourcify(facet, facet_entry["address"], chain, root, tx_hash)
+                verify_sourcify(facet, address, chain, root, creation.tx_hash)
 
     for summary in summaries:
         click.echo(summary)
-    write_ledger(ledger_path, ledger)
+    write_ledger(ledger_path, ledger)  # the deployments happened, so record them either way
+    if unreproduced:
+        raise click.ClickException(
+            "deployed, but replaying the constructor did not reproduce the code on chain; "
+            "`verify` will fail for:\n" + "\n".join(f"  - {line}" for line in unreproduced)
+        )

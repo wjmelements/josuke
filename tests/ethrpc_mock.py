@@ -29,9 +29,11 @@ class FakeResponse:
 
 
 class MockEthRpc:
-    def __init__(self, block_number: int = 0x1312D00):
+    def __init__(self, block_number: int = 0x1312D00, chain_id: int = 314, timestamp_base: int = 0x66000000):
         self.calls = []
         self.block_number = block_number
+        self.chain_id = chain_id
+        self.timestamp_base = timestamp_base
         self.code = {}
         self.storage = {}
         self.nonce = {}
@@ -73,6 +75,20 @@ class MockEthRpc:
 
     def _rpc_eth_blockNumber(self, params):
         return hex(self.block_number)
+
+    def _rpc_eth_chainId(self, params):
+        return hex(self.chain_id)
+
+    def _rpc_eth_getBlockByNumber(self, params):
+        number = int(params[0], 16) if params[0].startswith("0x") else self.block_number
+        return {
+            "number": hex(number),
+            "timestamp": hex(self.timestamp_base + number),  # distinct per block
+            "gasLimit": "0x1c9c380",
+            "baseFeePerGas": "0x64",
+            "mixHash": "0x" + "00" * 32,
+            "miner": "0x" + "00" * 20,
+        }
 
     def _rpc_eth_getCode(self, params):
         return self.code.get(norm_addr(params[0]), "0x")

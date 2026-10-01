@@ -44,6 +44,7 @@ class Creation:
     initcode_hex: str
     address: str
     tx_hash: str | None = None  # set once sent
+    block: int | None = None  # set once mined
 
 
 class Broadcast:
@@ -74,7 +75,12 @@ class Broadcast:
         return creation.address, self.sender
 
     def tx_hash(self, address: str) -> str | None:
-        return next((c.tx_hash for c in self.creations if c.address == address), None)
+        creation = self.deployment(address)
+        return creation.tx_hash if creation else None
+
+    def deployment(self, address: str) -> Creation | None:
+        """The creation planned at `address` in this session, if any."""
+        return next((c for c in self.creations if c.address == address), None)
 
     def _gas(self, unsent: list[Creation]) -> tuple[list[str], list[int]]:
         """(fee flags shared by every send, gas limit per creation), from one batched
@@ -125,7 +131,7 @@ class Broadcast:
         for i, creation in enumerate(sent, 1):
             with click_spinner.spinner():
                 receipt = json.loads(run(["cast", "receipt", creation.tx_hash, "--json"], root))
-            block = int(receipt.get("blockNumber") or "0x0", 16)
+            block = creation.block = int(receipt.get("blockNumber") or "0x0", 16)
             if int(receipt.get("status") or "0x0", 16) != 1:
                 failure = f"tx {creation.tx_hash} reverted"
             elif to_checksum_address(receipt.get("contractAddress") or "0x" + "00" * 20) != creation.address:

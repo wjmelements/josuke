@@ -12,6 +12,11 @@
       "pattern": "^0x[0-9a-fA-F]{40}$",
       "description": "20-byte EVM address, 0x-prefixed hex."
     },
+    "quantity": {
+      "type": "string",
+      "pattern": "^0x(0|[1-9a-f][0-9a-f]*)$",
+      "description": "JSON-RPC quantity: 0x-prefixed lowercase hex with no leading zeros."
+    },
     "hash32": {
       "type": "string",
       "pattern": "^0x[0-9a-fA-F]{64}$",
@@ -139,7 +144,27 @@
         },
         "from": {
           "$ref": "#/$defs/address",
-          "description": "Deployer address, supplied as msg.sender when the verifier re-simulates the constructor. Record it when an immutable is derived from the deployer; omit it otherwise."
+          "description": "Deployer address, replayed as msg.sender when the verifier re-simulates the constructor. Recorded only when the constructor read its sender or its own address."
+        },
+        "nonce": {
+          "type": "integer",
+          "minimum": 0,
+          "description": "The deployer's nonce for this facet's creation, replayed so the constructor sees its own address. Recorded only when the constructor read that address, e.g. for an address(this) immutable. With from, it must derive address."
+        },
+        "block": {
+          "type": "object",
+          "additionalProperties": false,
+          "minProperties": 1,
+          "properties": {
+            "number": { "$ref": "#/$defs/quantity" },
+            "timestamp": { "$ref": "#/$defs/quantity" },
+            "gasLimit": { "$ref": "#/$defs/quantity" },
+            "baseFee": { "$ref": "#/$defs/quantity" },
+            "blobBaseFee": { "$ref": "#/$defs/quantity" },
+            "prevRandao": { "$ref": "#/$defs/quantity" },
+            "coinbase": { "$ref": "#/$defs/address" }
+          },
+          "description": "The values of the block this facet was created in that its constructor read, replayed by the verifier; only those it read are present. Each key is the camelCase of the Solidity block.<member> that reads it (block.basefee is baseFee). Values are hex quantities, since some exceed what JSON integers hold exactly. The chain id is never recorded: the ledger is keyed by it."
         },
         "createTxHash": {
           "$ref": "#/$defs/hash32",
@@ -159,6 +184,8 @@
         "initcodeHash": { "$ref": "#/$defs/hash32" },
         "constructorArgs": { "$ref": "#/$defs/facet/properties/constructorArgs" },
         "from": { "$ref": "#/$defs/facet/properties/from" },
+        "nonce": { "$ref": "#/$defs/facet/properties/nonce" },
+        "block": { "$ref": "#/$defs/facet/properties/block" },
         "createTxHash": { "$ref": "#/$defs/facet/properties/createTxHash" }
       },
       "description": "A facet, as in deploymentState.facets, plus the source it was built from and the commit to build it at. Its address is the key of the enclosing \"history\" map."
