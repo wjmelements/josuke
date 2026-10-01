@@ -9,6 +9,7 @@ import json
 import pathlib
 import shutil
 from contextlib import contextmanager
+from unittest.mock import Mock
 
 import click
 import pytest
@@ -114,7 +115,7 @@ def stub_chain(monkeypatch, tmp_path, stub_source_trees):
     # A truthy stand-in for "migration ready": most of these tests care about
     # facet/selectors handling, not migration content, but `proposed` is now
     # only recorded when a migration is needed, so it must not be None here.
-    monkeypatch.setattr(deploy, "build_migration", lambda *a, **k: object())
+    monkeypatch.setattr(deploy, "build_migration", lambda *a, **k: Mock())
     monkeypatch.setattr(deploy, "deploy_migration", lambda *a, **k: {"address": "0x" + "dd" * 20})
     monkeypatch.setattr(deploy, "selectors_runtime", lambda *a, **k: None)
 
@@ -123,6 +124,9 @@ def stub_chain(monkeypatch, tmp_path, stub_source_trees):
     # "replay" is what the stubbed replay_create returns; tests swap it to change what
     # the constructor read. "replays" collects the environments it was asked to replay.
     log = {"deployed": [], "tx": {}, "session": {}, "replay": Replay(RUNTIME, False, False, {}), "replays": []}
+    # "rehearsal" is the failures the stubbed rehearsal reports; by default the migration routes as proposed
+    log["rehearsal"] = []
+    monkeypatch.setattr(deploy, "rehearse", lambda *a: log["rehearsal"])
     counter = [0]
 
     def fake_initcode(facet, root, recorded_args):
@@ -453,6 +457,21 @@ def test_run_deploy_records_then_fails_when_replay_does_not_reproduce(stub_chain
 
     facet = json.loads(path.read_text())[0]["deployments"]["314"]["proposed"]["facets"]["a.evm"]
     assert facet["address"] == "0x" + f"{1:040x}"  # the deployment is still recorded
+
+
+def test_run_deploy_aborts_before_sending_when_the_rehearsal_fails(stub_chain, monkeypatch, tmp_path):
+    _resolve_to(monkeypatch, ["a.evm"])
+    sent = []
+    monkeypatch.setattr(broadcast.Broadcast, "send_all", lambda self, root: sent.append(root))
+    stub_chain["rehearsal"] = ["0x11111111 reverts, expected 0x" + "01" * 20]
+    ledger = [{"address": PROXY, "facetSrc": ["*.evm"]}]
+    path = _write(tmp_path, ledger)
+
+    with pytest.raises(click.ClickException, match="0x11111111 reverts"):
+        deploy.run_deploy(path)
+
+    assert sent == []
+    assert json.loads(path.read_text()) == ledger
 
 
 def test_run_deploy_verifies_new_sol_facets_on_sourcify(stub_chain, monkeypatch, tmp_path):

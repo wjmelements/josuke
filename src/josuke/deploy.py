@@ -16,6 +16,7 @@ from .forge import get_forge_config
 from .ledger import load_ledger, write_ledger
 from .migration import Migration, SetDelegate
 from .proc import run
+from .rehearsal import rehearse_migration
 from .selectors import Selector
 from .signer import keystore_session
 from .storage import ProxyStorage, slot_address
@@ -272,6 +273,45 @@ def current_selectors(current: dict, current_tree: pathlib.Path | None) -> dict:
     return out
 
 
+def selector_owners(state: dict, tree: pathlib.Path) -> tuple[dict, list]:
+    """(selector -> (source_id, address), [Selector]) for a deployment state.
+
+    Includes the generated `selectors()` delegate recorded under `state.selectors`,
+    so dispatch and acceptance checks cover it like any facet selector."""
+    owners, selectors = {}, []
+    for source_id, rec in state["facets"].items():
+        for selector in facet_selectors(facet_from_source_id(source_id), tree):
+            owners[selector.selector] = (source_id, rec.get("address"))
+            selectors.append(selector)
+    impl = state.get("selectors")
+    if impl and SELECTORS_SELECTOR not in owners:
+        owners[SELECTORS_SELECTOR] = ("selectors()", impl.get("address"))
+        selectors.append(Selector(SELECTORS_SELECTOR, "selectors()"))
+    return owners, selectors
+
+
+def migration_routes(proposed: dict, current: dict, current_tree: pathlib.Path | None, root: pathlib.Path):
+    """(routes, delegates) to rehearse a migration from `current` to `proposed` with:
+    each selector's address once it has run (None for one it drops), and every
+    address either state routes to."""
+    owners, _ = selector_owners(proposed, root)
+    routes = {selector: address for selector, (_, address) in owners.items()}
+    for selector in current_selectors(current, current_tree):
+        routes.setdefault(selector, None)
+    delegates = {address for address in routes.values() if address}
+    for state in (current, proposed):
+        delegates.update(rec["address"] for rec in state.get("facets", {}).values() if rec.get("address"))
+        if state.get("selectors", {}).get("address"):
+            delegates.add(state["selectors"]["address"])
+    return routes, delegates
+
+
+def rehearse(proxy: str, migration_runtime: bytes, proposed: dict, current: dict, current_tree, root) -> list[str]:
+    """Failures from rehearsing `migration_runtime` on `proxy` (see `rehearse_migration`)."""
+    routes, delegates = migration_routes(proposed, current, current_tree, root)
+    return rehearse_migration(proxy, migration_runtime, routes, delegates)
+
+
 def selectors_runtime(facets: list, root: pathlib.Path) -> bytes | None:
     selector_lists = [facet_selectors(facet, root) for facet in facets]
     if any(s.selector == SELECTORS_SELECTOR for sels in selector_lists for s in sels):
@@ -492,6 +532,13 @@ def run_deploy(ledger_path, redeploy_all: bool = False):
                 proxy, facets, proposed_facets, current, current_tree, root, selectors_impl=selectors_impl
             )
             if migration is not None:
+                # Before anything is sent, so a wrong storage slot costs no gas.
+                failures = rehearse(proxy, migration.encode(), proposed, current, current_tree, root)
+                if failures:
+                    raise click.ClickException(
+                        f"{proxy}: the migration does not route as proposed when rehearsed:\n"
+                        + "\n".join(f"  - {failure}" for failure in failures)
+                    )
                 proposed["migration"] = deploy_migration(
                     migration, prior_proposed.get("migration"), root
                 )

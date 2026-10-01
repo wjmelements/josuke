@@ -61,6 +61,13 @@ facet address once, roughly halving the script's codesize. The
 script is deployed with the `evm -C` universal constructor unless an identical one
 is already recorded under `proposed`.
 
+Since a wrong slot guess goes unnoticed until the migration runs, `deploy` first
+rehearses the migration in `evm -nx` against the live proxy, before sending
+anything. The migration runs as the proxy's code, with every facet in `current`
+and `proposed` stood in for by a stub returning its own address. Then the
+proxy's real dispatcher is asked where each selector goes: each proposed selector
+must reach its facet, and each dropped one must revert.
+
 For a `<path>.evm` facet (evm-assembler source), josuke reads bytecode and ABI
 from the artifact its governing Makefile produces, building it with
 `make -C <dir> out/<name>.evm/<name>.json` where `<dir>` is the nearest directory
@@ -80,7 +87,8 @@ served by `current` are listed up front. The pass/fail checks follow.
 the recorded address, and the proxy dispatches each of its selectors to that
 address. For `proposed`: the same hash checks, plus `proposed.facets` is exactly
 what `facetSrc` resolves to, and the on-chain `migration` installs every
-proposed selector and zeroes every selector dropped since `current`. A recorded
+proposed selector and zeroes every selector dropped since `current`, both decoded
+and rehearsed as `deploy` does. A recorded
 `selectors` delegate must hold the method josuke generates for that facet set.
 It reports all mismatches and exits non-zero if any.
 

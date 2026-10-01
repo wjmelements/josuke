@@ -9,7 +9,7 @@ import json
 import pytest
 from eth_utils import to_checksum_address
 
-from josuke import accept, verify
+from josuke import accept, deploy, verify
 
 PROXY = "0x2222222222222222222222222222222222222222"
 A1 = to_checksum_address("0x" + "a1" * 20)
@@ -67,7 +67,7 @@ def _state(facets, commit="c0"):
 
 def _owns(monkeypatch, selectors_by_source):
     monkeypatch.setattr(
-        verify,
+        deploy,
         "facet_selectors",
         lambda facet, tree: selectors_by_source.get(facet.source_id, []),
     )
@@ -280,7 +280,7 @@ def test_run_accept_requires_rpc_url(monkeypatch, tmp_path):
 
 def test_run_accept_merges_proposed_into_current(monkeypatch, tmp_path, stub):
     monkeypatch.chdir(tmp_path)
-    monkeypatch.setattr(verify, "facet_selectors", lambda facet, tree: [_sel("0x11111111")])
+    monkeypatch.setattr(deploy, "facet_selectors", lambda facet, tree: [_sel("0x11111111")])
     stub["0x11111111"] = _word(A1)
 
     proposed = {
@@ -315,7 +315,7 @@ def test_run_accept_merges_proposed_into_current(monkeypatch, tmp_path, stub):
 
 def test_run_accept_first_deployment_has_no_current(monkeypatch, tmp_path, stub):
     monkeypatch.chdir(tmp_path)
-    monkeypatch.setattr(verify, "facet_selectors", lambda facet, tree: [_sel("0x11111111")])
+    monkeypatch.setattr(deploy, "facet_selectors", lambda facet, tree: [_sel("0x11111111")])
     stub["0x11111111"] = _word(A1)
 
     entry = {
@@ -343,7 +343,7 @@ def test_run_accept_first_deployment_has_no_current(monkeypatch, tmp_path, stub)
 
 def test_run_accept_leaves_ledger_untouched_on_failure(monkeypatch, tmp_path, stub):
     monkeypatch.chdir(tmp_path)
-    monkeypatch.setattr(verify, "facet_selectors", lambda facet, tree: [_sel("0x11111111")])
+    monkeypatch.setattr(deploy, "facet_selectors", lambda facet, tree: [_sel("0x11111111")])
     # no route seeded: 0x11111111 reads zero, so the migration did not run
 
     entry = {
