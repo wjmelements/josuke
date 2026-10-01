@@ -229,6 +229,17 @@ def test_wait_reports_each_confirmation(cast, capsys):
     assert f"[2/2] {a2} confirmed in block 106" in out
 
 
+def test_wait_records_each_creations_block(cast):
+    b, (a1, a2) = _sent("aa", "bb")
+    assert b.deployment(a1).block is None  # sent, not yet mined
+
+    b.wait(".")
+
+    assert (b.deployment(a1).nonce, b.deployment(a1).block) == (5, 105)
+    assert (b.deployment(a2).nonce, b.deployment(a2).block) == (6, 106)
+    assert b.deployment("0x" + "00" * 20) is None
+
+
 def test_wait_ignores_unsent_creations(cast, capsys):
     b = broadcast.Broadcast("314")
     b.create("aa", ".")

@@ -1,6 +1,9 @@
 import json
+import os
 import pathlib
 import subprocess
+import threading
+from dataclasses import dataclass
 from os import environ
 
 import click
@@ -42,23 +45,40 @@ class EvmRelay:
     Every RPC result is memoised by ``(method, params)`` in ``cache`` (a dict you
     may pass in to share across relays), so repeated reads — and repeated runs
     over the same initcode, in this process or the next — hit the node once. Use
-    as a context manager so the process is always reaped."""
+    as a context manager so the process is always reaped.
 
-    def __init__(self, cache: dict | None = None):
+    ``json_output`` runs ``evm -nxs``, whose result lines are JSON objects that
+    also report the block values each request read. ``on_trace`` receives each
+    line of evm's EIP-3155 trace, parsed, over a pipe rather than a file; every
+    line has been delivered once the relay is closed."""
+
+    def __init__(self, cache: dict | None = None, json_output: bool = False, on_trace=None):
         self.cache = {} if cache is None else cache
+        args = ["evm", "-nxs" if json_output else "-nx"]
+        trace_write = None
+        self._tracer = None
+        if on_trace is not None:
+            trace_read, trace_write = os.pipe()
+            args += ["-t", "-T", f"/dev/fd/{trace_write}"]
+            # Drained concurrently: a full pipe would block evm while we wait on its stdout.
+            self._tracer = threading.Thread(target=_read_trace, args=(trace_read, on_trace), daemon=True)
+            self._tracer.start()
         self._proc = subprocess.Popen(
-            ["evm", "-nx"],
+            args,
             stdin=subprocess.PIPE,
             stdout=subprocess.PIPE,
             text=True,
             bufsize=1,
+            pass_fds=() if trace_write is None else (trace_write,),
         )
+        if trace_write is not None:
+            os.close(trace_write)  # evm holds the only write end, so the reader sees EOF when it exits
 
     def call(self, request: dict, on_exchange=None) -> str:
         """Run one request (a ``{"data": ...}`` create or a ``{"to": ...}`` call)
         and return evm's output line: the runtime hex for a create, ``""`` on a
-        revert. ``on_exchange(rpc_request, rpc_response)`` sees every request/
-        response pair, cache hits included."""
+        revert, or a JSON object with ``json_output``. ``on_exchange(rpc_request,
+        rpc_response)`` sees every request/response pair, cache hits included."""
         with span(f"evm {brief(request)}"):
             self._write(json.dumps(request))
             while True:
@@ -69,6 +89,8 @@ class EvmRelay:
                 if line[:1] not in ("{", "["):
                     return line
                 rpc_request = json.loads(line)
+                if isinstance(rpc_request, dict) and "method" not in rpc_request:
+                    return line  # a JSON result, not a state fetch
                 rpc_response = self._answer(rpc_request)
                 self._write(json.dumps(rpc_response))
                 if on_exchange is not None:
@@ -108,10 +130,16 @@ class EvmRelay:
         self._proc.stdin.flush()
 
     def close(self) -> None:
-        self._proc.terminate()
-        self._proc.wait()
+        # At end of input evm exits on its own, flushing any trace; terminate only a stuck one.
         self._proc.stdin.close()
+        try:
+            self._proc.wait(timeout=5)
+        except subprocess.TimeoutExpired:
+            self._proc.terminate()
+            self._proc.wait()
         self._proc.stdout.close()
+        if self._tracer is not None:
+            self._tracer.join()
 
     def __enter__(self):
         return self
@@ -120,24 +148,52 @@ class EvmRelay:
         self.close()
 
 
-# A throwaway sender to contrast the real deployer against (and a spare, for the
-# improbable case the real deployer is the first one).
-_PROBE_SENDERS = ("0x" + "11" * 20, "0x" + "22" * 20)
+def _read_trace(fd: int, on_trace) -> None:
+    with os.fdopen(fd) as lines:
+        for line in lines:
+            on_trace(json.loads(line))
 
 
-def deployer_derived(initcode_hex: str, deployer: str) -> bool:
-    """True when the deployed runtime depends on the constructor's msg.sender (an
-    immutable set from the deployer, and the like), so `from` must be recorded.
+# Opcodes that observe the created contract's own address, which CREATE derives
+# from the sender and its nonce. A CALLER read below depth 1 is a callee seeing the
+# new contract as its caller; the trace doesn't say which contract is executing, so
+# that, like ADDRESS in a callee, is counted conservatively.
+_ADDRESS_OPS = {"ADDRESS", "CREATE", "CREATE2"}
+_SENDER_OPS = {"CALLER", "ORIGIN"}
 
-    Replays ``initcode_hex`` as a create twice in one ``evm -nx`` process — once
-    as the real ``deployer``, once as a probe address — so chain state is fetched
-    once and frozen for both, and any difference in the returned runtime is the
-    sender alone."""
-    probe = next(s for s in _PROBE_SENDERS if s != deployer.lower())
-    with EvmRelay() as relay:
-        actual = relay.call({"from": deployer, "data": initcode_hex})
-        probed = relay.call({"from": probe, "data": initcode_hex})
-    return actual != probed
+
+@dataclass
+class Replay:
+    runtime: str  # hex, no 0x; "" when the constructor reverted
+    reads_sender: bool  # msg.sender or tx.origin: the replay needs `from`
+    reads_address: bool  # its own address: the replay needs `from` and `nonce`
+    block_overrides: dict  # the block values it read, as `evm` reports them
+
+
+def replay_create(initcode_hex: str, request: dict | None = None, cache: dict | None = None, trace: bool = False) -> Replay:
+    """Replay a contract creation through ``evm -nx`` against live state.
+
+    ``request`` carries the environment to replay in: ``from``, ``nonce`` and
+    ``blockOverrides``, as ``evm`` accepts them. With ``trace``, the EIP-3155 trace
+    tells which of the sender and the contract's own address the constructor read;
+    without it both are reported False."""
+    reads = {"sender": False, "address": False}
+
+    def note(step: dict) -> None:
+        op = step.get("opName")  # absent on the per-request summary line
+        if op in _ADDRESS_OPS or (op == "CALLER" and step["depth"] > 1):
+            reads["address"] = True
+        elif op in _SENDER_OPS:
+            reads["sender"] = True
+
+    with EvmRelay(cache=cache, json_output=True, on_trace=note if trace else None) as relay:
+        result = json.loads(relay.call({**(request or {}), "data": initcode_hex}))
+    return Replay(
+        result["returnData"].removeprefix("0x"),
+        reads["sender"],
+        reads["address"],
+        result.get("blockOverrides", {}),
+    )
 
 
 def _governing_makefile(source: pathlib.Path, root: pathlib.Path) -> pathlib.Path | None:

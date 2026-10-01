@@ -143,9 +143,16 @@ Notes:
   answers "was it built from this commit with these args?" and is what the
   verifier recomputes from source. A facet with no constructor has
   `initcodeHash == keccak256(initcode)` and omits `constructorArgs`.
-- `from` is the deployer address, replayed as `msg.sender` when the verifier
-  re-simulates the constructor. It is only needed when an immutable is derived
-  from the deployer; omit it otherwise.
+- `from`, `nonce` and `block` record the environment a constructor read, so
+  the verifier can replay it: `from` its sender, `nonce` (with `from`) its own
+  address, as for an `address(this)` immutable, and `block` the values of its
+  block it read, each keyed by the camelCase of its Solidity `block.<member>`
+  (`block.basefee` is `baseFee`). Once a facet's creation is mined, `deploy`
+  replays it in that block with `evm -nx`, traced, and records only what the
+  constructor read, failing if the replay doesn't reproduce the code on chain.
+  The chain id is never recorded: the ledger is keyed by it. `verify` replays
+  with what was recorded, so it needs no archive node, and checks that `from`
+  and `nonce` derive the facet's address.
 - One `gitCommit` covers a whole `deploymentState`. When `proposed` is promoted,
   unchanged facets keep their existing entries, so a long-lived `current` can
   contain facets whose bytecode predates its `gitCommit`; only the facets

@@ -5,6 +5,7 @@ import click
 from eth_utils import to_checksum_address
 
 from .deploy import (
+    block_overrides,
     build_migration,
     facet_from_source_id,
     facet_initcode,
@@ -15,7 +16,8 @@ from .deploy import (
 )
 from .erc8167 import SELECTORS_SELECTOR
 from .ethjsonrpc import chain_id, eth_get_code
-from .evm import EvmRelay
+from .broadcast import create_address
+from .evm import replay_create
 from .ledger import load_ledger
 from .migration import InvalidMigration, Migration
 from .selectors import Selector
@@ -41,14 +43,18 @@ def _onchain_codehash(address: str) -> str:
     return keccak_hex(eth_get_code(address))
 
 
-def _replay_runtime(initcode: str, sender: str | None, cache: dict | None) -> str:
+def _replay_runtime(initcode: str, rec: dict, cache: dict | None) -> str:
     """The runtime bytecode `initcode`'s constructor leaves on chain, replayed
-    against live state (as `sender`, when an immutable is derived from it)."""
-    request = {"data": initcode}
-    if sender:
-        request["from"] = sender
-    with EvmRelay(cache=cache) as relay:
-        return relay.call(request)
+    against live state in the environment `deploy` recorded for it: its `from`,
+    `nonce` and `block`, each present only when the constructor read it."""
+    request = {}
+    if rec.get("from"):
+        request["from"] = rec["from"]
+    if rec.get("nonce") is not None:
+        request["nonce"] = hex(rec["nonce"])
+    if rec.get("block"):
+        request["blockOverrides"] = block_overrides(rec["block"])
+    return replay_create(initcode, request, cache).runtime
 
 
 def verify_facets(
@@ -65,10 +71,23 @@ def verify_facets(
         elif got != recorded:
             report.fail(f"{label} {source_id}: initcodeHash {got} != recorded {recorded}")
 
+        # A recorded nonce is replayed to rebuild immutables like address(this); it
+        # must also be the one that put the facet at its recorded address.
+        if rec.get("nonce") is not None:
+            if not rec.get("from"):
+                report.fail(f"{label} {source_id}: nonce recorded without from")
+            elif rec.get("address"):
+                derived = create_address(rec["from"], rec["nonce"])
+                if derived != to_checksum_address(rec["address"]):
+                    report.fail(
+                        f"{label} {source_id} @{rec['address']}: from {rec['from']} at nonce "
+                        f"{rec['nonce']} creates {derived}"
+                    )
+
         # Rebuild the runtime from source and hash that too. The check above only
         # ties the initcode to source; without this, a codeHash recorded to match
         # tampered on-chain code would pass.
-        rebuilt = keccak_hex(_replay_runtime(initcode, rec.get("from"), rpc_cache))
+        rebuilt = keccak_hex(_replay_runtime(initcode, rec, rpc_cache))
         recorded = rec.get("codeHash")
         address = rec.get("address")
         onchain = _onchain_codehash(address) if address else None
