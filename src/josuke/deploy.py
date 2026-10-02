@@ -298,7 +298,7 @@ def migration_routes(proposed: dict, current: dict, current_tree: pathlib.Path |
     routes = {selector: address for selector, (_, address) in owners.items()}
     for selector in current_selectors(current, current_tree):
         routes.setdefault(selector, None)
-    delegates = {address for address in routes.values() if address}
+    delegates = set()
     for state in (current, proposed):
         delegates.update(rec["address"] for rec in state.get("facets", {}).values() if rec.get("address"))
         if state.get("selectors", {}).get("address"):
