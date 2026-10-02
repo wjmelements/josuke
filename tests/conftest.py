@@ -28,3 +28,13 @@ def stub_source_trees(monkeypatch):
         monkeypatch.setattr(module, "SourceTrees", StubTrees)
 
     return stub
+
+
+@pytest.fixture(autouse=True)
+def _fresh_facet_abis():
+    """`facet_abi` is memoised per process; tests stub what it reads, so each starts empty."""
+    from josuke.deploy import facet_abi
+
+    facet_abi.cache_clear()
+    yield
+    facet_abi.cache_clear()

@@ -7,7 +7,8 @@ from eth_utils import to_checksum_address
 from .ethjsonrpc import chain_id
 from .ledger import load_ledger, write_ledger
 from .storage import ProxyStorage, slot_address as _slot_address
-from .verify import Report, _selector_owners
+from .deploy import selector_owners
+from .verify import Report
 from .worktree import SourceTrees
 
 
@@ -26,10 +27,10 @@ def verify_migrated(
     `proposed` drops relative to `current` is cleared. This is what the migration
     script was built to do, so a clean result means it ran.
     """
-    proposed_owners, _ = _selector_owners(proposed, proposed_tree)
+    proposed_owners, _ = selector_owners(proposed, proposed_tree)
     current_owners = {}
     if current:
-        current_owners, _ = _selector_owners(current, current_tree)
+        current_owners, _ = selector_owners(current, current_tree)
 
     for selector, (source_id, address) in sorted(proposed_owners.items()):
         routed = _slot_address(storage.storage_values.get(selector))
@@ -126,10 +127,10 @@ def run_accept(ledger_path):
             proposed_tree = trees.get(proposed["gitCommit"])
             current_tree = trees.get(current["gitCommit"]) if current else None
 
-            _, proposed_sels = _selector_owners(proposed, proposed_tree)
+            _, proposed_sels = selector_owners(proposed, proposed_tree)
             selectors = {s.selector: s for s in proposed_sels}
             if current:
-                _, current_sels = _selector_owners(current, current_tree)
+                _, current_sels = selector_owners(current, current_tree)
                 selectors.update((s.selector, s) for s in current_sels)
 
             storage = ProxyStorage(proxy)

@@ -27,7 +27,7 @@ def _word(address_or_zero: str) -> str:
 
 
 class FakeStorage:
-    def __init__(self, address, values=None):
+    def __init__(self, address, values=None, cache=None):
         self.address = address
         self.storage_keys = {}
         self.storage_values = values or {}
@@ -290,7 +290,7 @@ def test_verify_proposed_set_reports_missing_and_extra(monkeypatch):
 
 
 def test_verify_dispatch_flags_wrong_route(monkeypatch):
-    monkeypatch.setattr(verify, "facet_selectors", lambda facet, tree: [_sel("0x11111111")])
+    monkeypatch.setattr(deploy, "facet_selectors", lambda facet, tree: [_sel("0x11111111")])
     current = _state({"a.sol:A": {"address": A1}})
     storage = FakeStorage(PROXY, {"0x11111111": _word(B2)})  # proxy points at B2, not A1
     report = _report()
@@ -301,7 +301,7 @@ def test_verify_dispatch_flags_wrong_route(monkeypatch):
 
 
 def test_verify_dispatch_passes_when_route_matches(monkeypatch):
-    monkeypatch.setattr(verify, "facet_selectors", lambda facet, tree: [_sel("0x11111111")])
+    monkeypatch.setattr(deploy, "facet_selectors", lambda facet, tree: [_sel("0x11111111")])
     current = _state({"a.sol:A": {"address": A1}})
     storage = FakeStorage(PROXY, {"0x11111111": _word(A1)})
     report = _report()
@@ -356,8 +356,8 @@ def test_verify_selectors_noop_without_record():
 def test_selector_owners_includes_generated_selectors(monkeypatch):
     from josuke.erc8167 import SELECTORS_SELECTOR
 
-    monkeypatch.setattr(verify, "facet_selectors", lambda facet, tree: [_sel("0x11111111")])
-    owners, _ = verify._selector_owners(
+    monkeypatch.setattr(deploy, "facet_selectors", lambda facet, tree: [_sel("0x11111111")])
+    owners, _ = deploy.selector_owners(
         _state({"a.sol:A": {"address": A1}}) | {"selectors": {"address": B2}}, "."
     )
     assert owners[SELECTORS_SELECTOR] == ("selectors()", B2)
@@ -478,6 +478,7 @@ def stub_trees(monkeypatch, stub_source_trees):
     monkeypatch.setattr(verify, "chain_id", lambda: "314")
     monkeypatch.setattr(verify, "ProxyStorage", FakeStorage)
     monkeypatch.setattr(verify, "_replay_runtime", lambda initcode, rec, cache: Replay("", False, False, {}))
+    monkeypatch.setattr(verify, "rehearse", lambda *a: [])
 
 
 def test_run_verify_requires_rpc_url(monkeypatch, tmp_path):
@@ -499,7 +500,7 @@ def test_run_verify_skips_chain_without_deployment(monkeypatch, tmp_path, stub_t
 def test_run_verify_reports_failures(monkeypatch, tmp_path, stub_trees):
     monkeypatch.setenv("ETH_RPC_URL", "http://mock.rpc")
     monkeypatch.chdir(tmp_path)
-    monkeypatch.setattr(verify, "facet_selectors", lambda facet, tree: [_sel("0x11111111")])
+    monkeypatch.setattr(deploy, "facet_selectors", lambda facet, tree: [_sel("0x11111111")])
     monkeypatch.setattr(verify, "facet_initcode", lambda f, root, args, prompt: ("dead", None))
     monkeypatch.setattr(verify, "keccak_hex", lambda h: "0xbad")
     monkeypatch.setattr(verify, "_onchain_codehash", lambda addr: "0xbad")
@@ -535,8 +536,7 @@ def test_run_verify_flags_function_removed_from_kept_facet(monkeypatch, tmp_path
         assert root == pathlib.Path("trees", "c1")
         return [_sel("0x11111111")]
 
-    monkeypatch.setattr(verify, "ProxyStorage", lambda addr: FakeStorage(addr, {"0x99999999": _word(OLD)}))
-    monkeypatch.setattr(verify, "facet_selectors", selectors)
+    monkeypatch.setattr(verify, "ProxyStorage", lambda addr, cache=None: FakeStorage(addr, {"0x99999999": _word(OLD)}))
     monkeypatch.setattr(deploy, "facet_selectors", selectors)
     for check in ("verify_facets", "verify_dispatch", "verify_selectors", "verify_proposed_set", "summarize_upgrade"):
         monkeypatch.setattr(verify, check, lambda *a, **k: None)

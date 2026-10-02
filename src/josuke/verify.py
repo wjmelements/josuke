@@ -9,18 +9,17 @@ from .deploy import (
     build_migration,
     facet_from_source_id,
     facet_initcode,
-    facet_selectors,
     keccak_hex,
+    rehearse,
     resolve_facets,
+    selector_owners,
     selectors_runtime,
 )
-from .erc8167 import SELECTORS_SELECTOR
 from .ethjsonrpc import chain_id, eth_get_code
 from .broadcast import create_address
 from .evm import Replay, replay_create
 from .ledger import load_ledger
 from .migration import InvalidMigration, Migration
-from .selectors import Selector
 from .storage import ProxyStorage, slot_address as _slot_address
 from .summary import summarize_upgrade
 from .worktree import SourceTrees
@@ -117,26 +116,9 @@ def verify_facets(
             report.fail(f"{label} {source_id} @{address}: codeHash {onchain} != recorded {recorded}")
 
 
-def _selector_owners(state: dict, tree: pathlib.Path) -> tuple[dict, list]:
-    """(selector -> (source_id, address), [Selector]) for a deployment state.
-
-    Includes the generated `selectors()` delegate recorded under `state.selectors`,
-    so dispatch and acceptance checks cover it like any facet selector."""
-    owners, selectors = {}, []
-    for source_id, rec in state["facets"].items():
-        for selector in facet_selectors(facet_from_source_id(source_id), tree):
-            owners[selector.selector] = (source_id, rec.get("address"))
-            selectors.append(selector)
-    impl = state.get("selectors")
-    if impl and SELECTORS_SELECTOR not in owners:
-        owners[SELECTORS_SELECTOR] = ("selectors()", impl.get("address"))
-        selectors.append(Selector(SELECTORS_SELECTOR, "selectors()"))
-    return owners, selectors
-
-
 def verify_dispatch(current: dict, storage: ProxyStorage, tree: pathlib.Path, report: Report) -> None:
     """The proxy routes every `current` selector to its recorded facet address."""
-    owners, _ = _selector_owners(current, tree)
+    owners, _ = selector_owners(current, tree)
     for selector, (source_id, address) in sorted(owners.items()):
         routed = _slot_address(storage.storage_values.get(selector))
         if address is None:
@@ -151,7 +133,7 @@ def verify_selectors(state: dict, label: str, tree: pathlib.Path, report: Report
     """The recorded `selectors()` delegate holds the method generated for this facet set.
 
     Routing to that address is covered by `verify_dispatch` / `verify_migration`
-    via `_selector_owners`; this checks the deployed bytecode itself."""
+    via `selector_owners`; this checks the deployed bytecode itself."""
     impl = state.get("selectors")
     if not impl:
         return
@@ -230,6 +212,22 @@ def verify_migration(
         report.fail(f"proposed.migration: unexpected entry for selector {selector}")
 
 
+def verify_rehearsal(
+    proxy: str,
+    proposed: dict,
+    current: dict,
+    current_tree: pathlib.Path | None,
+    tree: pathlib.Path,
+    report: Report,
+    rpc_cache: dict | None = None,
+) -> None:
+    """Running the on-chain migration as the proxy routes every selector as `proposed`
+    records: exactly what governance will execute, checked by the real dispatcher."""
+    runtime = bytes.fromhex(eth_get_code(proposed["migration"]["address"]).removeprefix("0x"))
+    for failure in rehearse(proxy, runtime, proposed, current, current_tree, tree, rpc_cache):
+        report.fail(f"proposed.migration rehearsal: {failure}")
+
+
 def run_verify(ledger_path):
     if "ETH_RPC_URL" not in environ:
         raise click.ClickException("ETH_RPC_URL is not set")
@@ -239,7 +237,7 @@ def run_verify(ledger_path):
     chain = chain_id()
     report = Report()
     verified: list[str] = []
-    rpc_cache: dict = {}  # shared across every facet replay for the run
+    rpc_cache: dict = {}  # shared by every relay in the run: one snapshot of the chain
 
     with SourceTrees(root) as trees:
         for entry in ledger:
@@ -256,13 +254,13 @@ def run_verify(ledger_path):
 
             selectors = {}  # selector -> Selector, deduped across current + proposed
             if current:
-                _, current_sels = _selector_owners(current, current_tree)
+                _, current_sels = selector_owners(current, current_tree)
                 selectors.update((s.selector, s) for s in current_sels)
             if proposed:
-                _, proposed_sels = _selector_owners(proposed, proposed_tree)
+                _, proposed_sels = selector_owners(proposed, proposed_tree)
                 selectors.update((s.selector, s) for s in proposed_sels)
 
-            storage = ProxyStorage(proxy)
+            storage = ProxyStorage(proxy, cache=rpc_cache)
             if selectors:
                 storage.fetch(list(selectors.values()))
 
@@ -281,6 +279,7 @@ def run_verify(ledger_path):
                 verify_selectors(proposed, "proposed", proposed_tree, report)
                 if "migration" in proposed:
                     verify_migration(proxy, proposed, current or {}, storage, current_tree, proposed_tree, report)
+                    verify_rehearsal(proxy, proposed, current or {}, current_tree, proposed_tree, report, rpc_cache)
                 summarize_upgrade(proxy, chain, current, proposed, current_tree, proposed_tree, storage)
 
     if report.failures:

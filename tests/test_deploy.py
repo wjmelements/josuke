@@ -9,6 +9,7 @@ import json
 import pathlib
 import shutil
 from contextlib import contextmanager
+from unittest.mock import Mock
 
 import click
 import pytest
@@ -114,7 +115,7 @@ def stub_chain(monkeypatch, tmp_path, stub_source_trees):
     # A truthy stand-in for "migration ready": most of these tests care about
     # facet/selectors handling, not migration content, but `proposed` is now
     # only recorded when a migration is needed, so it must not be None here.
-    monkeypatch.setattr(deploy, "build_migration", lambda *a, **k: object())
+    monkeypatch.setattr(deploy, "build_migration", lambda *a, **k: Mock())
     monkeypatch.setattr(deploy, "deploy_migration", lambda *a, **k: {"address": "0x" + "dd" * 20})
     monkeypatch.setattr(deploy, "selectors_runtime", lambda *a, **k: None)
 
@@ -123,6 +124,9 @@ def stub_chain(monkeypatch, tmp_path, stub_source_trees):
     # "replay" is what the stubbed replay_create returns; tests swap it to change what
     # the constructor read. "replays" collects the environments it was asked to replay.
     log = {"deployed": [], "tx": {}, "session": {}, "replay": Replay(RUNTIME, False, False, {}), "replays": []}
+    # "rehearsal" is the failures the stubbed rehearsal reports; by default the migration routes as proposed
+    log["rehearsal"] = []
+    monkeypatch.setattr(deploy, "rehearse", lambda *a: log["rehearsal"])
     counter = [0]
 
     def fake_initcode(facet, root, recorded_args):
@@ -455,6 +459,21 @@ def test_run_deploy_records_then_fails_when_replay_does_not_reproduce(stub_chain
     assert facet["address"] == "0x" + f"{1:040x}"  # the deployment is still recorded
 
 
+def test_run_deploy_aborts_before_sending_when_the_rehearsal_fails(stub_chain, monkeypatch, tmp_path):
+    _resolve_to(monkeypatch, ["a.evm"])
+    sent = []
+    monkeypatch.setattr(broadcast.Broadcast, "send_all", lambda self, root: sent.append(root))
+    stub_chain["rehearsal"] = ["0x11111111 reverts, expected 0x" + "01" * 20]
+    ledger = [{"address": PROXY, "facetSrc": ["*.evm"]}]
+    path = _write(tmp_path, ledger)
+
+    with pytest.raises(click.ClickException, match="0x11111111 reverts"):
+        deploy.run_deploy(path)
+
+    assert sent == []
+    assert json.loads(path.read_text()) == ledger
+
+
 def test_run_deploy_verifies_new_sol_facets_on_sourcify(stub_chain, monkeypatch, tmp_path):
     monkeypatch.setattr(
         deploy, "resolve_facets", lambda facet_src, root: [_facet("a.sol:A")]
@@ -529,7 +548,7 @@ def test_run_deploy_zeroes_function_removed_from_kept_facet(stub_chain, monkeypa
     # `current` (c0); the proxy still routes it, so the migration must zero it.
     live = "0x" + "00" * 12 + "cd" * 20
     monkeypatch.setattr(deploy, "build_migration", _build_migration)
-    monkeypatch.setattr(deploy, "ProxyStorage", lambda addr: FakeStorage(addr, {"0x99999999": live}))
+    monkeypatch.setattr(deploy, "ProxyStorage", lambda addr, cache=None: FakeStorage(addr, {"0x99999999": live}))
     migrations = []
     monkeypatch.setattr(
         deploy, "deploy_migration", lambda m, prior, root: migrations.append(m) or {"address": "0x" + "dd" * 20}
@@ -604,7 +623,7 @@ def test_run_deploy_requires_rpc_url(monkeypatch, tmp_path):
 class FakeStorage:
     """Stand-in for ProxyStorage: slot = keccak-ish of the selector, value = 0."""
 
-    def __init__(self, address, values=None):
+    def __init__(self, address, values=None, cache=None):
         self.address = address
         self.storage_keys = {}
         self.storage_values = values or {}
@@ -664,7 +683,7 @@ def test_build_migration_installs_every_proposed_selector(monkeypatch):
 def test_build_migration_zeroes_dropped_selectors(monkeypatch):
     live_value = "0x" + "00" * 12 + "cd" * 20  # a non-zero delegate currently set
     monkeypatch.setattr(
-        deploy, "ProxyStorage", lambda addr: FakeStorage(addr, {"0x99999999": live_value})
+        deploy, "ProxyStorage", lambda addr, cache=None: FakeStorage(addr, {"0x99999999": live_value})
     )
 
     def selectors(facet, root):
@@ -704,7 +723,7 @@ def test_build_migration_none_when_already_routed(monkeypatch):
     propose a migration: every selector already routes to its recorded facet."""
     word = "0x" + "00" * 12 + A1[2:].lower()
     monkeypatch.setattr(
-        deploy, "ProxyStorage", lambda addr: FakeStorage(addr, {"0x11111111": word})
+        deploy, "ProxyStorage", lambda addr, cache=None: FakeStorage(addr, {"0x11111111": word})
     )
     monkeypatch.setattr(deploy, "facet_selectors", lambda facet, root: [_sel("0x11111111")])
     facets = [_facet("a.sol:A")]
@@ -930,3 +949,20 @@ def test_run_deploy_clears_stale_proposed_when_no_migration_needed(stub_chain, m
 
     history = json.loads(path.read_text())[0]["deployments"]["314"]
     assert "proposed" not in history
+
+
+def test_facet_abi_runs_forge_inspect_once_per_facet_and_root(monkeypatch):
+    abi = [
+        {"type": "constructor", "inputs": [{"name": "x", "type": "uint256"}]},
+        {"type": "function", "name": "f", "inputs": [], "outputs": [], "stateMutability": "view"},
+    ]
+    inspected = []
+    monkeypatch.setattr(deploy, "run", lambda cmd, root: inspected.append((cmd[2], root)) or json.dumps(abi))
+    facet = _facet("a.sol:A")
+
+    for _ in range(2):
+        assert [s.selector for s in deploy.facet_selectors(facet, pathlib.Path("c0"))] == ["0x26121ff0"]
+    assert deploy.constructor_inputs(facet, pathlib.Path("c0")) == abi[0]["inputs"]
+    deploy.facet_selectors(facet, pathlib.Path("c1"))  # another checkout is read anew
+
+    assert inspected == [("a.sol:A", pathlib.Path("c0")), ("a.sol:A", pathlib.Path("c1"))]
