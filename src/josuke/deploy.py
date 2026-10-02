@@ -300,9 +300,8 @@ def migration_routes(proposed: dict, current: dict, current_tree: pathlib.Path |
         routes.setdefault(selector, None)
     delegates = set()
     for state in (current, proposed):
-        delegates.update(rec["address"] for rec in state.get("facets", {}).values() if rec.get("address"))
-        if state.get("selectors", {}).get("address"):
-            delegates.add(state["selectors"]["address"])
+        records = [*state.get("facets", {}).values(), state.get("selectors", {})]
+        delegates.update(rec["address"] for rec in records if rec.get("address"))
     return routes, delegates
 
 
