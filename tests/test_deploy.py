@@ -949,3 +949,20 @@ def test_run_deploy_clears_stale_proposed_when_no_migration_needed(stub_chain, m
 
     history = json.loads(path.read_text())[0]["deployments"]["314"]
     assert "proposed" not in history
+
+
+def test_facet_abi_runs_forge_inspect_once_per_facet_and_root(monkeypatch):
+    abi = [
+        {"type": "constructor", "inputs": [{"name": "x", "type": "uint256"}]},
+        {"type": "function", "name": "f", "inputs": [], "outputs": [], "stateMutability": "view"},
+    ]
+    inspected = []
+    monkeypatch.setattr(deploy, "run", lambda cmd, root: inspected.append((cmd[2], root)) or json.dumps(abi))
+    facet = _facet("a.sol:A")
+
+    for _ in range(2):
+        assert [s.selector for s in deploy.facet_selectors(facet, pathlib.Path("c0"))] == ["0x26121ff0"]
+    assert deploy.constructor_inputs(facet, pathlib.Path("c0")) == abi[0]["inputs"]
+    deploy.facet_selectors(facet, pathlib.Path("c1"))  # another checkout is read anew
+
+    assert inspected == [("a.sol:A", pathlib.Path("c0")), ("a.sol:A", pathlib.Path("c1"))]

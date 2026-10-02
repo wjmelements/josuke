@@ -1,3 +1,4 @@
+import functools
 import json
 import pathlib
 from collections import namedtuple
@@ -102,10 +103,16 @@ def facet_from_source_id(source_id: str) -> Facet:
     return Facet("sol", path, contract, source_id)
 
 
-def facet_abi(facet: Facet, root: pathlib.Path) -> list:
+# Memoised for the process: `deploy` and `verify` read each facet's ABI from several
+# checks, and for Solidity each read is a `forge inspect`. A key can't go stale within a
+# run, since each commit is checked out at its own worktree and built before it is read.
+@functools.cache
+def facet_abi(facet: Facet, root: pathlib.Path) -> tuple:
     if facet.kind == "sol":
-        return json.loads(run(["forge", "inspect", facet.source_id, "abi", "--json"], root))
-    return evm_artifact(root / facet.path, root)["abi"]
+        abi = json.loads(run(["forge", "inspect", facet.source_id, "abi", "--json"], root))
+    else:
+        abi = evm_artifact(root / facet.path, root)["abi"]
+    return tuple(abi)  # shared by every caller, so not a list they could append to
 
 
 def facet_selectors(facet: Facet, root: pathlib.Path) -> list:
@@ -117,9 +124,8 @@ def facet_selectors(facet: Facet, root: pathlib.Path) -> list:
 # -- init bytecode --------------------------------------------------------
 
 
-def constructor_inputs(source_id: str, root: pathlib.Path) -> list:
-    abi = json.loads(run(["forge", "inspect", source_id, "abi", "--json"], root))
-    ctor = [m for m in abi if m["type"] == "constructor"]
+def constructor_inputs(facet: Facet, root: pathlib.Path) -> list:
+    ctor = [m for m in facet_abi(facet, root) if m["type"] == "constructor"]
     return ctor[0]["inputs"] if ctor else []
 
 
@@ -147,7 +153,7 @@ def facet_initcode(facet: Facet, root: pathlib.Path, recorded_args, prompt: bool
 
     initcode = run(["forge", "inspect", facet.source_id, "bytecode"], root).strip()
     initcode = initcode.removeprefix("0x")
-    inputs = constructor_inputs(facet.source_id, root)
+    inputs = constructor_inputs(facet, root)
     if not inputs:
         return initcode, None
 
