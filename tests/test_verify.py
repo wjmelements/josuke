@@ -27,7 +27,7 @@ def _word(address_or_zero: str) -> str:
 
 
 class FakeStorage:
-    def __init__(self, address, values=None):
+    def __init__(self, address, values=None, cache=None):
         self.address = address
         self.storage_keys = {}
         self.storage_values = values or {}
@@ -536,7 +536,7 @@ def test_run_verify_flags_function_removed_from_kept_facet(monkeypatch, tmp_path
         assert root == pathlib.Path("trees", "c1")
         return [_sel("0x11111111")]
 
-    monkeypatch.setattr(verify, "ProxyStorage", lambda addr: FakeStorage(addr, {"0x99999999": _word(OLD)}))
+    monkeypatch.setattr(verify, "ProxyStorage", lambda addr, cache=None: FakeStorage(addr, {"0x99999999": _word(OLD)}))
     monkeypatch.setattr(deploy, "facet_selectors", selectors)
     for check in ("verify_facets", "verify_dispatch", "verify_selectors", "verify_proposed_set", "summarize_upgrade"):
         monkeypatch.setattr(verify, check, lambda *a, **k: None)

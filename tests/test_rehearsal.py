@@ -143,3 +143,19 @@ def test_verify_flags_an_onchain_migration_that_writes_a_wrong_slot(chain, monke
         f" proposed.migration rehearsal: {ADD} reverts, expected {NEW}",
         f" proposed.migration rehearsal: {KEEP} routes to {NEW}, expected {OLD}",
     ]
+
+
+@pytest.mark.timeout(5)
+def test_rehearsal_reuses_what_slot_detection_fetched(chain):
+    cache = {}
+    ProxyStorage(PROXY, cache=cache).fetch([sel(ADD), sel(KEEP), sel(DROP)])
+    fetched = len(chain.calls)
+
+    runtime = migration((ADD, slot(ADD), NEW), (DROP, slot(DROP), "0x" + "00" * 20))
+    assert rehearse_migration(PROXY, runtime, ROUTES, {OLD, NEW}, cache) == []
+
+    # Same block, same dispatch slots: nothing about the proxy is fetched again.
+    assert not [
+        req for payload in chain.calls[fetched:] for req in (payload if isinstance(payload, list) else [payload])
+        if req["method"] in ("eth_blockNumber", "eth_getStorageAt") or req["params"][0] == PROXY.lower()
+    ]

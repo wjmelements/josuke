@@ -305,10 +305,12 @@ def migration_routes(proposed: dict, current: dict, current_tree: pathlib.Path |
     return routes, delegates
 
 
-def rehearse(proxy: str, migration_runtime: bytes, proposed: dict, current: dict, current_tree, root) -> list[str]:
+def rehearse(
+    proxy: str, migration_runtime: bytes, proposed: dict, current: dict, current_tree, root, rpc_cache: dict | None = None
+) -> list[str]:
     """Failures from rehearsing `migration_runtime` on `proxy` (see `rehearse_migration`)."""
     routes, delegates = migration_routes(proposed, current, current_tree, root)
-    return rehearse_migration(proxy, migration_runtime, routes, delegates)
+    return rehearse_migration(proxy, migration_runtime, routes, delegates, rpc_cache)
 
 
 def selectors_runtime(facets: list, root: pathlib.Path) -> bytes | None:
@@ -327,6 +329,7 @@ def build_migration(
     root: pathlib.Path,
     storage: ProxyStorage | None = None,
     selectors_impl: dict | None = None,
+    rpc_cache: dict | None = None,
 ):
     """A Migration that points every proposed selector at its facet and zeroes
     selectors dropped since `current`. Returns None when nothing needs changing.
@@ -337,7 +340,8 @@ def build_migration(
 
     `storage` may be a pre-populated ProxyStorage to avoid re-querying slots.
     `selectors_impl` is the generated `selectors()` delegate record (if any);
-    when given, `selectors()` is routed to it like any facet selector."""
+    when given, `selectors()` is routed to it like any facet selector.
+    `rpc_cache` is shared with the slot-detection relay (see `EvmRelay`)."""
     owner = {}  # selector -> Facet
     selectors = {}  # selector -> Selector
     for facet in facets:
@@ -359,7 +363,7 @@ def build_migration(
     removed = {s: installed[s] for s in installed if s not in kept}
 
     if storage is None:
-        storage = ProxyStorage(proxy)
+        storage = ProxyStorage(proxy, cache=rpc_cache)
         probe = {**installed, **selectors}
         if selectors_impl:
             probe[SELECTORS_SELECTOR] = Selector(SELECTORS_SELECTOR, "selectors()")
@@ -454,6 +458,9 @@ def run_deploy(ledger_path, redeploy_all: bool = False):
     unmined: list[tuple[Facet, dict, str, str]] = []  # (facet, entry, initcode, sender)
     summaries: list[str] = []  # one line per proxy, reported once its deployments are mined
     checked_metadata = False  # warn_metadata_hash runs once, and only for Solidity facets
+    # Shared by slot detection and the rehearsal, which then see the same block. Planning
+    # only: its memoised eth_blockNumber predates send_all, so later relays must not use it.
+    planning_cache: dict = {}
 
     # keystore_session: prompt for a keystore password at most once, on the first deploy
     # broadcast_session: plan every deployment, then send them back to back and wait for them together
@@ -528,11 +535,12 @@ def run_deploy(ledger_path, redeploy_all: bool = False):
 
             current_tree = trees.get(current["gitCommit"]) if current_facets else None
             migration = build_migration(
-                proxy, facets, proposed_facets, current, current_tree, root, selectors_impl=selectors_impl
+                proxy, facets, proposed_facets, current, current_tree, root,
+                selectors_impl=selectors_impl, rpc_cache=planning_cache,
             )
             if migration is not None:
                 # Before anything is sent, so a wrong storage slot costs no gas.
-                failures = rehearse(proxy, migration.encode(), proposed, current, current_tree, root)
+                failures = rehearse(proxy, migration.encode(), proposed, current, current_tree, root, planning_cache)
                 if failures:
                     raise click.ClickException(
                         f"{proxy}: the migration does not route as proposed when rehearsed:\n"

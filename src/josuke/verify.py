@@ -219,11 +219,12 @@ def verify_rehearsal(
     current_tree: pathlib.Path | None,
     tree: pathlib.Path,
     report: Report,
+    rpc_cache: dict | None = None,
 ) -> None:
     """Running the on-chain migration as the proxy routes every selector as `proposed`
     records: exactly what governance will execute, checked by the real dispatcher."""
     runtime = bytes.fromhex(eth_get_code(proposed["migration"]["address"]).removeprefix("0x"))
-    for failure in rehearse(proxy, runtime, proposed, current, current_tree, tree):
+    for failure in rehearse(proxy, runtime, proposed, current, current_tree, tree, rpc_cache):
         report.fail(f"proposed.migration rehearsal: {failure}")
 
 
@@ -236,7 +237,7 @@ def run_verify(ledger_path):
     chain = chain_id()
     report = Report()
     verified: list[str] = []
-    rpc_cache: dict = {}  # shared across every facet replay for the run
+    rpc_cache: dict = {}  # shared by every relay in the run: one snapshot of the chain
 
     with SourceTrees(root) as trees:
         for entry in ledger:
@@ -259,7 +260,7 @@ def run_verify(ledger_path):
                 _, proposed_sels = selector_owners(proposed, proposed_tree)
                 selectors.update((s.selector, s) for s in proposed_sels)
 
-            storage = ProxyStorage(proxy)
+            storage = ProxyStorage(proxy, cache=rpc_cache)
             if selectors:
                 storage.fetch(list(selectors.values()))
 
@@ -278,7 +279,7 @@ def run_verify(ledger_path):
                 verify_selectors(proposed, "proposed", proposed_tree, report)
                 if "migration" in proposed:
                     verify_migration(proxy, proposed, current or {}, storage, current_tree, proposed_tree, report)
-                    verify_rehearsal(proxy, proposed, current or {}, current_tree, proposed_tree, report)
+                    verify_rehearsal(proxy, proposed, current or {}, current_tree, proposed_tree, report, rpc_cache)
                 summarize_upgrade(proxy, chain, current, proposed, current_tree, proposed_tree, storage)
 
     if report.failures:

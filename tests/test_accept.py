@@ -23,7 +23,7 @@ def _word(address_or_zero: str) -> str:
 
 
 class FakeStorage:
-    def __init__(self, address, values=None):
+    def __init__(self, address, values=None, cache=None):
         self.address = address
         self.storage_keys = {}
         self.storage_values = dict(values or {})
@@ -260,7 +260,7 @@ def stub(monkeypatch, stub_source_trees):
     routes: dict[str, str] = {}
     stub_source_trees(accept)
     monkeypatch.setattr(accept, "chain_id", lambda: "314")
-    monkeypatch.setattr(accept, "ProxyStorage", lambda addr: FakeStorage(addr, routes))
+    monkeypatch.setattr(accept, "ProxyStorage", lambda addr, cache=None: FakeStorage(addr, routes))
     monkeypatch.setenv("ETH_RPC_URL", "http://mock.rpc")
     return routes
 

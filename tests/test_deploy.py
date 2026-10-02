@@ -548,7 +548,7 @@ def test_run_deploy_zeroes_function_removed_from_kept_facet(stub_chain, monkeypa
     # `current` (c0); the proxy still routes it, so the migration must zero it.
     live = "0x" + "00" * 12 + "cd" * 20
     monkeypatch.setattr(deploy, "build_migration", _build_migration)
-    monkeypatch.setattr(deploy, "ProxyStorage", lambda addr: FakeStorage(addr, {"0x99999999": live}))
+    monkeypatch.setattr(deploy, "ProxyStorage", lambda addr, cache=None: FakeStorage(addr, {"0x99999999": live}))
     migrations = []
     monkeypatch.setattr(
         deploy, "deploy_migration", lambda m, prior, root: migrations.append(m) or {"address": "0x" + "dd" * 20}
@@ -623,7 +623,7 @@ def test_run_deploy_requires_rpc_url(monkeypatch, tmp_path):
 class FakeStorage:
     """Stand-in for ProxyStorage: slot = keccak-ish of the selector, value = 0."""
 
-    def __init__(self, address, values=None):
+    def __init__(self, address, values=None, cache=None):
         self.address = address
         self.storage_keys = {}
         self.storage_values = values or {}
@@ -683,7 +683,7 @@ def test_build_migration_installs_every_proposed_selector(monkeypatch):
 def test_build_migration_zeroes_dropped_selectors(monkeypatch):
     live_value = "0x" + "00" * 12 + "cd" * 20  # a non-zero delegate currently set
     monkeypatch.setattr(
-        deploy, "ProxyStorage", lambda addr: FakeStorage(addr, {"0x99999999": live_value})
+        deploy, "ProxyStorage", lambda addr, cache=None: FakeStorage(addr, {"0x99999999": live_value})
     )
 
     def selectors(facet, root):
@@ -723,7 +723,7 @@ def test_build_migration_none_when_already_routed(monkeypatch):
     propose a migration: every selector already routes to its recorded facet."""
     word = "0x" + "00" * 12 + A1[2:].lower()
     monkeypatch.setattr(
-        deploy, "ProxyStorage", lambda addr: FakeStorage(addr, {"0x11111111": word})
+        deploy, "ProxyStorage", lambda addr, cache=None: FakeStorage(addr, {"0x11111111": word})
     )
     monkeypatch.setattr(deploy, "facet_selectors", lambda facet, root: [_sel("0x11111111")])
     facets = [_facet("a.sol:A")]

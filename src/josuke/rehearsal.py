@@ -13,7 +13,9 @@ def delegate_stub(address: str) -> str:
     return f"0x{PUSH20}{address.removeprefix('0x').lower()}{PUSH0}{MSTORE}{MSIZE}{PUSH0}{RETURN}"
 
 
-def rehearse_migration(proxy: str, migration_runtime: bytes, routes: dict, delegates) -> list[str]:
+def rehearse_migration(
+    proxy: str, migration_runtime: bytes, routes: dict, delegates, cache: dict | None = None
+) -> list[str]:
     """Failures from running `migration_runtime` as `proxy`'s code against its live
     storage, then asking the proxy's real dispatcher where each selector goes.
 
@@ -24,7 +26,7 @@ def rehearse_migration(proxy: str, migration_runtime: bytes, routes: dict, deleg
     proxy = proxy.lower()
     stubs = {address.lower(): {"code": delegate_stub(address)} for address in delegates}
     failures = []
-    with EvmRelay(json_output=True) as relay:
+    with EvmRelay(cache=cache, json_output=True) as relay:
 
         def call(data: str, overrides: dict) -> tuple[bool, str]:
             request = {"to": proxy, "data": data, "stateOverrides": overrides}
