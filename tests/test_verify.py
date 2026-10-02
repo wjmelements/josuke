@@ -538,7 +538,6 @@ def test_run_verify_flags_function_removed_from_kept_facet(monkeypatch, tmp_path
 
     monkeypatch.setattr(verify, "ProxyStorage", lambda addr: FakeStorage(addr, {"0x99999999": _word(OLD)}))
     monkeypatch.setattr(deploy, "facet_selectors", selectors)
-    monkeypatch.setattr(deploy, "facet_selectors", selectors)
     for check in ("verify_facets", "verify_dispatch", "verify_selectors", "verify_proposed_set", "summarize_upgrade"):
         monkeypatch.setattr(verify, check, lambda *a, **k: None)
 
