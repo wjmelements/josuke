@@ -21,9 +21,12 @@ PROXY_CODE = (
     "5f5f365f585f5f377f" + NAMESPACE + "5952595f20548060435751602052635416eb985f526024601cfd"
     "5b365f5f375af43d5f5f3e6054573d5ffd5b3d5ff3"
 )
-# The same proxy, reading slot 0 before its dispatch lookup, so slot detection
-# (the first SLOAD) takes slot 0 for every selector. Its jump targets move by 3.
-GUARDED_PROXY_CODE = "5f5450" + PROXY_CODE.replace("6043", "6046").replace("6054", "6057")
+# The same proxy, first reading the slot numbered by the selector itself. That read
+# fits slot detection as well as the dispatch lookup does, and comes first, so it
+# wins. Its PC (4) becomes PUSH1 4, so its jump targets move by 8.
+FOOLING_PROXY_CODE = "5f3560e01c5450" + (
+    PROXY_CODE.replace("5f5f365f58", "5f5f365f6004", 1).replace("6043", "604b").replace("6054", "605c")
+)
 
 ADD, KEEP, DROP = "0x11111111", "0x22222222", "0x33333333"
 OLD = to_checksum_address("0x" + "0d" * 20)
@@ -98,10 +101,10 @@ def test_reverting_migration_fails(chain):
 
 @pytest.mark.timeout(5)
 def test_catches_slot_detection_fooled_by_an_earlier_sload(chain):
-    chain.set_code(PROXY, GUARDED_PROXY_CODE)
+    chain.set_code(PROXY, FOOLING_PROXY_CODE)
     storage = ProxyStorage(PROXY)
     storage.fetch([sel(ADD)])
-    assert storage.storage_keys[ADD] == "0x" + "00" * 32  # the guess is wrong
+    assert storage.storage_keys[ADD] == f"0x{int(ADD, 16):064x}"  # the guess is wrong
 
     runtime = migration((ADD, storage.storage_keys[ADD], NEW))
     assert rehearse_migration(PROXY, runtime, {ADD: NEW}, {NEW}) == [f"{ADD} reverts, expected {NEW}"]
