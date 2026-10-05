@@ -3,39 +3,28 @@
 from unittest.mock import patch
 
 import pytest
-from eth_utils import keccak, to_checksum_address
+from eth_utils import to_checksum_address
 
 from ethrpc_mock import MockEthRpc
+from reference_proxy import PROXY_CODE, mapping_slot as slot, prefixed_proxy, word
 from josuke import deploy, rehearsal, verify
 from josuke.erc8167 import SELECTORS_SELECTOR
 from josuke.delegate import ContractSource, Delegate
 from josuke.migration import Migration, SetDelegate
+from josuke.opcodes import CALLDATALOAD, POP, PUSH0, PUSH1, SHR, SLOAD
 from josuke.rehearsal import rehearse_migration
 from josuke.selectors import Selector
 from josuke.storage import ProxyStorage
 
 PROXY = to_checksum_address("0x" + "1a" * 20)
-# The reference proxy, erc8167/src/Proxy.evm: delegates[msg.sig] at keccak(msg.sig . namespace).
-NAMESPACE = "f27774d37a8b3bf2306f60b561e4e8ec22cfb23796f1f777608c0e466ef52600"
-PROXY_CODE = (
-    "5f5f365f585f5f377f" + NAMESPACE + "5952595f20548060435751602052635416eb985f526024601cfd"
-    "5b365f5f375af43d5f5f3e6054573d5ffd5b3d5ff3"
-)
-# The same proxy, first reading the slot numbered by the selector itself. Its PC (4)
-# becomes PUSH1 4, so its jump targets move by 8.
-SELECTOR_SLOT_PROXY_CODE = "5f3560e01c5450" + (
-    PROXY_CODE.replace("5f5f365f58", "5f5f365f6004", 1).replace("6043", "604b").replace("6054", "605c")
-)
+# The reference proxy, first reading the slot numbered by the selector itself.
+SELECTOR_SLOT_PROXY_CODE = prefixed_proxy(f"{PUSH0}{CALLDATALOAD}{PUSH1}e0{SHR}{SLOAD}{POP}")
 
 ADD, KEEP, DROP = "0x11111111", "0x22222222", "0x33333333"
 OLD = to_checksum_address("0x" + "0d" * 20)
 NEW = to_checksum_address("0x" + "0e" * 20)
 SELECTORS_IMPL = to_checksum_address("0x" + "5e" * 20)
 MIGRATION = to_checksum_address("0x" + "4d" * 20)
-
-
-def slot(selector: str) -> str:
-    return "0x" + keccak(bytes.fromhex(selector[2:].ljust(64, "0") + NAMESPACE)).hex()
 
 
 def sel(selector: str) -> Selector:
@@ -51,10 +40,6 @@ def _isolate_selector_map():
     yield
     selectors.selector_map.clear()
     selectors.selector_map.update(saved)
-
-
-def word(address: str) -> str:
-    return "0x" + address[2:].lower().rjust(64, "0")
 
 
 def migration(*routes) -> bytes:

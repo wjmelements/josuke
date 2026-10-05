@@ -5,9 +5,10 @@ import pytest
 from eth_utils import keccak
 
 from ethrpc_mock import MockEthRpc
+from reference_proxy import PROXY_CODE as ERC8167_PROXY_CODE, mapping_slot, prefixed_proxy, word
 from josuke.opcodes import (
     ADD, CALLDATACOPY, CALLDATALOAD, CALLDATASIZE, DELEGATECALL, DUP1, DUP5, EXTCODEHASH, EXTCODESIZE, GAS, ISZERO,
-    JUMPDEST, JUMPI, MSIZE, MSTORE, PC, POP, PUSH0, PUSH1, PUSH4, PUSH32, RETURN, RETURNDATACOPY, RETURNDATASIZE,
+    JUMPDEST, JUMPI, MSIZE, MSTORE, POP, PUSH0, PUSH1, PUSH4, PUSH32, RETURN, RETURNDATACOPY, RETURNDATASIZE,
     REVERT, SHA3, SHR, SLOAD, STOP,
 )
 from josuke.selectors import Selector
@@ -72,23 +73,10 @@ def test_fetch(eth_rpc):
     assert storage.storage_values == {s.selector: "0x" + "00" * 32 for s in selectors}
 
 
-# The reference proxy, erc8167/src/Proxy.evm: delegates[msg.sig] at keccak(msg.sig . namespace).
-NAMESPACE = "f27774d37a8b3bf2306f60b561e4e8ec22cfb23796f1f777608c0e466ef52600"
-ERC8167_PROXY_CODE = (
-    "5f5f365f585f5f377f" + NAMESPACE + "5952595f20548060435751602052635416eb985f526024601cfd"
-    "5b365f5f375af43d5f5f3e6054573d5ffd5b3d5ff3"
-)
 # keccak("eip1967.proxy.implementation") - 1, where ERC-1822 kept its implementation too
 IMPLEMENTATION_SLOT = "360894a13ba1a3210667c828492db98dca3e2076cc3735a920a3ca505d382bbc"
 # The reference proxy, first reading the implementation slot it was migrated from.
-# Its PC (4) becomes PUSH1 4, so its jump targets move by 36.
-MIGRATED_PROXY_CODE = f"{PUSH32}{IMPLEMENTATION_SLOT}{SLOAD}{POP}" + (
-    ERC8167_PROXY_CODE.replace(
-        f"{PUSH0}{PUSH0}{CALLDATASIZE}{PUSH0}{PC}", f"{PUSH0}{PUSH0}{CALLDATASIZE}{PUSH0}{PUSH1}04", 1
-    )
-    .replace(f"{PUSH1}43", f"{PUSH1}67")
-    .replace(f"{PUSH1}54", f"{PUSH1}78")
-)
+MIGRATED_PROXY_CODE = prefixed_proxy(f"{PUSH32}{IMPLEMENTATION_SLOT}{SLOAD}{POP}")
 XOR_KEY = "aa" * 32
 # Reads slot 0, then delegates to the address at msg.sig ^ XOR_KEY: a key that no
 # storage layout convention derives from the selector.
@@ -111,14 +99,6 @@ CODELESS = "0x" + "0b" * 20
 LINKED, UNLINKED = "0x7a7a7a7a", "0x7b7b7b7b"
 DELEGATE = "0x" + "0d" * 20
 OLD_IMPLEMENTATION = "0x" + "0c" * 20
-
-
-def word(address: str) -> str:
-    return "0x" + address[2:].rjust(64, "0")
-
-
-def mapping_slot(selector: str) -> str:
-    return "0x" + keccak(bytes.fromhex(selector[2:].ljust(64, "0") + NAMESPACE)).hex()
 
 
 def xor_slot(selector: str) -> str:
@@ -332,15 +312,8 @@ def test_finds_an_unlinked_route_behind_a_flag_keyed_by_selector(monkeypatch):
 
 
 ZERO_SELECTOR = "0x00000000"  # a gas-golfed vanity selector
-# The reference proxy behind PAUSE_CHECK's `require(!paused)` at slot 0. Its PC (4)
-# becomes PUSH1 4, so its jump targets move by 11.
-PAUSED_ERC8167_PROXY_CODE = PAUSE_CHECK + (
-    ERC8167_PROXY_CODE.replace(
-        f"{PUSH0}{PUSH0}{CALLDATASIZE}{PUSH0}{PC}", f"{PUSH0}{PUSH0}{CALLDATASIZE}{PUSH0}{PUSH1}04", 1
-    )
-    .replace(f"{PUSH1}43", f"{PUSH1}4e")
-    .replace(f"{PUSH1}54", f"{PUSH1}5f")
-)
+# The reference proxy behind PAUSE_CHECK's `require(!paused)` at slot 0.
+PAUSED_ERC8167_PROXY_CODE = prefixed_proxy(PAUSE_CHECK)
 
 
 @pytest.mark.timeout(5)
