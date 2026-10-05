@@ -7,8 +7,8 @@ from eth_utils import keccak
 from ethrpc_mock import MockEthRpc
 from josuke.opcodes import (
     ADD, CALLDATACOPY, CALLDATALOAD, CALLDATASIZE, DELEGATECALL, DUP1, DUP5, EXTCODEHASH, EXTCODESIZE, GAS, ISZERO,
-    JUMPDEST, JUMPI, MSTORE, POP, PUSH0, PUSH1, PUSH4, PUSH32, RETURN, RETURNDATACOPY, RETURNDATASIZE, REVERT, SHA3,
-    SHR, SLOAD,
+    JUMPDEST, JUMPI, MSIZE, MSTORE, PC, POP, PUSH0, PUSH1, PUSH4, PUSH32, RETURN, RETURNDATACOPY, RETURNDATASIZE,
+    REVERT, SHA3, SHR, SLOAD, STOP,
 )
 from josuke.selectors import Selector
 from josuke.storage import ProxyStorage
@@ -82,8 +82,12 @@ ERC8167_PROXY_CODE = (
 IMPLEMENTATION_SLOT = "360894a13ba1a3210667c828492db98dca3e2076cc3735a920a3ca505d382bbc"
 # The reference proxy, first reading the implementation slot it was migrated from.
 # Its PC (4) becomes PUSH1 4, so its jump targets move by 36.
-MIGRATED_PROXY_CODE = "7f" + IMPLEMENTATION_SLOT + "5450" + (
-    ERC8167_PROXY_CODE.replace("5f5f365f58", "5f5f365f6004", 1).replace("6043", "6067").replace("6054", "6078")
+MIGRATED_PROXY_CODE = f"{PUSH32}{IMPLEMENTATION_SLOT}{SLOAD}{POP}" + (
+    ERC8167_PROXY_CODE.replace(
+        f"{PUSH0}{PUSH0}{CALLDATASIZE}{PUSH0}{PC}", f"{PUSH0}{PUSH0}{CALLDATASIZE}{PUSH0}{PUSH1}04", 1
+    )
+    .replace(f"{PUSH1}43", f"{PUSH1}67")
+    .replace(f"{PUSH1}54", f"{PUSH1}78")
 )
 XOR_KEY = "aa" * 32
 # Reads slot 0, then delegates to the address at msg.sig ^ XOR_KEY: a key that isn't
@@ -121,11 +125,13 @@ def xor_slot(selector: str) -> str:
     return f"0x{int(selector, 16) ^ int(XOR_KEY, 16):064x}"
 
 
-def probe(code: str, storage: dict, selectors: list[str]) -> ProxyStorage:
+def probe(code: str, storage: dict, selectors: list[str], codes: dict | None = None) -> ProxyStorage:
     rpc = MockEthRpc(block_number=BLOCK_NUMBER)
     rpc.set_code(PROXY_ADDRESS, code)
     rpc.set_code(DELEGATE, "60075400")  # reads proxy slot 7 itself
     rpc.set_code(OLD_IMPLEMENTATION, "00")
+    for address, runtime in (codes or {}).items():
+        rpc.set_code(address, runtime)
     for key, value in storage.items():
         rpc.set_storage(PROXY_ADDRESS, key, value)
     proxy_storage = ProxyStorage(PROXY_ADDRESS)
@@ -279,3 +285,74 @@ def test_finds_an_array_indexed_by_selector_behind_a_pause_check(monkeypatch):
 
     assert storage.storage_keys == {LINKED: array_slot(LINKED), UNLINKED: array_slot(UNLINKED)}
     assert storage.storage_values == {LINKED: word(DELEGATE), UNLINKED: "0x" + "00" * 32}
+
+
+# A facet keeping mapping(bytes4 => bool) pausedSelectors at slot 5, which reads
+# pausedSelectors[msg.sig] from the proxy's storage once dispatched to.
+PAUSABLE = "0x" + "0f" * 20
+PAUSABLE_CODE = (
+    f"{PUSH1}04{PUSH0}{PUSH0}{CALLDATACOPY}"  # msg.sig at [0:4)
+    f"{PUSH1}05{MSIZE}{MSTORE}"  # slot 5 after it
+    f"{MSIZE}{PUSH0}{SHA3}{SLOAD}{POP}{STOP}"
+)
+
+
+def paused_slot(selector: str) -> str:
+    return "0x" + keccak(bytes.fromhex(selector[2:].ljust(64, "0")) + (5).to_bytes(32, "big")).hex()
+
+
+@pytest.mark.timeout(5)
+def test_ignores_a_facets_own_read_keyed_by_selector(monkeypatch):
+    # (1.) The facet's pausedSelectors[msg.sig] is keyed by the selector, the proxy's
+    # array index isn't, but only the proxy's read routes.
+    monkeypatch.setenv("ETH_RPC_URL", "http://mock.rpc/test")
+    storage = probe(
+        ARRAY_PROXY_CODE, {array_slot(LINKED): word(PAUSABLE)}, [LINKED, UNLINKED], {PAUSABLE: PAUSABLE_CODE}
+    )
+
+    assert storage.storage_keys == {LINKED: array_slot(LINKED), UNLINKED: array_slot(UNLINKED)}
+    assert storage.storage_values == {LINKED: word(PAUSABLE), UNLINKED: "0x" + "00" * 32}
+
+
+@pytest.mark.timeout(5)
+def test_finds_an_unlinked_route_behind_a_flag_keyed_by_selector(monkeypatch):
+    # (3.) UNLINKED's paused flag and route are both keyed by it, and neither is
+    # delegated to, so only the route's role in dispatch tells them apart.
+    monkeypatch.setenv("ETH_RPC_URL", "http://mock.rpc/test")
+    storage = probe(
+        METADATA_PROXY_CODE,
+        {
+            metadata_slot(LINKED, FACET_ADDRESS_KEY): word(DELEGATE),
+            metadata_slot(UNLINKED, PAUSED_KEY): word("0x01"),
+        },
+        [LINKED, UNLINKED],
+    )
+
+    assert storage.storage_keys == {
+        LINKED: metadata_slot(LINKED, FACET_ADDRESS_KEY),
+        UNLINKED: metadata_slot(UNLINKED, FACET_ADDRESS_KEY),
+    }
+    assert storage.storage_values == {LINKED: word(DELEGATE), UNLINKED: "0x" + "00" * 32}
+
+
+ZERO_SELECTOR = "0x00000000"  # a gas-golfed vanity selector
+# The reference proxy behind PAUSE_CHECK's `require(!paused)` at slot 0. Its PC (4)
+# becomes PUSH1 4, so its jump targets move by 11.
+PAUSED_ERC8167_PROXY_CODE = PAUSE_CHECK + (
+    ERC8167_PROXY_CODE.replace(
+        f"{PUSH0}{PUSH0}{CALLDATASIZE}{PUSH0}{PC}", f"{PUSH0}{PUSH0}{CALLDATASIZE}{PUSH0}{PUSH1}04", 1
+    )
+    .replace(f"{PUSH1}43", f"{PUSH1}4e")
+    .replace(f"{PUSH1}54", f"{PUSH1}5f")
+)
+
+
+@pytest.mark.timeout(5)
+def test_a_zero_selector_is_not_slot_zero(monkeypatch):
+    # (4.) Slot 0 is numbered by 0x00000000, and any zero-padded preimage contains
+    # it, so the pause check's read looks keyed by the selector as well.
+    monkeypatch.setenv("ETH_RPC_URL", "http://mock.rpc/test")
+    storage = probe(PAUSED_ERC8167_PROXY_CODE, {mapping_slot(LINKED): word(DELEGATE)}, [ZERO_SELECTOR, LINKED])
+
+    assert storage.storage_keys == {ZERO_SELECTOR: mapping_slot(ZERO_SELECTOR), LINKED: mapping_slot(LINKED)}
+    assert storage.storage_values == {ZERO_SELECTOR: "0x" + "00" * 32, LINKED: word(DELEGATE)}
