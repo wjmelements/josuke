@@ -17,7 +17,6 @@ from eth_utils import keccak, to_checksum_address
 
 from josuke import broadcast, deploy
 from josuke.deploy import Facet, coerce_arg, keccak_hex, resolve_facets
-from josuke.erc8167 import SELECTORS_SELECTOR
 from josuke.evm import Replay
 
 A1 = to_checksum_address("0x" + "a1" * 20)  # deploy_initcode always returns checksummed
@@ -717,20 +716,15 @@ def test_build_migration_zeroes_dropped_selectors(monkeypatch):
 
 
 def test_build_migration_none_when_dropped_selector_already_clear(monkeypatch):
-    word = "0x" + "00" * 12 + A1[2:].lower()
-    monkeypatch.setattr(  # the kept selector already routed; the dropped one zero
-        deploy, "ProxyStorage", lambda addr, cache=None: FakeStorage(addr, {"0x11111111": word})
-    )
+    monkeypatch.setattr(deploy, "ProxyStorage", FakeStorage)  # all values zero
 
     def selectors(facet, root):
-        return [_sel("0x99999999")] if "old" in facet.source_id else [_sel("0x11111111")]
+        return [_sel("0x99999999")] if "old" in facet.source_id else []
 
     monkeypatch.setattr(deploy, "facet_selectors", selectors)
-    facets = [_facet("keep.sol:Keep")]
-    proposed_facets = {"keep.sol:Keep": {"address": A1}}
-    current = {"facets": {"keep.sol:Keep": {"address": A1}, "old.sol:Old": {}}}
+    current = {"facets": {"old.sol:Old": {}}}
 
-    assert deploy.build_migration(PROXY, facets, proposed_facets, current, ".", ".") is None
+    assert deploy.build_migration(PROXY, [], {}, current, ".", ".") is None
 
 
 def test_build_migration_none_when_already_routed(monkeypatch):
@@ -755,24 +749,6 @@ def test_build_migration_rejects_selector_clash(monkeypatch):
     proposed_facets = {"a.sol:A": {"address": A1}, "b.sol:B": {"address": B2}}
 
     with pytest.raises(Exception, match="claimed by"):
-        deploy.build_migration(PROXY, facets, proposed_facets, {}, ".", ".")
-
-
-@pytest.mark.parametrize(
-    "declared, message",
-    [
-        ([], "no public methods were declared by the facets in facetSrc$"),
-        ([SELECTORS_SELECTOR], r"no public methods were declared by the facets in facetSrc besides selectors\(\)$"),
-    ],
-)
-def test_build_migration_rejects_facets_without_public_methods(monkeypatch, declared, message):
-    # Fails before slot detection, which can't tell slots apart with one selector.
-    monkeypatch.setattr(deploy, "ProxyStorage", None)
-    monkeypatch.setattr(deploy, "facet_selectors", lambda facet, root: [_sel(s) for s in declared])
-    facets = [_facet("a.sol:A"), _facet("b.sol:B")]
-    proposed_facets = {"a.sol:A": {"address": A1}, "b.sol:B": {"address": A1}}
-
-    with pytest.raises(click.ClickException, match=message):
         deploy.build_migration(PROXY, facets, proposed_facets, {}, ".", ".")
 
 

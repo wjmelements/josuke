@@ -21,10 +21,9 @@ PROXY_CODE = (
     "5f5f365f585f5f377f" + NAMESPACE + "5952595f20548060435751602052635416eb985f526024601cfd"
     "5b365f5f375af43d5f5f3e6054573d5ffd5b3d5ff3"
 )
-# The same proxy, first reading the slot numbered by the selector itself. That read
-# fits slot detection as well as the dispatch lookup does, and comes first, so it
-# wins. Its PC (4) becomes PUSH1 4, so its jump targets move by 8.
-FOOLING_PROXY_CODE = "5f3560e01c5450" + (
+# The same proxy, first reading the slot numbered by the selector itself. Its PC (4)
+# becomes PUSH1 4, so its jump targets move by 8.
+SELECTOR_SLOT_PROXY_CODE = "5f3560e01c5450" + (
     PROXY_CODE.replace("5f5f365f58", "5f5f365f6004", 1).replace("6043", "604b").replace("6054", "605c")
 )
 
@@ -100,14 +99,14 @@ def test_reverting_migration_fails(chain):
 
 
 @pytest.mark.timeout(5)
-def test_catches_slot_detection_fooled_by_an_earlier_sload(chain):
-    chain.set_code(PROXY, FOOLING_PROXY_CODE)
+def test_slot_detection_passes_an_earlier_sload_keyed_by_selector(chain):
+    chain.set_code(PROXY, SELECTOR_SLOT_PROXY_CODE)
     storage = ProxyStorage(PROXY)
     storage.fetch([sel(ADD)])
-    assert storage.storage_keys[ADD] == f"0x{int(ADD, 16):064x}"  # the guess is wrong
+    assert storage.storage_keys[ADD] == slot(ADD)
 
     runtime = migration((ADD, storage.storage_keys[ADD], NEW))
-    assert rehearse_migration(PROXY, runtime, {ADD: NEW}, {NEW}) == [f"{ADD} reverts, expected {NEW}"]
+    assert rehearse_migration(PROXY, runtime, {ADD: NEW}, {NEW}) == []
 
 
 def _own(monkeypatch, selectors_by_source):

@@ -1,14 +1,15 @@
-from dataclasses import dataclass
+import json
 
 import click
-from eth_utils import keccak, to_checksum_address
+from eth_utils import to_checksum_address
 
 from .evm import EvmRelay
+from .opcodes import MSIZE, MSTORE, PUSH0, PUSH20, RETURN
 from .selectors import Selector
 
 _ADDRESS_MASK = (1 << 160) - 1
-# A route kept in a struct may sit a few words past its mapping slot.
-_STRUCT_REACH = 256
+# Stands in for a delegate while slot detection tries each slot the proxy reads.
+_STUB = "0x" + "5b" * 20
 
 
 def slot_address(raw: str | None) -> str | None:
@@ -18,69 +19,39 @@ def slot_address(raw: str | None) -> str | None:
     return to_checksum_address("0x" + raw.removeprefix("0x").rjust(64, "0")[-40:])
 
 
-@dataclass
-class _Read:
-    """One SLOAD of the proxy's storage during a probe call."""
-
-    key: int
-    value: int | None  # None when the trace ends before showing it
-    keyed_by_selector: bool  # the selector itself, or a keccak of something containing it
-    delegated: bool  # the proxy then DELEGATECALLed the address it read
-    inspected: bool  # the proxy then checked the code at the address it read
+def delegate_stub(address: str) -> str:
+    """Runtime that returns `address` as a word. Standing in for a delegate, it keeps
+    routing checks about routing: it runs no facet code and reads no proxy storage.
+    (`ADDRESS` would be the proxy's under `DELEGATECALL`, so it is a constant.)"""
+    return f"0x{PUSH20}{address.removeprefix('0x').lower()}{PUSH0}{MSTORE}{MSIZE}{PUSH0}{RETURN}"
 
 
-def _proxy_reads(steps: list[dict], proxy: int, selector: str) -> list[_Read]:
-    """The reads of `proxy`'s storage in one traced call to it, in order.
+def _proxy_reads(steps: list[dict], proxy: int) -> dict[str, str]:
+    """Each slot of `proxy`'s storage read in one traced call to it, in order, with its value.
 
     A frame runs in its callee's storage after CALL and STATICCALL, but in its
-    caller's after DELEGATECALL and CALLCODE, so a delegate's reads of proxy
-    storage count too, as do the reads of a dispatcher the proxy delegates to."""
-    sig = bytes.fromhex(selector.removeprefix("0x"))
-    derived = {int.from_bytes(sig), int.from_bytes(sig) << 224}  # right- and left-aligned
-    hashes = set()  # keccaks whose preimage holds the selector, or such a keccak
-    loads = []  # (key, value)
-    targets = set()
-    inspections = set()  # EXTCODESIZE and EXTCODEHASH operands, as before a call
+    caller's after DELEGATECALL and CALLCODE, so the reads of a dispatcher the proxy
+    delegates to count, as do its delegate's."""
+    reads = {}
     frames = [proxy]  # whose storage each depth uses; None for a created contract
     callee = None
-    for i, step in enumerate(steps):
+    for step, after in zip(steps, steps[1:]):
         depth = step["depth"]
         if depth > len(frames):
             frames.append(callee)
         else:
             del frames[depth:]
-        storage = frames[-1]
         op, stack = step["opName"], step["stack"]
-        if op in ("SHA3", "KECCAK256"):
-            offset, size = int(stack[-1], 16), int(stack[-2], 16)
-            memory = bytes.fromhex(step["memory"].removeprefix("0x"))
-            preimage = memory[offset : offset + size].ljust(size, b"\0")
-            if sig in preimage or any(h.to_bytes(32) in preimage for h in hashes):
-                hashes.add(int.from_bytes(keccak(preimage)))
-        elif op == "SLOAD" and storage == proxy:
-            after = steps[i + 1] if i + 1 < len(steps) else None
-            value = int(after["stack"][-1], 16) if after and after["depth"] == depth else None
-            loads.append((int(stack[-1], 16), value))
-        elif op == "DELEGATECALL" and storage == proxy:
-            targets.add(int(stack[-2], 16) & _ADDRESS_MASK)
-        elif op in ("EXTCODESIZE", "EXTCODEHASH") and storage == proxy:
-            inspections.add(int(stack[-1], 16) & _ADDRESS_MASK)
+        if op == "SLOAD" and frames[-1] == proxy and after["depth"] == depth:
+            key, value = int(stack[-1], 16), int(after["stack"][-1], 16)
+            reads.setdefault(f"0x{key:064x}", f"0x{value:064x}")
         if op in ("CALL", "STATICCALL"):
             callee = int(stack[-2], 16) & _ADDRESS_MASK
         elif op in ("DELEGATECALL", "CALLCODE"):
-            callee = storage
+            callee = frames[-1]
         elif op in ("CREATE", "CREATE2"):
             callee = None
-    return [
-        _Read(
-            key,
-            value,
-            key in derived or any(0 <= key - h < _STRUCT_REACH for h in hashes),
-            bool(value) and value & _ADDRESS_MASK in targets,
-            bool(value) and value & _ADDRESS_MASK in inspections,
-        )
-        for key, value in loads
-    ]
+    return reads
 
 
 def _split_calls(trace: list[dict]) -> list[list[dict]]:
@@ -104,41 +75,57 @@ class ProxyStorage:
 
     def fetch(self, selectors: list[Selector]):
         """Find the slot routing each selector by calling the proxy with it under an
-        EIP-3155 trace. Calling the method directly works even if `implementation` is
-        not installed.
-
-        Of the proxy's storage reads during each call, the dispatch read is taken to be
-        the first that best fits, in order: a key derived from the selector (a solidity
-        mapping, or a keccak of the selector with a namespace); a value the proxy then
-        delegates to; a value whose code the proxy then checks, as solidity does before
-        a call, even when that check reverts; a key no other selector reads. A proxy migrated from ERC-1822 that
-        reads its old implementation slot first, or a delegate reading proxy storage,
-        fits none of them. A selector with no read that fits fails. The rehearsal checks
-        the result independently."""
-        selectors = list(selectors)
-        proxy_address = self.address.lower()
+        EIP-3155 trace, then calling it again with each slot of its storage read, in
+        turn, pointed at a stub delegate. The first slot that routes the call to the
+        stub is the selector's, unless it routes another selector too, as an
+        implementation slot holding a dispatcher does. A lone selector is probed
+        beside a dummy to expose such a slot. Calling the method directly works even
+        if `implementation` is not installed. Fails if no slot routes a selector."""
+        wanted = list(dict.fromkeys(selector.selector for selector in selectors))
+        dummies = [d for d in ("0xffffffff", "0xfffffffe") if d not in wanted]
+        probed = wanted + dummies[: max(0, 2 - len(wanted))]
+        proxy = self.address.lower()
+        cache = {} if self.cache is None else self.cache
         trace = []
-        with EvmRelay(cache=self.cache, on_trace=trace.append, trace_memory=True) as relay:
-            for selector in selectors:
-                relay.call({"to": proxy_address, "data": selector.selector})
-        proxy = int(proxy_address, 16)
-        reads = {
-            selector.selector: _proxy_reads(steps, proxy, selector.selector)
-            for selector, steps in zip(selectors, _split_calls(trace))
+        with EvmRelay(cache=cache, on_trace=trace.append) as relay:
+            for selector in probed:
+                relay.call({"to": proxy, "data": selector})
+        candidates = {
+            selector: iter(_proxy_reads(steps, int(proxy, 16)).items())
+            for selector, steps in zip(probed, _split_calls(trace), strict=True)
         }
-        readers = {}
-        for selector, selector_reads in reads.items():
-            for read in selector_reads:
-                readers.setdefault(read.key, set()).add(selector)
-        for selector, selector_reads in reads.items():
-            fits = [
-                r
-                for r in selector_reads
-                if r.keyed_by_selector or r.delegated or r.inspected or len(readers[r.key]) == 1
-            ]
-            if not fits:
-                raise click.ClickException(f"{self.address}: no storage read looks like the dispatch for {selector}")
-            read = min(fits, key=lambda r: (not r.keyed_by_selector, not r.delegated, not r.inspected))
-            self.storage_keys[selector] = f"0x{read.key:064x}"
-            if read.value is not None:
-                self.storage_values[selector] = f"0x{read.value:064x}"
+        stub = {_STUB: {"code": delegate_stub(_STUB)}}
+        routed = f"0x{_STUB[2:].rjust(64, '0')}"
+        restore = {}  # the slot the last attempt pointed at the stub, as it was
+        shared = set()  # slots that route more than one selector
+        claims = {}  # slot -> the selector it routes
+        found = {}  # selector -> (slot, value)
+        queue = list(probed)
+        with EvmRelay(cache=cache, json_output=True) as relay:
+
+            def routes(selector: str, key: str, value: str) -> bool:
+                nonlocal restore
+                overrides = {**stub, proxy: {"stateDiff": {**restore, key: routed}}}
+                result = json.loads(relay.call({"to": proxy, "data": selector, "stateOverrides": overrides}))
+                restore = {key: value}
+                return int(result["status"], 16) == 1 and result["returnData"] == routed
+
+            while queue:
+                selector = queue.pop()
+                # Resumes where this selector left off, should a later one share its slot.
+                for key, value in candidates[selector]:
+                    if key in shared or not routes(selector, key, value):
+                        continue
+                    other = claims.pop(key, None)
+                    if other is not None:
+                        shared.add(key)
+                        del found[other]
+                        queue.append(other)
+                        continue
+                    claims[key] = selector
+                    found[selector] = (key, value)
+                    break
+        for selector in wanted:
+            if selector not in found:
+                raise click.ClickException(f"{self.address}: no storage read routes {selector} to a delegate")
+            self.storage_keys[selector], self.storage_values[selector] = found[selector]

@@ -50,18 +50,16 @@ class EvmRelay:
     ``json_output`` runs ``evm -nxs``, whose result lines are JSON objects that
     also report the block values each request read. ``on_trace`` receives each
     line of evm's EIP-3155 trace, parsed, over a pipe rather than a file; every
-    line has been delivered once the relay is closed. ``trace_memory`` adds each
-    step's ``memory``."""
+    line has been delivered once the relay is closed."""
 
-    def __init__(self, cache: dict | None = None, json_output: bool = False, on_trace=None, trace_memory: bool = False):
+    def __init__(self, cache: dict | None = None, json_output: bool = False, on_trace=None):
         self.cache = {} if cache is None else cache
         args = ["evm", "-nxs" if json_output else "-nx"]
         trace_write = None
         self._tracer = None
         if on_trace is not None:
             trace_read, trace_write = os.pipe()
-            args += ["-t", "-m"] if trace_memory else ["-t"]
-            args += ["-T", f"/dev/fd/{trace_write}"]
+            args += ["-t", "-T", f"/dev/fd/{trace_write}"]
             # Drained concurrently: a full pipe would block evm while we wait on its stdout.
             self._tracer = threading.Thread(target=_read_trace, args=(trace_read, on_trace), daemon=True)
             self._tracer.start()

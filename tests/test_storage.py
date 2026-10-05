@@ -90,8 +90,8 @@ MIGRATED_PROXY_CODE = f"{PUSH32}{IMPLEMENTATION_SLOT}{SLOAD}{POP}" + (
     .replace(f"{PUSH1}54", f"{PUSH1}78")
 )
 XOR_KEY = "aa" * 32
-# Reads slot 0, then delegates to the address at msg.sig ^ XOR_KEY: a key that isn't
-# derived from the selector in any way slot detection recognises.
+# Reads slot 0, then delegates to the address at msg.sig ^ XOR_KEY: a key that no
+# storage layout convention derives from the selector.
 XOR_LOOKUP = "5f5450" "5f3560e01c7f" + XOR_KEY + "1854"
 FORWARD = "365f5f37" "5f5f365f845af4" "3d5f5f3e" "3d5ff3"  # DELEGATECALL the address on the stack
 XOR_PROXY_CODE = XOR_LOOKUP + FORWARD
@@ -154,8 +154,7 @@ def test_finds_the_mapping_behind_an_erc1822_implementation_slot(monkeypatch):
 
 
 @pytest.mark.timeout(5)
-def test_prefers_the_read_it_delegates_to(monkeypatch):
-    # One selector, so every key is unique to it: only the delegation tells them apart.
+def test_finds_the_read_it_delegates_to(monkeypatch):
     monkeypatch.setenv("ETH_RPC_URL", "http://mock.rpc/test")
     storage = probe(XOR_PROXY_CODE, {"0x0": word(OLD_IMPLEMENTATION), xor_slot(LINKED): word(DELEGATE)}, [LINKED])
 
@@ -164,7 +163,7 @@ def test_prefers_the_read_it_delegates_to(monkeypatch):
 
 
 @pytest.mark.timeout(5)
-def test_skips_keys_every_selector_reads(monkeypatch):
+def test_passes_a_slot_every_selector_reads(monkeypatch):
     monkeypatch.setenv("ETH_RPC_URL", "http://mock.rpc/test")
     storage = probe(XOR_PROXY_CODE, {"0x0": word(OLD_IMPLEMENTATION)}, [LINKED, UNLINKED])
 
@@ -172,9 +171,9 @@ def test_skips_keys_every_selector_reads(monkeypatch):
 
 
 @pytest.mark.timeout(5)
-def test_fails_when_no_read_fits(monkeypatch):
+def test_fails_when_no_read_routes(monkeypatch):
     monkeypatch.setenv("ETH_RPC_URL", "http://mock.rpc/test")
-    with pytest.raises(click.ClickException, match=f"dispatch for {LINKED}"):
+    with pytest.raises(click.ClickException, match=f"routes {LINKED} to a delegate"):
         probe("5f545000", {}, [LINKED, UNLINKED])  # both read only slot 0
 
 
@@ -213,9 +212,8 @@ def metadata_slot(selector: str, key: bytes) -> str:
 
 
 @pytest.mark.timeout(5)
-def test_delegation_picks_among_slots_keyed_by_selector(monkeypatch):
-    # Both reads are keyed by the selector through a nested mapping, so only the
-    # delegation tells the route from the flag read before it.
+def test_finds_the_route_after_a_flag_keyed_by_selector(monkeypatch):
+    # Both reads are keyed by the selector through a nested mapping.
     monkeypatch.setenv("ETH_RPC_URL", "http://mock.rpc/test")
     storage = probe(
         METADATA_PROXY_CODE,
@@ -229,8 +227,6 @@ def test_delegation_picks_among_slots_keyed_by_selector(monkeypatch):
 
 @pytest.mark.timeout(5)
 def test_delegation_behind_a_code_existence_check(monkeypatch):
-    # One selector, so every key is unique to it: only the delegation, past the check,
-    # tells the route from slot 0.
     monkeypatch.setenv("ETH_RPC_URL", "http://mock.rpc/test")
     storage = probe(CHECKED_PROXY_CODE, {"0x0": word(OLD_IMPLEMENTATION), xor_slot(LINKED): word(DELEGATE)}, [LINKED])
 
@@ -240,7 +236,7 @@ def test_delegation_behind_a_code_existence_check(monkeypatch):
 
 @pytest.mark.timeout(5)
 def test_code_existence_check_marks_a_route_with_no_code(monkeypatch):
-    # The check reverts before any DELEGATECALL; checking the address it read still marks the route.
+    # The check reverts before any DELEGATECALL, but passes for the stub standing in for it.
     monkeypatch.setenv("ETH_RPC_URL", "http://mock.rpc/test")
     storage = probe(CHECKED_PROXY_CODE, {"0x0": word(OLD_IMPLEMENTATION), xor_slot(LINKED): word(CODELESS)}, [LINKED])
 
@@ -249,7 +245,7 @@ def test_code_existence_check_marks_a_route_with_no_code(monkeypatch):
 
 
 @pytest.mark.timeout(5)
-def test_delegation_outranks_a_code_check(monkeypatch):
+def test_passes_a_code_check_of_another_slot(monkeypatch):
     # The proxy takes the code hash of slot 0's address, but delegates to the route's.
     monkeypatch.setenv("ETH_RPC_URL", "http://mock.rpc/test")
     storage = probe(HASHING_PROXY_CODE, {"0x0": word(OLD_IMPLEMENTATION), xor_slot(LINKED): word(DELEGATE)}, [LINKED])
@@ -356,3 +352,26 @@ def test_a_zero_selector_is_not_slot_zero(monkeypatch):
 
     assert storage.storage_keys == {ZERO_SELECTOR: mapping_slot(ZERO_SELECTOR), LINKED: mapping_slot(LINKED)}
     assert storage.storage_values == {ZERO_SELECTOR: "0x" + "00" * 32, LINKED: word(DELEGATE)}
+
+
+DISPATCHER = "0x" + "0a" * 20
+# An ERC-1822 proxy delegating every call to the implementation at its slot, here
+# the reference proxy, which dispatches through delegates[msg.sig] in the same storage.
+ERC1822_PROXY_CODE = f"{PUSH32}{IMPLEMENTATION_SLOT}{SLOAD}" + FORWARD
+
+
+@pytest.mark.timeout(5)
+@pytest.mark.parametrize("selectors", [[LINKED, UNLINKED], [LINKED], [UNLINKED]])
+def test_finds_the_route_behind_a_delegated_dispatcher(monkeypatch, selectors):
+    # Pointing the implementation slot at the stub routes any selector, even alone.
+    monkeypatch.setenv("ETH_RPC_URL", "http://mock.rpc/test")
+    storage = probe(
+        ERC1822_PROXY_CODE,
+        {"0x" + IMPLEMENTATION_SLOT: word(DISPATCHER), mapping_slot(LINKED): word(DELEGATE)},
+        selectors,
+        {DISPATCHER: ERC8167_PROXY_CODE},
+    )
+
+    values = {LINKED: word(DELEGATE), UNLINKED: "0x" + "00" * 32}
+    assert storage.storage_keys == {s: mapping_slot(s) for s in selectors}
+    assert storage.storage_values == {s: values[s] for s in selectors}
