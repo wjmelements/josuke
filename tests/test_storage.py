@@ -73,6 +73,21 @@ def test_fetch(eth_rpc):
     assert storage.storage_values == {s.selector: "0x" + "00" * 32 for s in selectors}
 
 
+@pytest.mark.timeout(2)
+def test_fetch_batches_the_routes_and_never_fetches_the_stub(eth_rpc):
+    selectors = [f"0x{i:08x}" for i in range(1, 6)]
+    eth_rpc.set_code(PROXY_ADDRESS, ERC8167_PROXY_CODE)
+    eth_rpc.set_code(DELEGATE, "00")
+    for selector in selectors:
+        eth_rpc.set_storage(PROXY_ADDRESS, mapping_slot(selector), word(DELEGATE))
+
+    ProxyStorage(PROXY_ADDRESS).fetch([Selector(s, f"f{s}()") for s in selectors])
+
+    posts = [post if isinstance(post, list) else [post] for post in eth_rpc.calls]
+    assert [len(post) for post in posts if post[0]["method"] == "eth_getStorageAt"] == [len(selectors)]
+    assert {req["params"][0] for post in posts for req in post if req["params"]} == {PROXY_ADDRESS.lower(), DELEGATE}
+
+
 # keccak("eip1967.proxy.implementation") - 1, where ERC-1822 kept its implementation too
 IMPLEMENTATION_SLOT = "360894a13ba1a3210667c828492db98dca3e2076cc3735a920a3ca505d382bbc"
 # The reference proxy, first reading the implementation slot it was migrated from.

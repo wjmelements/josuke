@@ -76,7 +76,8 @@ class ProxyStorage:
         dummies = [d for d in ("0xffffffff", "0xfffffffe") if d not in wanted]
         probed = wanted + dummies[: max(0, 2 - len(wanted))]
         proxy = self.address.lower()
-        stub = {_STUB: {"code": delegate_stub(_STUB)}}
+        # A whole account, so evm fetches none of it.
+        stub = {_STUB: {"code": delegate_stub(_STUB), "nonce": "0x0", "balance": "0x0"}}
         routed = f"0x{_STUB[2:].rjust(64, '0')}"
         known = {}  # the proxy's storage, as read so far
         trace = []
