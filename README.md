@@ -35,6 +35,7 @@ josuke verify                    # check the ledger against the chain in $ETH_RP
 josuke accept                    # after migrating, merge `proposed` into `current`
 josuke audit                     # cross-check every delegate ever installed against the ledger
 josuke check                     # offline: what the working tree would change, for pull requests
+josuke abi <address>             # print the proxy's ABI, merged from its facets
 ```
 
 Pass `-f/--file` to any command to point at a ledger other than `./josuke.json`.
@@ -155,6 +156,13 @@ For ordinary pull requests, run without `--strict`: source changes relative to a
 deployment are expected. CI needs the recorded commits, submodules and their
 Solidity compiler versions available locally. Build scripts and sources are
 executed, so run untrusted pull requests without credentials.
+
+`abi` prints a proxy's ABI, merged from the facets its `facetSrc` resolves to in
+the working tree. Each function appears once per selector; a selector exported by two facets is
+warned about and the first facet's entry kept. Events and errors appear once
+each. Facets' constructors, `fallback` and `receive` are left out, since the
+proxy never dispatches to them, and `selectors()` is added when no facet
+implements it, as `deploy` would generate it.
 
 `deploy` builds with `forge` and broadcasts with `cast`, sending its
 deployments together and reporting each as it confirms. It reads the
