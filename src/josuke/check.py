@@ -23,11 +23,13 @@ from collections import Counter, namedtuple
 from os import environ
 
 import click
+from eth_abi import encode as abi_encode
 from eth_abi.exceptions import EncodingError
 from eth_utils import to_checksum_address
 
 from .deploy import (
     constructor_inputs,
+    coerce_input,
     existing_deployment,
     facet_from_source_id,
     facet_initcode,
@@ -39,7 +41,8 @@ from .deploy import (
 from .erc8167 import SELECTORS_SELECTOR, generated_selectors, selectors_method
 from .evm import evm_artifact
 from .forge import get_forge_config
-from .layout import compiler_version, storage_layouts
+from .layout import storage_layouts
+from .selectors import canonical_type
 from .ledger import load_ledger, validate_ledger
 from .proc import run
 from .worktree import SourceTrees
@@ -98,19 +101,13 @@ def _build_context(root: pathlib.Path) -> str:
     return " · ".join(parts)
 
 
-def _built_solc_version(root: pathlib.Path) -> str | None:
-    """The solc version of the build in `root`, for projects that don't pin one."""
-    out = root / get_forge_config(root).get("out", "out")
-    return next(filter(None, map(compiler_version, sorted(out.glob("*/*.json")))), None)
-
-
 def _check_code_size(source: str, runtime: str, findings: Findings) -> None:
     size = len(runtime.removeprefix("0x")) // 2
     if size > MAX_CODE_SIZE:
         findings.fail(f"{source} runtime code is {size} bytes; exceeds {MAX_CODE_SIZE} bytes (EIP-170)")
 
 
-def _resolve(entry: dict, root: pathlib.Path, solc_version: str | None, findings: Findings) -> tuple[dict, list[Decl]] | None:
+def _resolve(entry: dict, root: pathlib.Path, findings: Findings) -> tuple[dict, list[Decl]] | None:
     """(source_id -> (Facet, [Selector], storage layout or None for `.evm`),
     the storage they declare) at HEAD, or None if `facetSrc` doesn't resolve."""
     proxy = to_checksum_address(entry["address"])
@@ -139,7 +136,7 @@ def _resolve(entry: dict, root: pathlib.Path, solc_version: str | None, findings
         runtime = selectors_method(generated_selectors(list(selectors.values())))
         _check_code_size(f"{proxy} generated selectors()", runtime.hex(), findings)
     try:
-        layouts, namespaces = storage_layouts(root, facets, solc_version)
+        layouts, namespaces = storage_layouts(root, facets)
     except click.ClickException as e:
         findings.fail(f"{proxy}: cannot read storage layouts: {e.message}")
         return None
@@ -152,90 +149,105 @@ def _position(start: int) -> str:
     return f"slot {slot if slot < 2**64 else hex(slot)}" + (f" offset {offset}" if offset else "")
 
 
-def _shape(types: dict, type_id: str, path: tuple = ()) -> tuple:
-    """A type as it sits in storage, comparable across commits: solc's type ids
-    carry AST ids, and struct labels the contract that happens to define them."""
-    t = types[type_id]
-    size = int(t["numberOfBytes"])
-    if type_id in path:
-        return ("recursive", size, path.index(type_id))
-    path = (*path, type_id)
-    encoding = t["encoding"]
-    if encoding == "mapping":
-        return ("mapping", size, _shape(types, t["key"], path), _shape(types, t["value"], path))
-    if encoding == "bytes":
-        return ("bytes", size)
-    if encoding == "dynamic_array":
-        return ("dynamic_array", size, _shape(types, t["base"], path))
-    if "members" in t:
-        members = tuple((m["label"], int(m["slot"]), m["offset"], _shape(types, m["type"], path)) for m in t["members"])
-        return ("struct", size, members)
-    if "base" in t:
-        return ("array", size, _shape(types, t["base"], path), int(re.search(r"\[(\d+)\]$", t["label"])[1]))
-    label = t.get("underlying", t["label"]).removesuffix(" payable")
-    if label.startswith("contract "):
-        label = "address"
-    elif label.startswith("enum "):
-        label = "enum"
-    elif not _ELEMENTARY.match(label):
-        label = "value"  # a user-defined value type
-    return ("value", size, label)
+def _shape(types: dict, type_id: str) -> tuple:
+    """A compact type graph with local indices instead of solc's unstable AST ids.
+
+    Each type appears once, including recursive and multiply referenced types.
+    Keeping edges as indices also makes equality and hashing bounded by graph size.
+    """
+    nodes = []
+    indices = {}
+
+    def add(type_id):
+        if type_id in indices:
+            return indices[type_id]
+        index = indices[type_id] = len(nodes)
+        nodes.append(None)
+        t = types[type_id]
+        size = int(t["numberOfBytes"])
+        encoding = t["encoding"]
+        if encoding == "mapping":
+            node = ("mapping", size, add(t["key"]), add(t["value"]))
+        elif encoding == "bytes":
+            node = ("bytes", size)
+        elif encoding == "dynamic_array":
+            node = ("dynamic_array", size, add(t["base"]))
+        elif "members" in t:
+            members = tuple((m["label"], int(m["slot"]), m["offset"], add(m["type"])) for m in t["members"])
+            node = ("struct", size, members)
+        elif "base" in t:
+            node = ("array", size, add(t["base"]), int(re.search(r"\[(\d+)\]$", t["label"])[1]))
+        elif "enumMembers" in t:
+            node = ("enum", size, tuple(t["enumMembers"]))
+        else:
+            label = t.get("underlying", t["label"]).removesuffix(" payable")
+            if label.startswith("contract "):
+                label = "address"
+            elif not _ELEMENTARY.match(label):
+                label = "value"
+            node = ("value", size, label)
+        nodes[index] = node
+        return index
+
+    add(type_id)
+    return tuple(nodes)
 
 
 def _fit(old: tuple, new: tuple, notes: set) -> bool:
-    """Whether storage written as shape `old` reads back correctly as `new`.
-    Adds "renamed" or "grown" to `notes` for the differences that allows."""
+    """Whether `old` storage reads back correctly as `new`; note renames/growth."""
     compared = set()
 
-    def fits(old, new, old_path=(), new_path=()):
-        # Recursive structs refer to an ancestor by position, never by solc's AST id.
-        if old[0] == "recursive":
-            old = old_path[old[2]]
-        if new[0] == "recursive":
-            new = new_path[new[2]]
-        pair = (id(old), id(new))
+    def fits(old_id, new_id):
+        pair = (old_id, new_id)
         if pair in compared:
             return True
         compared.add(pair)
-        kind = old[0]
-        if kind != new[0]:
+        a, b = old[old_id], new[new_id]
+        kind = a[0]
+        if kind != b[0]:
             return False
-        old_path, new_path = (*old_path, old), (*new_path, new)
-
-        def child(a, b):
-            return fits(a, b, old_path, new_path)
-
         if kind == "mapping":
-            # Every value has slots of its own, so a value may grow.
-            return old[2] == new[2] and child(old[3], new[3])
+            return fits(a[2], b[2]) and fits(a[3], b[3])
         if kind in ("array", "dynamic_array"):
             # Elements sit one after another: their stride must not change.
-            if old[2][1] != new[2][1] or new[1] < old[1] or not child(old[2], new[2]):
+            if old[a[2]][1] != new[b[2]][1] or b[1] < a[1] or not fits(a[2], b[2]):
                 return False
             if kind == "array":
-                if new[3] < old[3]:
+                if b[3] < a[3]:
                     return False
-                if new[3] > old[3]:
+                if b[3] > a[3]:
                     notes.add("grown")
             return True
+        if kind == "enum":
+            if a[1] != b[1] or a[2] != b[2][:len(a[2])]:
+                return False
+            if len(b[2]) > len(a[2]):
+                notes.add("grown")
+            return True
         if kind == "struct":
-            if len(new[2]) < len(old[2]):
+            if len(b[2]) < len(a[2]):
                 return False
             # A same-type swap must not pass as two renames.
-            was_at = {label: at for label, *at, _ in old[2]}
-            if any(was_at.get(label, at) != at for label, *at, _ in new[2]):
+            was_at = {label: at for label, *at, _ in a[2]}
+            if any(was_at.get(label, at) != at for label, *at, _ in b[2]):
                 return False
-            for (old_label, *old_at, old_shape), (new_label, *new_at, new_shape) in zip(old[2], new[2]):
-                if old_at != new_at or not child(old_shape, new_shape):
+            for (old_label, *old_at, old_type), (new_label, *new_at, new_type) in zip(a[2], b[2]):
+                if old_at != new_at or not fits(old_type, new_type):
                     return False
                 if old_label != new_label:
                     notes.add("renamed")
-            if new[1] != old[1] or len(new[2]) > len(old[2]):
+            if b[1] != a[1] or len(b[2]) > len(a[2]):
                 notes.add("grown")
             return True
-        return old == new
+        return a == b
 
-    return fits(old, new)
+    return fits(0, 0)
+
+
+def _same_shape(a: tuple, b: tuple) -> bool:
+    # Equivalent graphs can share their child types differently.
+    notes = set()
+    return _fit(a, b, notes) and _fit(b, a, notes) and not notes
 
 
 def _declarations(layouts: dict) -> list[Decl]:
@@ -269,7 +281,7 @@ def _check_storage(proxy: str, resolved: dict, declared: list[Decl], findings: F
                 break  # sorted by first byte: nothing later overlaps `a`
             if a.source == b.source:
                 continue
-            if (a.start, a.end, a.label, a.shape) == (b.start, b.end, b.label, b.shape):
+            if (a.start, a.end, a.label) == (b.start, b.end, b.label) and _same_shape(a.shape, b.shape):
                 shared.add(a.start // 32)
                 continue
             findings.fail(
@@ -325,9 +337,8 @@ class Baselines:
     """The storage recorded deployments declared, read from their commits checked
     out without a build: solc's analysis alone yields the layout."""
 
-    def __init__(self, root: pathlib.Path, solc_version: str | None):
+    def __init__(self, root: pathlib.Path):
         self.root = root
-        self.solc_version = solc_version
         self._trees: SourceTrees | None = None
         # (commit, sources) -> declarations; namespaces depend on the whole set's imports
         self._declared: dict = {}
@@ -342,7 +353,7 @@ class Baselines:
                 raise click.ClickException(
                     f"cannot check out {commit[:7]} (a shallow clone needs it fetched): {e.message}"
                 )
-            layouts, namespaces = storage_layouts(tree, [facet_from_source_id(s) for s in source_ids], self.solc_version)
+            layouts, namespaces = storage_layouts(tree, [facet_from_source_id(s) for s in sorted(source_ids)])
             self._declared[(commit, source_ids)] = _declarations(layouts | namespaces)
         return self._declared[(commit, source_ids)]
 
@@ -397,8 +408,12 @@ def _initcode_hash(facet, root, recorded: dict, proxy: str, findings: Findings) 
     args = recorded.get("constructorArgs") or {}
     try:
         if facet.kind == "sol":
-            missing = [arg["name"] for arg in constructor_inputs(facet, root) if arg["name"] not in args]
+            inputs = constructor_inputs(facet, root)
+            missing = [arg["name"] for arg in inputs if arg["name"] not in args]
             if missing:
+                for arg in inputs:
+                    if arg["name"] in args:
+                        abi_encode([canonical_type(arg)], [coerce_input(arg, args[arg["name"]])])
                 return None, missing
         initcode, _ = facet_initcode(facet, root, args, prompt=False)
     except click.ClickException as e:
@@ -560,8 +575,7 @@ def check_ledger(ledger_path, root: pathlib.Path, chain: str | None) -> tuple[li
         findings.fail(f"build: {e.message}")
         return lines, findings
 
-    solc_version = _built_solc_version(root)
-    resolved = [_resolve(entry, root, solc_version, findings) for entry in ledger]
+    resolved = [_resolve(entry, root, findings) for entry in ledger]
     storage_lines = [
         _check_storage(to_checksum_address(entry["address"]), *r, findings) if r is not None else None
         for entry, r in zip(ledger, resolved)
@@ -569,7 +583,7 @@ def check_ledger(ledger_path, root: pathlib.Path, chain: str | None) -> tuple[li
 
     recorded_chains = {c for entry in ledger for c in entry.get("deployments", {})}
     chains = [chain] if chain else sorted(recorded_chains, key=int) or [None]
-    baselines = Baselines(root, solc_version)
+    baselines = Baselines(root)
     try:
         for c in chains:
             run_deployed: dict = {}  # initcodeHash -> record, shared across proxies as `deploy` does

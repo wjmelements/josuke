@@ -247,6 +247,20 @@ def test_evm_runtime_limit_and_missing_artifact_warning(tmp_path, monkeypatch, s
         assert "WARNING" not in result.output
 
 
+@pytest.mark.parametrize("amount", [-1, 1])
+def test_missing_constructor_arg_does_not_hide_incompatible_recorded_arg(tmp_path, monkeypatch, amount):
+    project = tmp_path / "project"
+    (project / "src").mkdir(parents=True)
+    (project / "foundry.toml").write_text('[profile.default]\nsolc="0.8.28"\n')
+    (project / "src/A.sol").write_text('pragma solidity 0.8.28; contract A { constructor(uint256 amount, uint256 salt) {} }')
+    monkeypatch.chdir(project)
+    record = {"address": OTHER, "codeHash": "0x" + "00" * 32, "initcodeHash": "0x" + "00" * 32,
+              "constructorArgs": {"amount": amount}}
+    result = _check(tmp_path, [_entry(["src/A.sol:A"], current={"src/A.sol:A": record})])
+    assert result.exit_code == (1 if amount < 0 else 0), result.output
+    assert ("constructorArgs do not encode" if amount < 0 else "deploy asks for salt") in result.output
+
+
 # -- storage -----------------------------------------------------------------
 
 

@@ -187,24 +187,27 @@ def test_growing_a_struct_over_the_next_variable_fails(deployed):
     assert "declares struct Layout.S single_ over uint256 next_" in result.output
 
 
-def test_a_struct_may_move_to_another_contract():
-    old = ("struct", 64, (("a", 0, 0, ("value", 32, "uint256")), ("b", 1, 0, ("value", 32, "address"))))
-    assert _fit(old, old, notes := set()) and not notes
+def test_a_struct_may_move_to_another_contract(deployed):
+    check = deployed("struct S { uint256 a; address b; } S internal data;", {"A": ""})
+    result = check("", {"A": "struct S { uint256 a; address b; } S internal data;"})
+    assert result.exit_code == 0, result.output
+    assert "WARNING" not in result.output
 
 
 def test_swapping_struct_members_of_one_type_fails():
     u = ("value", 32, "uint256")
-    old = ("struct", 64, (("a", 0, 0, u), ("b", 1, 0, u)))
-    assert not _fit(old, ("struct", 64, (("b", 0, 0, u), ("a", 1, 0, u))), set())
-    assert _fit(old, ("struct", 64, (("x", 0, 0, u), ("b", 1, 0, u))), notes := set())
+    old = (("struct", 64, (("a", 0, 0, 1), ("b", 1, 0, 1))), u)
+    assert not _fit(old, (("struct", 64, (("b", 0, 0, 1), ("a", 1, 0, 1))), u), set())
+    assert _fit(old, (("struct", 64, (("x", 0, 0, 1), ("b", 1, 0, 1))), u), notes := set())
     assert notes == {"renamed"}
 
 
 def test_growing_array_elements_shifts_them():
-    small = ("struct", 32, (("a", 0, 0, ("value", 32, "uint256")),))
-    big = ("struct", 64, (("a", 0, 0, ("value", 32, "uint256")), ("b", 1, 0, ("value", 32, "uint256"))))
-    assert not _fit(("dynamic_array", 32, small), ("dynamic_array", 32, big), set())
-    assert _fit(("mapping", 32, ("value", 32, "uint256"), small), ("mapping", 32, ("value", 32, "uint256"), big), notes := set())
+    small = ("struct", 32, (("a", 0, 0, 2),))
+    big = ("struct", 64, (("a", 0, 0, 2), ("b", 1, 0, 2)))
+    u = ("value", 32, "uint256")
+    assert not _fit((("dynamic_array", 32, 1), small, u), (("dynamic_array", 32, 1), big, u), set())
+    assert _fit((("mapping", 32, 2, 1), small, u), (("mapping", 32, 2, 1), big, u), notes := set())
     assert notes == {"grown"}
 
 
@@ -326,3 +329,36 @@ def test_fixed_array_length_changes_are_not_hidden_by_slot_rounding(deployed):
     result = check("", {"A": "uint8[1] internal values;", "B": "uint8[3] internal values;"})
     assert result.exit_code == 1, result.output
     assert "over src/A.sol:A's uint8[1] values" in result.output
+
+
+@pytest.mark.parametrize("members, passes", [("A, B, C", True), ("A, B, C, D", True), ("A, B", False), ("A, C, B", False)])
+def test_enum_ordinals_keep_their_meaning(deployed, members, passes):
+    check = deployed("enum E { A, B, C } E internal status_;", {"A": ""})
+    result = check("enum E { " + members + " } E internal status_;", {"A": ""})
+    assert result.exit_code == (0 if passes else 1), result.output
+
+
+def test_shared_type_graph_does_not_expand_exponentially(deployed):
+    layout = "struct S0 { uint256 value; }\n" + "\n".join(
+        f"struct S{i} {{ mapping(uint256 => S{i-1}) left; mapping(uint256 => S{i-1}) right; }}" for i in range(1, 17)
+    ) + "\nS16 internal tree;"
+    check = deployed(layout, {"A": ""})
+    result = check(layout.replace("uint256 value", "int256 value"), {"A": ""})
+    assert result.exit_code == 1, result.output
+    assert "over struct Layout.S16 tree" in result.output
+    from pathlib import Path
+    from josuke.check import _declarations
+    from josuke.layout import storage_layouts
+
+    layouts, _ = storage_layouts(Path.cwd(), [facet_from_source_id("src/A.sol:A")])
+    shape = _declarations(layouts)[0].shape
+    assert len(repr(shape)) < 8000  # The source's shared graph must stay compact, including hashing.
+
+
+def test_equivalent_graphs_can_share_types_differently(deployed):
+    a = "struct S { uint256 value; } struct Pair { S a; S b; } Pair internal pair;"
+    b = "struct S { uint256 value; } struct T { uint256 value; } struct Pair { S a; T b; } Pair internal pair;"
+    check = deployed(a, {"A": ""})
+    result = check("", {"A": a, "B": b})
+    assert result.exit_code == 0, result.output
+    assert "WARNING" not in result.output

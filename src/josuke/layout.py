@@ -19,6 +19,7 @@ from .forge import get_forge_config
 from .proc import run
 
 _VERSION = re.compile(r"^\d+\.\d+\.\d+$")
+_ENUM = re.compile(r"^t_enum\(.*\)(\d+)$")
 _UDVT = re.compile(r"^t_userDefinedValueType\(.*\)(\d+)$")
 
 
@@ -35,13 +36,12 @@ def _svm_dirs() -> list[pathlib.Path]:
 
 
 def solc_binary(root: pathlib.Path, fallback_version: str | None = None) -> str:
-    """The solc `forge` would compile `root` with: foundry.toml's `solc` (a
-    version or a path), else `fallback_version`."""
+    """Locate the configured compiler or a version resolved from this checkout."""
     configured = get_forge_config(root).get("solc")
     version = configured or fallback_version
     if not version:
         raise click.ClickException(
-            f"{root}: no `solc` in foundry.toml and no build to take the compiler version from"
+            f"{root}: no configured or resolved Solidity compiler"
         )
     version = version.split("+", 1)[0]
     if not _VERSION.match(version):
@@ -51,14 +51,6 @@ def solc_binary(root: pathlib.Path, fallback_version: str | None = None) -> str:
         if binary.exists():
             return str(binary)
     raise click.ClickException(f"solc {version} is not installed; a `forge build` that uses it installs it")
-
-
-def compiler_version(artifact: pathlib.Path) -> str | None:
-    """The solc version a forge artifact was built with."""
-    try:
-        return json.loads(artifact.read_text())["metadata"]["compiler"]["version"]
-    except (OSError, ValueError, KeyError, TypeError):
-        return None
 
 
 def _walk(node, kind: str):
@@ -75,6 +67,7 @@ def _walk(node, kind: str):
 
 def _compile(root: pathlib.Path, sources: dict, selection: dict, fallback_version: str | None) -> dict:
     """solc's analysis of `sources`: ASTs, and the storage layouts `selection` asks for."""
+    config = get_forge_config(root)
     standard_json = {
         "language": "Solidity",
         "sources": sources,
@@ -85,9 +78,12 @@ def _compile(root: pathlib.Path, sources: dict, selection: dict, fallback_versio
         },
     }
     solc = solc_binary(root, fallback_version)
-    out = json.loads(
-        run([solc, "--standard-json", "--base-path", ".", "--allow-paths", "."], root, stdin=json.dumps(standard_json))
-    )
+    includes = config.get("include_paths") or []
+    allowed = [".", *(config.get("allow_paths") or []), *(config.get("libs") or []), *includes]
+    command = [solc, "--standard-json", "--base-path", ".", "--allow-paths", ",".join(allowed)]
+    for path in includes:
+        command.extend(["--include-path", path])
+    out = json.loads(run(command, root, stdin=json.dumps(standard_json)))
     errors = [e.get("formattedMessage", e.get("message", "")).strip() for e in out.get("errors", []) if e.get("severity") == "error"]
     if errors:
         raise click.ClickException("solc: " + "\n".join(errors))
@@ -95,18 +91,19 @@ def _compile(root: pathlib.Path, sources: dict, selection: dict, fallback_versio
 
 
 def _layout(out: dict, path: str, contract: str) -> dict | None:
-    """`contract`'s storage layout from solc output `out`. A user-defined value
-    type's entry gains `underlying`: solc labels it by name only, so
-    `type Amount is uint256` and `is int256` look alike."""
+    """Enrich solc's layout with UDVT underlying types and ordered enum members."""
     found = out.get("contracts", {}).get(path, {}).get(contract)
     if found is None:
         return None
     asts = [source.get("ast") for source in out.get("sources", {}).values()]
     underlying = {n["id"]: n["underlyingType"]["typeDescriptions"]["typeString"] for n in _walk(asts, "UserDefinedValueTypeDefinition")}
+    enums = {n["id"]: [m["name"] for m in n["members"]] for n in _walk(asts, "EnumDefinition")}
     layout = found["storageLayout"]
     for type_id, t in (layout.get("types") or {}).items():
         if (match := _UDVT.match(type_id)) and int(match[1]) in underlying:
             t["underlying"] = underlying[int(match[1])]
+        if (match := _ENUM.match(type_id)) and int(match[1]) in enums:
+            t["enumMembers"] = enums[int(match[1])]
     return layout
 
 
@@ -155,25 +152,57 @@ def _namespaces(root: pathlib.Path, out: dict, fallback_version: str | None) -> 
     return namespaces
 
 
-def storage_layouts(root: pathlib.Path, facets: list, fallback_version: str | None = None) -> tuple[dict, dict]:
-    """(source_id -> solc's storage layout for the Solidity facets among `facets`,
-    "<path>:<Struct>" -> layout of each ERC-7201 namespace their sources define),
-    as the sources in `root` declare them.
-
-    A namespace counts as declared when any facet's imports define it, used or not.
-    Its annotation is trusted: the slot code actually reads is not checked."""
-    wanted = [facet for facet in facets if facet.kind == "sol"]
-    if not wanted:
-        return {}, {}
+def _facet_layouts(root: pathlib.Path, wanted: list, version: str | None) -> tuple[dict, dict]:
     selection: dict = {}
     for facet in wanted:
         selection.setdefault(facet.path, {})[facet.contract] = ["storageLayout"]
-    out = _compile(root, {path: {"urls": [path]} for path in selection}, selection, fallback_version)
-
+    out = _compile(root, {path: {"urls": [path]} for path in selection}, selection, version)
     layouts = {}
     for facet in wanted:
         layout = _layout(out, facet.path, facet.contract)
         if layout is None:
             raise click.ClickException(f"{facet.source_id}: no such contract")
         layouts[facet.source_id] = layout
-    return layouts, _namespaces(root, out, fallback_version)
+    return layouts, _namespaces(root, out, version)
+
+
+def storage_layouts(root: pathlib.Path, facets: list) -> tuple[dict, dict]:
+    """Facet and ERC-7201 layouts using this checkout's compiler configuration.
+
+    A namespace counts as declared when any facet's imports define it, used or not.
+    Its annotation is trusted: the slot code actually reads is not checked.
+    """
+    wanted = [facet for facet in facets if facet.kind == "sol"]
+    if not wanted:
+        return {}, {}
+    if get_forge_config(root).get("solc"):
+        return _facet_layouts(root, wanted, None)
+
+    # Resolve installed versions from this checkout's pragmas without a bytecode build.
+    resolved = json.loads(run(["env", "FOUNDRY_OFFLINE=true", "forge", "compiler", "resolve", "--json"], root))
+    versions = sorted(
+        [compiler["version"] for compiler in resolved.get("Solidity", [])],
+        key=lambda version: tuple(map(int, version.split("+", 1)[0].split("."))),
+        reverse=True,
+    )
+    if not versions:
+        raise click.ClickException(f"{root}: no Solidity compiler resolved; pin solc in foundry.toml")
+    if len(versions) == 1:
+        return _facet_layouts(root, wanted, versions[0])
+
+    # In a multi-version project each facet and its imports must compile together.
+    layouts, namespaces = {}, {}
+    for facet in wanted:
+        errors = []
+        for version in versions:
+            try:
+                found, annotated = _facet_layouts(root, [facet], version)
+            except click.ClickException as error:
+                errors.append(error.message)
+                continue
+            layouts.update(found)
+            namespaces.update(annotated)
+            break
+        else:
+            raise click.ClickException(f"{facet.source_id}: no resolved compiler can read its layout:\n" + "\n".join(errors))
+    return layouts, namespaces

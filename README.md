@@ -131,6 +131,8 @@ a moved, retyped or overlapped variable or member fails.
 Renames are allowed between deployments, for example `viewContractAddress` to
 `_viewContractAddress`, provided positions and types stay compatible. Facets
 installed together must agree on names, including members of ERC-7201 structs.
+Enum values keep their ordinal positions: appending values is allowed between
+deployments, but removing or reordering them fails.
 
 `legacy` records, by hand, the implementation a proxy ran before its first
 ERC-8167 migration, such as a UUPS contract:
