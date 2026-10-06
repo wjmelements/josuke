@@ -79,11 +79,10 @@ class EvmRelay:
         self._selector.register(self._stdout, selectors.EVENT_READ)
         self._out = b""
 
-    def call(self, request: dict, on_exchange=None) -> str:
+    def call(self, request: dict) -> str:
         """Run one request (a ``{"data": ...}`` create or a ``{"to": ...}`` call)
         and return evm's output line: the runtime hex for a create, ``""`` on a
-        revert, or a JSON object with ``json_output``. ``on_exchange(rpc_request,
-        rpc_response)`` sees every request/response pair, cache hits included."""
+        revert, or a JSON object with ``json_output``."""
         with span(f"evm {brief(request)}"):
             self._write(json.dumps(request))
             while True:
@@ -96,10 +95,7 @@ class EvmRelay:
                 rpc_request = json.loads(line)
                 if isinstance(rpc_request, dict) and "method" not in rpc_request:
                     return line  # a JSON result, not a state fetch
-                rpc_response = self._answer(rpc_request)
-                self._write(json.dumps(rpc_response))
-                if on_exchange is not None:
-                    on_exchange(rpc_request, rpc_response)
+                self._write(json.dumps(self._answer(rpc_request)))
 
     def _answer(self, rpc_request):
         """Resolve one JSON-RPC request (object or batch array) from the cache,
