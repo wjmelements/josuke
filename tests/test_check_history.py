@@ -77,14 +77,16 @@ def deployed(tmp_path, monkeypatch):
             }
         commit = _git(repo, "rev-parse", "HEAD")
 
-        def check(layout, facets):
+        def check(layout, facets, recorded=None):
+            """`recorded(commit, records)`: the chain's deployments; default all `current`."""
             for path in (project / "src").glob("*.sol"):
                 path.unlink()
             _write(project, layout, facets)
+            history = recorded(commit, records) if recorded else {"current": {"gitCommit": commit, "facets": records}}
             entry = {
                 "address": PROXY,
                 "facetSrc": [f"src/{name}.sol:{name}" for name in facets],
-                "deployments": {"314": {"current": {"gitCommit": commit, "facets": records}}},
+                "deployments": {"314": history},
             }
             ledger = tmp_path / "josuke.json"
             ledger.write_text(json.dumps([entry]))
@@ -190,6 +192,14 @@ def test_a_struct_may_move_to_another_contract():
     assert _fit(old, old, notes := set()) and not notes
 
 
+def test_swapping_struct_members_of_one_type_fails():
+    u = ("value", 32, "uint256")
+    old = ("struct", 64, (("a", 0, 0, u), ("b", 1, 0, u)))
+    assert not _fit(old, ("struct", 64, (("b", 0, 0, u), ("a", 1, 0, u))), set())
+    assert _fit(old, ("struct", 64, (("x", 0, 0, u), ("b", 1, 0, u))), notes := set())
+    assert notes == {"renamed"}
+
+
 def test_growing_array_elements_shifts_them():
     small = ("struct", 32, (("a", 0, 0, ("value", 32, "uint256")),))
     big = ("struct", 64, (("a", 0, 0, ("value", 32, "uint256")), ("b", 1, 0, ("value", 32, "uint256"))))
@@ -213,3 +223,60 @@ def test_renaming_a_user_defined_value_type_passes(deployed):
     check = deployed(UDVT.format(name="Amount", underlying="uint256"), {"A": READ_AMOUNT})
     result = check(UDVT.format(name="Balance", underlying="uint256"), {"A": READ_AMOUNT})
     assert result.exit_code == 0, result.output
+
+
+def test_legacy_storage_is_checked_beside_current_at_one_commit(deployed):
+    check = deployed("address internal owner_;", {"Mono": "uint256 internal legacy_;", "A": "uint256 internal a_;"})
+
+    def recorded(commit, records):
+        return {
+            "legacy": {"source": "src/Mono.sol:Mono", "gitCommit": commit},
+            "current": {"gitCommit": commit, "facets": {"src/A.sol:A": records["src/A.sol:A"]}},
+        }
+
+    result = check("address internal owner_;", {"A": "int256 internal a_;"}, recorded)
+    assert result.exit_code == 1, result.output
+    assert "over uint256 legacy_ (src/Mono.sol:Mono at legacy" in result.output
+    assert "over uint256 a_ (src/A.sol:A at current" in result.output
+
+
+def test_retired_facet_storage_is_still_checked(deployed):
+    check = deployed("address internal owner_;", {"A": "", "T": "uint256 internal tally_;"})
+
+    def recorded(commit, records):
+        retired = {"0x" + "ee" * 20: {k: v for k, v in records["src/T.sol:T"].items() if k != "address"} | {"source": "src/T.sol:T", "gitCommit": commit}}
+        return {"current": {"gitCommit": commit, "facets": {"src/A.sol:A": records["src/A.sol:A"]}}, "history": retired}
+
+    result = check("address internal owner_;", {"A": "", "F": "address internal flag_;"}, recorded)
+    assert result.exit_code == 1, result.output
+    assert "declares address flag_ over uint256 tally_ (src/T.sol:T at history" in result.output
+
+
+NAMESPACE = "/// @custom:storage-location erc7201:test.ns\nstruct NS {{ {members} }}"
+
+
+def test_namespaced_storage_is_checked_against_the_deployment(deployed):
+    check = deployed(NAMESPACE.format(members="uint256 a; uint256 b;"), {"A": ""})
+
+    result = check(NAMESPACE.format(members="uint256 a; uint256 inserted; uint256 b;"), {"A": ""})
+    assert result.exit_code == 1, result.output
+    assert "declares struct Layout.NS erc7201:test.ns over struct Layout.NS erc7201:test.ns" in result.output
+
+    result = check(NAMESPACE.format(members="uint256 a; uint256 b; uint256 c;"), {"A": ""})
+    assert result.exit_code == 0, result.output
+    assert "1 ERC-7201 namespace" in result.output
+    assert "1 grown" in result.output
+
+
+def test_one_namespace_defined_twice_must_agree(deployed):
+    check = deployed("address internal owner_;", {"A": ""})
+    a = NAMESPACE.format(members="uint256 a;").replace("{{", "{").replace("}}", "}")
+
+    result = check("address internal owner_;", {"A": a, "B": a.replace("uint256 a", "address a")})
+    assert result.exit_code == 1, result.output
+    assert "erc7201:test.ns" in result.output
+
+    # OZ's `_owner` beside a local `owner`: the same bytes, named differently.
+    result = check("address internal owner_;", {"A": a, "B": a.replace("uint256 a", "uint256 b")})
+    assert result.exit_code == 0, result.output
+    assert "name its members differently" in result.output

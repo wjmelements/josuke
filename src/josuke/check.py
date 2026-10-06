@@ -7,9 +7,9 @@ recorded hashes; `josuke verify` is what ties those to the chain.
 Blocking: the ledger breaks the schema or lists a proxy twice; `facetSrc` does
 not resolve to buildable facets; two facets `deploy` would put at different
 addresses export one selector; two facets declare different variables over
-the same storage bytes; storage that a recorded deployment (`current` or
-`proposed`) declares reads back differently at HEAD; a facet's recorded
-constructor args don't encode.
+the same storage bytes; storage that a recorded deployment (`legacy`,
+`current`, `proposed` or `history`) declares reads back differently at HEAD;
+a facet's recorded constructor args don't encode.
 
 Warned about: a variable renamed, or dropped with its data left behind.
 
@@ -101,9 +101,9 @@ def _built_solc_version(root: pathlib.Path) -> str | None:
     return next(filter(None, map(compiler_version, sorted(out.glob("*/*.json")))), None)
 
 
-def _resolve(entry: dict, root: pathlib.Path, solc_version: str | None, findings: Findings) -> dict | None:
-    """source_id -> (Facet, [Selector], storage layout or None for `.evm`) at
-    HEAD, or None if `facetSrc` doesn't resolve."""
+def _resolve(entry: dict, root: pathlib.Path, solc_version: str | None, findings: Findings) -> tuple[dict, list[Decl]] | None:
+    """(source_id -> (Facet, [Selector], storage layout or None for `.evm`),
+    the storage they declare) at HEAD, or None if `facetSrc` doesn't resolve."""
     proxy = to_checksum_address(entry["address"])
     try:
         facets = resolve_facets(entry["facetSrc"], root)
@@ -119,16 +119,17 @@ def _resolve(entry: dict, root: pathlib.Path, solc_version: str | None, findings
     if len(selectors) != len(facets):
         return None
     try:
-        layouts = storage_layouts(root, facets, solc_version)
+        layouts, namespaces = storage_layouts(root, facets, solc_version)
     except click.ClickException as e:
         findings.fail(f"{proxy}: cannot read storage layouts: {e.message}")
         return None
-    return {f.source_id: (f, selectors[f.source_id], layouts.get(f.source_id)) for f in facets}
+    resolved = {f.source_id: (f, selectors[f.source_id], layouts.get(f.source_id)) for f in facets}
+    return resolved, _declarations(layouts | namespaces)
 
 
 def _position(start: int) -> str:
     slot, offset = divmod(start, 32)
-    return f"slot {slot}" + (f" offset {offset}" if offset else "")
+    return f"slot {slot if slot < 2**64 else hex(slot)}" + (f" offset {offset}" if offset else "")
 
 
 def _shape(types: dict, type_id: str) -> tuple:
@@ -179,6 +180,11 @@ def _fit(old: tuple, new: tuple, notes: set) -> bool:
     if kind == "struct":
         if len(new[2]) < len(old[2]):
             return False
+        # A member that keeps its name keeps its place; else a swap of two
+        # members of one type would pass as two renames.
+        was_at = {label: at for label, *at, _ in old[2]}
+        if any(was_at.get(label, at) != at for label, *at, _ in new[2]):
+            return False
         for (old_label, *old_at, old_shape), (new_label, *new_at, new_shape) in zip(old[2], new[2]):
             if old_at != new_at or not _fit(old_shape, new_shape, notes):
                 return False
@@ -206,13 +212,12 @@ def _declarations(layouts: dict) -> list[Decl]:
     return sorted(out, key=lambda d: (d.start, d.end, d.source))
 
 
-def _check_storage(proxy: str, resolved: dict, findings: Findings) -> str:
+def _check_storage(proxy: str, resolved: dict, declared: list[Decl], findings: Findings) -> str:
     """Every facet runs against the proxy's one storage, so storage bytes that two
     facets both declare must hold the same variable (name and type) in both.
 
-    Sees only declared state variables: ERC-7201 namespaced structs, assembly
-    `sstore`s and `.evm` facets are invisible to it."""
-    declared = _declarations({source_id: layout for source_id, (_, _, layout) in resolved.items()})
+    Sees declared state variables and annotated ERC-7201 structs: fixed-slot
+    assembly and `.evm` facets are invisible to it."""
     unseen = [source_id for source_id, (_, _, layout) in resolved.items() if layout is None]
 
     shared = set()  # slots declared identically by more than one facet
@@ -225,13 +230,20 @@ def _check_storage(proxy: str, resolved: dict, findings: Findings) -> str:
             if (a.start, a.end, a.label, a.shape) == (b.start, b.end, b.label, b.shape):
                 shared.add(a.start // 32)
                 continue
+            if a.label.startswith("erc7201:") and (a.start, a.end, a.label) == (b.start, b.end, b.label) and _fit(a.shape, b.shape, set()) and _fit(b.shape, a.shape, set()):
+                # One namespace defined twice, as OZ's `_owner` and a local `owner`: same bytes.
+                findings.warn(f"{proxy} {a.label}: {a.source} and {b.source} name its members differently")
+                continue
             findings.fail(
                 f"{proxy} storage {_position(b.start)}: {b.source} declares {b.type} {b.label} "
                 f"over {a.source}'s {a.type} {a.label} at {_position(a.start)}"
             )
 
     checked = len(resolved) - len(unseen)
+    namespaces = len({d.label for d in declared if d.label.startswith("erc7201:")})
     line = f"  storage      {_plural(checked, 'facet')} checked, {_plural(len(shared), 'slot')} shared"
+    if namespaces:
+        line += f", {_plural(namespaces, 'ERC-7201 namespace')}"
     if unseen:
         line += f"; not visible: {', '.join(unseen)}"
     return line
@@ -244,12 +256,14 @@ def _compare_storage(proxy: str, label: str, old: list[Decl], new: list[Decl], f
     old = list({(d.start, d.end, d.label, d.shape): d for d in reversed(old)}.values())[::-1]
     new = list({(d.start, d.end, d.label, d.shape): d for d in reversed(new)}.values())[::-1]
     grown = renamed = dropped = 0
-    where = {d.label: d.start for d in new}
+    where: dict = {}  # label -> starts; independent facets may reuse a name
+    for d in new:
+        where.setdefault(d.label, set()).add(d.start)
     for o in old:
         was = f"{o.type} {o.label} ({o.source} at {label})"
-        if where.get(o.label, o.start) != o.start:
+        if o.label in where and o.start not in where[o.label]:
             # Otherwise a variable inserted before it reads as its rename.
-            findings.fail(f"{proxy} storage {_position(o.start)}: {was} moves to {_position(where[o.label])}")
+            findings.fail(f"{proxy} storage {_position(o.start)}: {was} moves to {_position(min(where[o.label]))}")
         overlapping = [n for n in new if n.start < o.end and o.start < n.end]
         if not overlapping:
             dropped += 1
@@ -277,11 +291,11 @@ class Baselines:
         self.root = root
         self.solc_version = solc_version
         self._trees: SourceTrees | None = None
-        self._layouts: dict = {}  # (commit, source_id) -> solc layout
+        # (commit, sources) -> declarations; namespaces depend on the whole set's imports
+        self._declared: dict = {}
 
-    def declarations(self, commit: str, source_ids: list[str]) -> list[Decl]:
-        missing = [source_id for source_id in source_ids if (commit, source_id) not in self._layouts]
-        if missing:
+    def declarations(self, commit: str, source_ids: frozenset) -> list[Decl]:
+        if (commit, source_ids) not in self._declared:
             try:
                 if self._trees is None:
                     self._trees = SourceTrees(self.root, build=False)
@@ -290,30 +304,46 @@ class Baselines:
                 raise click.ClickException(
                     f"cannot check out {commit[:7]} (a shallow clone needs it fetched): {e.message}"
                 )
-            layouts = storage_layouts(tree, [facet_from_source_id(s) for s in missing], self.solc_version)
-            self._layouts.update(((commit, source_id), layout) for source_id, layout in layouts.items())
-        return _declarations({source_id: self._layouts[(commit, source_id)] for source_id in source_ids})
+            layouts, namespaces = storage_layouts(tree, [facet_from_source_id(s) for s in source_ids], self.solc_version)
+            self._declared[(commit, source_ids)] = _declarations(layouts | namespaces)
+        return self._declared[(commit, source_ids)]
 
     def close(self) -> None:
         if self._trees is not None:
             self._trees.close()
 
 
-def _check_storage_history(proxy, states, resolved, baselines, findings) -> list[str]:
+def _recorded_states(history: dict) -> list[tuple[str, str, frozenset]]:
+    """(name, gitCommit, Solidity sources) of every deployment the proxy has run,
+    whose storage is still there: `legacy`, the implementation before ERC-8167,
+    then `current`, `proposed`, and retired facets grouped by commit."""
+    states = []
+    if legacy := history.get("legacy"):
+        states.append(("legacy", legacy["gitCommit"], frozenset([legacy["source"]])))
+    for name in ("current", "proposed"):
+        if state := history.get(name):
+            states.append((name, state["gitCommit"], frozenset(state["facets"])))
+    retired: dict = {}
+    for record in history.get("history", {}).values():
+        if "source" in record:  # not a generated `selectors()` delegate
+            retired.setdefault(record["gitCommit"], set()).add(record["source"])
+    states.extend(("history", commit, frozenset(sources)) for commit, sources in retired.items())
+    return [(name, commit, frozenset(s for s in sources if not s.endswith(".evm"))) for name, commit, sources in states]
+
+
+def _check_storage_history(proxy, states, head, baselines, findings) -> list[str]:
     """Compare HEAD's storage with each recorded state's. Unchanged bytecode
     doesn't mean unchanged storage: a facet that never touches a variable
     compiles the same whatever type it declares there."""
     lines = []
-    head = _declarations({source_id: layout for source_id, (_, _, layout) in resolved.items()})
     seen = set()
-    for name, state in states:
-        if not state or state["gitCommit"] in seen:
+    for name, commit, recorded in states:
+        if not recorded or (commit, recorded) in seen:
             continue
-        seen.add(state["gitCommit"])
-        label = f"{name} {state['gitCommit'][:7]}"
-        recorded = [s for s in state.get("facets", {}) if not s.endswith(".evm")]
+        seen.add((commit, recorded))
+        label = f"{name} {commit[:7]}"
         try:
-            old = baselines.declarations(state["gitCommit"], recorded)
+            old = baselines.declarations(commit, recorded)
         except click.ClickException as e:
             findings.fail(f"{proxy}: cannot read the storage at {label}: {e.message}")
             lines.append(f"  layout       vs {label}: not readable")
@@ -365,7 +395,7 @@ def _differences(head: dict, reference: dict) -> list[str]:
     return out
 
 
-def _check_proxy(entry, chain, resolved, storage_line, root, run_deployed, baselines, findings) -> list[str]:
+def _check_proxy(entry, chain, resolved, head, storage_line, root, run_deployed, baselines, findings) -> list[str]:
     """Check one proxy on one chain (None: nothing deployed anywhere yet) and
     render its section of the report."""
     proxy = to_checksum_address(entry["address"])
@@ -444,9 +474,7 @@ def _check_proxy(entry, chain, resolved, storage_line, root, run_deployed, basel
         lines.append(f"  selectors()  generated · returns {_plural(len(owners) + 1, 'selector')}")
     lines.append(storage_line)
     lines.extend(
-        _check_storage_history(
-            proxy, (("current", current), ("proposed", proposed)), resolved, baselines, findings
-        )
+        _check_storage_history(proxy, _recorded_states(history), head, baselines, findings)
     )
 
     if len(head_hashes) == len(resolved):
@@ -497,8 +525,8 @@ def check_ledger(ledger_path, root: pathlib.Path, chain: str | None) -> tuple[li
     solc_version = _built_solc_version(root)
     resolved = [_resolve(entry, root, solc_version, findings) for entry in ledger]
     storage_lines = [
-        _check_storage(to_checksum_address(entry["address"]), facets, findings) if facets is not None else None
-        for entry, facets in zip(ledger, resolved)
+        _check_storage(to_checksum_address(entry["address"]), *r, findings) if r is not None else None
+        for entry, r in zip(ledger, resolved)
     ]
 
     recorded_chains = {c for entry in ledger for c in entry.get("deployments", {})}
@@ -507,11 +535,11 @@ def check_ledger(ledger_path, root: pathlib.Path, chain: str | None) -> tuple[li
     try:
         for c in chains:
             run_deployed: dict = {}  # initcodeHash -> record, shared across proxies as `deploy` does
-            for entry, facets, storage_line in zip(ledger, resolved, storage_lines):
-                if facets is None:
+            for entry, r, storage_line in zip(ledger, resolved, storage_lines):
+                if r is None:
                     lines.extend(["", f"{to_checksum_address(entry['address'])}  ·  facetSrc does not resolve"])
                     continue
-                lines.extend(_check_proxy(entry, c, facets, storage_line, root, run_deployed, baselines, findings))
+                lines.extend(_check_proxy(entry, c, *r, storage_line, root, run_deployed, baselines, findings))
     finally:
         baselines.close()
     return lines, findings

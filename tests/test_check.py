@@ -221,20 +221,21 @@ def test_facet_ignoring_the_shared_layout_fails(tmp_path):
 
 
 def test_facets_without_a_layout_are_listed_as_not_visible():
-    from josuke.check import Findings, _check_storage
+    from josuke.check import Findings, _check_storage, _declarations
 
     layout = {
         "storage": [{"label": "owner_", "offset": 0, "slot": "0", "type": "t_address"}],
         "types": {"t_address": {"encoding": "inplace", "label": "address", "numberOfBytes": "20"}},
     }
     findings = Findings()
-    line = _check_storage(PROXY, {"a.sol:A": (None, [], layout), "impl.evm": (None, [], None)}, findings)
+    resolved = {"a.sol:A": (None, [], layout), "impl.evm": (None, [], None)}
+    line = _check_storage(PROXY, resolved, _declarations({"a.sol:A": layout}), findings)
     assert findings.failures == []
     assert line == "  storage      1 facet checked, 0 slots shared; not visible: impl.evm"
 
 
 def test_packed_variables_overlapping_at_different_offsets_fail():
-    from josuke.check import Findings, _check_storage
+    from josuke.check import Findings, _check_storage, _declarations
 
     types = {
         "t_uint64": {"encoding": "inplace", "label": "uint64", "numberOfBytes": "8"},
@@ -246,7 +247,8 @@ def test_packed_variables_overlapping_at_different_offsets_fail():
     ], "types": types}
     wide = {"storage": [{"label": "c", "offset": 0, "slot": "3", "type": "t_uint128"}], "types": types}
     findings = Findings()
-    _check_storage(PROXY, {"p.sol:P": (None, [], packed), "w.sol:W": (None, [], wide)}, findings)
+    layouts = {"p.sol:P": packed, "w.sol:W": wide}
+    _check_storage(PROXY, {k: (None, [], v) for k, v in layouts.items()}, _declarations(layouts), findings)
     assert len(findings.failures) == 2
     assert any("storage slot 3 offset 8: p.sol:P declares uint64 b over w.sol:W's uint128 c at slot 3" in f
                for f in findings.failures)

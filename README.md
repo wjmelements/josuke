@@ -111,15 +111,23 @@ ledger breaks the schema or lists a proxy twice, when `facetSrc` doesn't resolve
 to facets with creation code, when facets `deploy` would put at different
 addresses export the same selector, when two facets declare different state
 variables over the same storage bytes, when storage a recorded deployment
-(`current` or `proposed`) declares would read back differently at HEAD, or when
-recorded constructor args don't encode. A variable may be renamed (a warning),
-dropped (a warning: its data stays), and a struct or fixed array may grow where
-its new bytes were free; a moved, retyped or overlapped variable fails.
+(`legacy`, `current`, `proposed` or a retired facet in `history`) declares would
+read back differently at HEAD, or when recorded constructor args don't encode.
+A variable or struct member may be renamed (a warning), dropped (a warning: its
+data stays), and a struct or fixed array may grow where its new bytes were free;
+a moved, retyped or overlapped variable or member fails.
 
-The storage checks read solc's storage layout, which lists declared state
-variables only: ERC-7201 namespaced structs, fixed-slot access and `.evm` facets
-are invisible to them. solc produces a layout from analysis alone, so neither
-HEAD nor a recorded commit gets a second build for it. Each recorded commit is
+`legacy` records, by hand, the implementation a proxy ran before its first
+ERC-8167 migration, such as a UUPS contract:
+`"legacy": {"source": "src/Service.sol:Service", "gitCommit": "<sha>"}` under the
+chain in `deployments`. Keep it after the migration: its storage stays.
+
+The storage checks read solc's storage layout: declared state variables, plus
+every struct annotated `@custom:storage-location erc7201:<id>` that the facets'
+sources import, placed at its ERC-7201 slot. The annotation is trusted, not the
+slot the code computes. Other fixed-slot access and `.evm` facets are invisible.
+solc produces a layout from analysis alone, so neither HEAD nor a recorded
+commit gets a second build for it. Each recorded commit is
 checked out, so a shallow CI clone needs them fetched (`fetch-depth: 0`). It lists each facet as new, changed, unchanged or removed against
 `current`, and the constructor args `deploy` will ask for. It also compares HEAD
 with the staged deployment (`proposed`, else `current`); `--strict` makes a
