@@ -65,11 +65,9 @@ class ProxyStorage:
         proxy reads, in order, is pointed at a stub delegate to see whether it uniquely
         routes the selector. Fails if none does.
 
-        Every slot read before the one tested has been fetched, so the walk follows the
-        real dispatch: a slot that fails is fetched before the walk goes on. Slots not
-        yet fetched read as zero, so a test that reads one after the tested slot is
-        repeated once it is fetched. A delegate thus runs only once its slot has
-        failed, and each round fetches the slots every selector needs in one batch."""
+        Slots failing the stub test are then fetched in batch, and the walks go on.
+        Unfetched slots read as zero, so a test only counts once every other slot it read is fetched.
+        Thus a real delegate runs only behind a failed slot."""
         wanted = list(dict.fromkeys(selector.selector for selector in selectors))
         # A lone selector is probed beside a dummy, so a slot routing every selector is not unique.
         dummies = [d for d in ("0xffffffff", "0xfffffffe") if d not in wanted]
