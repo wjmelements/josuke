@@ -9,19 +9,23 @@ import json
 import pathlib
 import shutil
 from contextlib import contextmanager
+from unittest.mock import Mock
 
+import click
 import pytest
 from eth_utils import keccak, to_checksum_address
 
 from josuke import broadcast, deploy
 from josuke.ledger import validate_ledger
 from josuke.deploy import Facet, coerce_arg, coerce_input, keccak_hex, resolve_facets
+from josuke.evm import Replay
 
 A1 = to_checksum_address("0x" + "a1" * 20)  # deploy_initcode always returns checksummed
 B2 = to_checksum_address("0x" + "b2" * 20)
 _build_migration = deploy.build_migration  # stub_chain replaces it; some tests restore it
 
 FIXTURE_ROOT = pathlib.Path(__file__).parent / "fixtures" / "forge-project"
+RUNTIME = "6000"  # what stub_chain's replay rebuilds, and its code_hash reports on chain
 
 
 # -- pure helpers -------------------------------------------------------------
@@ -79,7 +83,9 @@ requires_forge = pytest.mark.skipif(
 def test_resolve_facets_expands_glob_to_deployable_contracts():
     facets = resolve_facets(["src/*.sol"], FIXTURE_ROOT)
     assert {f.source_id for f in facets} == {
+        "src/DeployedAt.sol:DeployedAt",
         "src/FromDeployer.sol:FromDeployer",
+        "src/SelfAddress.sol:SelfAddress",
         "src/NoArgs.sol:NoArgs",
         "src/WithArgs.sol:WithArgs",
     }
@@ -124,18 +130,23 @@ def stub_chain(monkeypatch, tmp_path, stub_source_trees):
     monkeypatch.setattr(deploy, "chain_id", lambda: "314")
     monkeypatch.setattr(deploy, "git_commit", lambda root: "f" * 40)
     monkeypatch.setattr(deploy, "run", lambda *a, **k: "")  # forge build
-    monkeypatch.setattr(deploy, "code_hash", lambda addr: "0x" + "cc" * 32)
+    monkeypatch.setattr(deploy, "code_hash", lambda addr: keccak_hex(RUNTIME))
     monkeypatch.setattr(deploy, "get_forge_config", lambda root: {"bytecode_hash": "none"})
     # A truthy stand-in for "migration ready": most of these tests care about
     # facet/selectors handling, not migration content, but `proposed` is now
     # only recorded when a migration is needed, so it must not be None here.
-    monkeypatch.setattr(deploy, "build_migration", lambda *a, **k: object())
+    monkeypatch.setattr(deploy, "build_migration", lambda *a, **k: Mock())
     monkeypatch.setattr(deploy, "deploy_migration", lambda *a, **k: {"address": "0x" + "dd" * 20})
     monkeypatch.setattr(deploy, "selectors_runtime", lambda *a, **k: None)
 
     stub_source_trees(deploy)
 
-    log = {"deployed": [], "tx": {}, "session_tx": {}}
+    # "replay" is what the stubbed replay_create returns; tests swap it to change what
+    # the constructor read. "replays" collects the environments it was asked to replay.
+    log = {"deployed": [], "tx": {}, "session": {}, "replay": Replay(RUNTIME, False, False, {}), "replays": []}
+    # "rehearsal" is the failures the stubbed rehearsal reports; by default the migration routes as proposed
+    log["rehearsal"] = []
+    monkeypatch.setattr(deploy, "rehearse", lambda *a: log["rehearsal"])
     counter = [0]
 
     def fake_initcode(facet, root, recorded_args):
@@ -146,23 +157,26 @@ def stub_chain(monkeypatch, tmp_path, stub_source_trees):
         counter[0] += 1
         addr = "0x" + f"{counter[0]:040x}"
         log["deployed"].append(initcode_hex)
-        log["tx"][addr] = log["session_tx"][addr] = "0x" + f"{counter[0]:064x}"
+        log["tx"][addr] = tx_hash = "0x" + f"{counter[0]:064x}"
+        log["session"][addr] = broadcast.Creation(counter[0], initcode_hex, addr, tx_hash, block=100 + counter[0])
         return addr, DEPLOYER
 
     monkeypatch.setattr(deploy, "facet_initcode", fake_initcode)
     monkeypatch.setattr(deploy, "deploy_initcode", fake_deploy)
-    monkeypatch.setattr(broadcast.Broadcast, "tx_hash", lambda self, address: log["session_tx"].get(address))
+    monkeypatch.setattr(broadcast.Broadcast, "deployment", lambda self, address: log["session"].get(address))
 
     # Like the real Broadcast, each session knows only the transactions it sent.
     @contextmanager
     def fresh_session(chain):
-        log["session_tx"] = {}
+        log["session"] = {}
         with broadcast.broadcast_session(chain) as session:
             yield session
 
     monkeypatch.setattr(deploy, "broadcast_session", fresh_session)
-    # differential replay needs a live `evm`/RPC; default to "sender-independent"
-    monkeypatch.setattr(deploy, "deployer_derived", lambda initcode, sender: False)
+    # replaying needs a live `evm`/RPC; by default the constructor read nothing
+    monkeypatch.setattr(
+        deploy, "replay_create", lambda initcode, request, trace: log["replays"].append(request) or log["replay"]
+    )
     return log
 
 
@@ -354,9 +368,61 @@ def test_run_deploy_records_constructor_args(stub_chain, monkeypatch, tmp_path):
     assert facet["constructorArgs"] == {"owner": "0x" + "12" * 20}
 
 
-def test_run_deploy_carries_from_forward_on_redeploy(stub_chain, monkeypatch, tmp_path):
+def _deployed_facet(stub_chain, monkeypatch, tmp_path, replay=None):
+    """Deploy one fresh facet, with replay_create reporting `replay`; its ledger entry."""
     _resolve_to(monkeypatch, ["a.evm"])
-    deployer = "0x" + "4a" * 20
+    if replay is not None:
+        stub_chain["replay"] = replay
+    path = _write(tmp_path, [{"address": PROXY, "facetSrc": ["*.evm"]}])
+    deploy.run_deploy(path)
+    return json.loads(path.read_text())[0]["deployments"]["314"]["proposed"]["facets"]["a.evm"]
+
+
+def test_run_deploy_replays_where_the_creation_ran(stub_chain, monkeypatch, tmp_path):
+    _deployed_facet(stub_chain, monkeypatch, tmp_path)
+    # fake_deploy's first creation: nonce 1, mined in block 101
+    assert stub_chain["replays"] == [{"from": DEPLOYER, "nonce": "0x1", "blockOverrides": {"number": "0x65"}}]
+
+
+def test_run_deploy_records_nothing_the_constructor_did_not_read(stub_chain, monkeypatch, tmp_path):
+    facet = _deployed_facet(stub_chain, monkeypatch, tmp_path)
+    assert not {"from", "nonce", "block"} & facet.keys()
+
+
+def test_run_deploy_records_from_when_constructor_reads_sender(stub_chain, monkeypatch, tmp_path):
+    facet = _deployed_facet(stub_chain, monkeypatch, tmp_path, Replay(RUNTIME, True, False, {}))
+    assert facet["from"] == DEPLOYER  # the actual sender, not a recorded value
+    assert "nonce" not in facet
+
+
+def test_run_deploy_records_from_and_nonce_when_constructor_reads_its_address(stub_chain, monkeypatch, tmp_path):
+    facet = _deployed_facet(stub_chain, monkeypatch, tmp_path, Replay(RUNTIME, False, True, {}))
+    assert (facet["from"], facet["nonce"]) == (DEPLOYER, 1)
+
+
+def test_run_deploy_records_block_values_the_constructor_read(stub_chain, monkeypatch, tmp_path):
+    reported = {"time": "0x6700", "baseFeePerGas": "0x7", "feeRecipient": "0x" + "cb" * 20}
+    facet = _deployed_facet(stub_chain, monkeypatch, tmp_path, Replay(RUNTIME, False, False, reported))
+    assert facet["block"] == {"timestamp": "0x6700", "baseFee": "0x7", "coinbase": "0x" + "cb" * 20}
+
+
+def test_block_keys_round_trip_through_evm_overrides():
+    block = {key: hex(i) for i, key in enumerate(deploy.BLOCK_OVERRIDE_KEYS)}
+    assert deploy.block_from_overrides(deploy.block_overrides(block)) == block
+
+
+def test_block_from_overrides_rejects_values_it_cannot_record():
+    with pytest.raises(click.ClickException, match="difficulty"):
+        deploy.block_from_overrides({"time": "0x1", "difficulty": "0x2"})
+
+
+def test_block_keys_match_the_schema():
+    schema = json.loads((pathlib.Path(__file__).parent.parent / "josuke.schema.json").read_text())
+    assert set(schema["$defs"]["facet"]["properties"]["block"]["properties"]) == set(deploy.BLOCK_OVERRIDE_KEYS)
+
+
+def test_run_deploy_does_not_carry_from_forward_on_redeploy(stub_chain, monkeypatch, tmp_path):
+    _resolve_to(monkeypatch, ["a.evm"])
     path = _write(
         tmp_path,
         [
@@ -372,7 +438,8 @@ def test_run_deploy_carries_from_forward_on_redeploy(stub_chain, monkeypatch, tm
                                     "address": "0x" + "ab" * 20,
                                     "codeHash": "0x" + "11" * 32,
                                     "initcodeHash": "0x" + "00" * 32,  # forces redeploy
-                                    "from": deployer,
+                                    "from": "0x" + "4a" * 20,
+                                    "nonce": 9,
                                 }
                             },
                         }
@@ -386,28 +453,46 @@ def test_run_deploy_carries_from_forward_on_redeploy(stub_chain, monkeypatch, tm
 
     facet = json.loads(path.read_text())[0]["deployments"]["314"]["proposed"]["facets"]["a.evm"]
     assert facet["address"] == "0x" + f"{1:040x}"  # actually redeployed
-    assert facet["from"] == deployer
+    assert not {"from", "nonce"} & facet.keys()  # this constructor reads neither
 
 
-def test_run_deploy_records_from_when_runtime_depends_on_sender(stub_chain, monkeypatch, tmp_path):
+def test_run_deploy_records_then_fails_when_the_replayed_constructor_reverts(stub_chain, monkeypatch, tmp_path):
     _resolve_to(monkeypatch, ["a.evm"])
-    monkeypatch.setattr(deploy, "deployer_derived", lambda initcode, sender: True)
+    stub_chain["replay"] = Replay(None, False, False, {}, "08c379a0")
     path = _write(tmp_path, [{"address": PROXY, "facetSrc": ["*.evm"]}])
 
-    deploy.run_deploy(path)
+    with pytest.raises(click.ClickException, match="a.evm @0x0+1: constructor reverted with 0x08c379a0"):
+        deploy.run_deploy(path)
 
     facet = json.loads(path.read_text())[0]["deployments"]["314"]["proposed"]["facets"]["a.evm"]
-    assert facet["from"] == DEPLOYER  # the actual cast-receipt sender, not a recorded value
+    assert facet["address"] == "0x" + f"{1:040x}"  # the deployment is still recorded
 
 
-def test_run_deploy_omits_from_when_runtime_is_sender_independent(stub_chain, monkeypatch, tmp_path):
-    _resolve_to(monkeypatch, ["a.evm"])  # stub_chain defaults deployer_derived -> False
+def test_run_deploy_records_then_fails_when_replay_does_not_reproduce(stub_chain, monkeypatch, tmp_path):
+    _resolve_to(monkeypatch, ["a.evm"])
+    stub_chain["replay"] = Replay("6001", False, False, {})  # not what code_hash reports
     path = _write(tmp_path, [{"address": PROXY, "facetSrc": ["*.evm"]}])
 
-    deploy.run_deploy(path)
+    with pytest.raises(click.ClickException, match="did not reproduce"):
+        deploy.run_deploy(path)
 
     facet = json.loads(path.read_text())[0]["deployments"]["314"]["proposed"]["facets"]["a.evm"]
-    assert "from" not in facet
+    assert facet["address"] == "0x" + f"{1:040x}"  # the deployment is still recorded
+
+
+def test_run_deploy_aborts_before_sending_when_the_rehearsal_fails(stub_chain, monkeypatch, tmp_path):
+    _resolve_to(monkeypatch, ["a.evm"])
+    sent = []
+    monkeypatch.setattr(broadcast.Broadcast, "send_all", lambda self, root: sent.append(root))
+    stub_chain["rehearsal"] = ["0x11111111 reverts, expected 0x" + "01" * 20]
+    ledger = [{"address": PROXY, "facetSrc": ["*.evm"]}]
+    path = _write(tmp_path, ledger)
+
+    with pytest.raises(click.ClickException, match="0x11111111 reverts"):
+        deploy.run_deploy(path)
+
+    assert sent == []
+    assert json.loads(path.read_text()) == ledger
 
 
 def test_run_deploy_verifies_new_sol_facets_on_sourcify(stub_chain, monkeypatch, tmp_path):
@@ -484,7 +569,7 @@ def test_run_deploy_zeroes_function_removed_from_kept_facet(stub_chain, monkeypa
     # `current` (c0); the proxy still routes it, so the migration must zero it.
     live = "0x" + "00" * 12 + "cd" * 20
     monkeypatch.setattr(deploy, "build_migration", _build_migration)
-    monkeypatch.setattr(deploy, "ProxyStorage", lambda addr: FakeStorage(addr, {"0x99999999": live}))
+    monkeypatch.setattr(deploy, "ProxyStorage", lambda addr, cache=None: FakeStorage(addr, {"0x99999999": live}))
     migrations = []
     monkeypatch.setattr(
         deploy, "deploy_migration", lambda m, prior, root: migrations.append(m) or {"address": "0x" + "dd" * 20}
@@ -559,7 +644,7 @@ def test_run_deploy_requires_rpc_url(monkeypatch, tmp_path):
 class FakeStorage:
     """Stand-in for ProxyStorage: slot = keccak-ish of the selector, value = 0."""
 
-    def __init__(self, address, values=None):
+    def __init__(self, address, values=None, cache=None):
         self.address = address
         self.storage_keys = {}
         self.storage_values = values or {}
@@ -615,7 +700,7 @@ def test_build_migration_installs_every_proposed_selector(monkeypatch):
 def test_build_migration_zeroes_dropped_selectors(monkeypatch):
     live_value = "0x" + "00" * 12 + "cd" * 20  # a non-zero delegate currently set
     monkeypatch.setattr(
-        deploy, "ProxyStorage", lambda addr: FakeStorage(addr, {"0x99999999": live_value})
+        deploy, "ProxyStorage", lambda addr, cache=None: FakeStorage(addr, {"0x99999999": live_value})
     )
 
     def selectors(facet, root):
@@ -655,7 +740,7 @@ def test_build_migration_none_when_already_routed(monkeypatch):
     propose a migration: every selector already routes to its recorded facet."""
     word = "0x" + "00" * 12 + A1[2:].lower()
     monkeypatch.setattr(
-        deploy, "ProxyStorage", lambda addr: FakeStorage(addr, {"0x11111111": word})
+        deploy, "ProxyStorage", lambda addr, cache=None: FakeStorage(addr, {"0x11111111": word})
     )
     monkeypatch.setattr(deploy, "facet_selectors", lambda facet, root: [_sel("0x11111111")])
     facets = [_facet("a.sol:A")]
@@ -881,3 +966,20 @@ def test_run_deploy_clears_stale_proposed_when_no_migration_needed(stub_chain, m
 
     history = json.loads(path.read_text())[0]["deployments"]["314"]
     assert "proposed" not in history
+
+
+def test_facet_abi_runs_forge_inspect_once_per_facet_and_root(monkeypatch):
+    abi = [
+        {"type": "constructor", "inputs": [{"name": "x", "type": "uint256"}]},
+        {"type": "function", "name": "f", "inputs": [], "outputs": [], "stateMutability": "view"},
+    ]
+    inspected = []
+    monkeypatch.setattr(deploy, "run", lambda cmd, root: inspected.append((cmd[2], root)) or json.dumps(abi))
+    facet = _facet("a.sol:A")
+
+    for _ in range(2):
+        assert [s.selector for s in deploy.facet_selectors(facet, pathlib.Path("c0"))] == ["0x26121ff0"]
+    assert deploy.constructor_inputs(facet, pathlib.Path("c0")) == abi[0]["inputs"]
+    deploy.facet_selectors(facet, pathlib.Path("c1"))  # another checkout is read anew
+
+    assert inspected == [("a.sol:A", pathlib.Path("c0")), ("a.sol:A", pathlib.Path("c1"))]

@@ -1,3 +1,4 @@
+import functools
 import json
 import pathlib
 from collections import namedtuple
@@ -11,11 +12,12 @@ from .broadcast import broadcast_session, create
 from .delegate import ContractSource, Delegate
 from .erc8167 import SELECTORS_SELECTOR, generated_selectors, selectors_method
 from .ethjsonrpc import chain_id, eth_get_code
-from .evm import deployer_derived, evm_artifact
+from .evm import Replay, evm_artifact, replay_create
 from .forge import get_forge_config
 from .ledger import load_ledger, write_ledger
 from .migration import Migration, SetDelegate
 from .proc import run
+from .rehearsal import rehearse_migration
 from .selectors import Selector, canonical_type
 from .signer import keystore_session
 from .storage import ProxyStorage, slot_address
@@ -101,10 +103,16 @@ def facet_from_source_id(source_id: str) -> Facet:
     return Facet("sol", path, contract, source_id)
 
 
-def facet_abi(facet: Facet, root: pathlib.Path) -> list:
+# Memoised for the process: `deploy` and `verify` read each facet's ABI from several
+# checks, and for Solidity each read is a `forge inspect`. A key can't go stale within a
+# run, since each commit is checked out at its own worktree and built before it is read.
+@functools.cache
+def facet_abi(facet: Facet, root: pathlib.Path) -> tuple:
     if facet.kind == "sol":
-        return json.loads(run(["forge", "inspect", facet.source_id, "abi", "--json"], root))
-    return evm_artifact(root / facet.path, root)["abi"]
+        abi = json.loads(run(["forge", "inspect", facet.source_id, "abi", "--json"], root))
+    else:
+        abi = evm_artifact(root / facet.path, root)["abi"]
+    return tuple(abi)  # shared by every caller, so not a list they could append to
 
 
 def facet_selectors(facet: Facet, root: pathlib.Path) -> list:
@@ -116,9 +124,8 @@ def facet_selectors(facet: Facet, root: pathlib.Path) -> list:
 # -- init bytecode --------------------------------------------------------
 
 
-def constructor_inputs(source_id: str, root: pathlib.Path) -> list:
-    abi = json.loads(run(["forge", "inspect", source_id, "abi", "--json"], root))
-    ctor = [m for m in abi if m["type"] == "constructor"]
+def constructor_inputs(facet: Facet, root: pathlib.Path) -> list:
+    ctor = [m for m in facet_abi(facet, root) if m["type"] == "constructor"]
     return ctor[0]["inputs"] if ctor else []
 
 
@@ -161,7 +168,7 @@ def facet_initcode(facet: Facet, root: pathlib.Path, recorded_args, prompt: bool
 
     initcode = run(["forge", "inspect", facet.source_id, "bytecode"], root).strip()
     initcode = initcode.removeprefix("0x")
-    inputs = constructor_inputs(facet.source_id, root)
+    inputs = constructor_inputs(facet, root)
     if not inputs:
         return initcode, None
 
@@ -196,6 +203,60 @@ def deploy_initcode(initcode_hex: str, root: pathlib.Path) -> tuple[str, str]:
 
 def code_hash(address: str) -> str:
     return keccak_hex(eth_get_code(address))
+
+
+# A facet's `block` records the block values its constructor read. Naming rule: each
+# key is the camelCase of the Solidity `block.<member>` that reads the value, splitting
+# Solidity's run-together lowercase words (`block.basefee` -> `baseFee`, `block.gaslimit`
+# -> `gasLimit`, `block.timestamp` -> `timestamp`). These are also `evm`'s own block
+# field names. `evm` takes and reports them under geth's `eth_call` blockOverrides keys
+# instead, so this table translates at the ledger's edge, in both directions. The chain
+# id (`block.chainid`) is deliberately absent: the ledger is keyed by it.
+BLOCK_OVERRIDE_KEYS = {
+    "number": "number",
+    "timestamp": "time",
+    "gasLimit": "gasLimit",
+    "baseFee": "baseFeePerGas",
+    "blobBaseFee": "blobBaseFee",
+    "prevRandao": "prevRandao",
+    "coinbase": "feeRecipient",
+}
+_BLOCK_KEYS = {override: key for key, override in BLOCK_OVERRIDE_KEYS.items()}
+
+
+def block_from_overrides(overrides: dict) -> dict:
+    """A facet's `block` record from the blockOverrides `evm` reports."""
+    unknown = overrides.keys() - _BLOCK_KEYS.keys()
+    if unknown:
+        raise click.ClickException(f"evm reported block values josuke cannot record: {sorted(unknown)}")
+    return {_BLOCK_KEYS[override]: value for override, value in overrides.items()}
+
+
+def block_overrides(block: dict) -> dict:
+    """The blockOverrides that replay a facet's recorded `block`."""
+    return {BLOCK_OVERRIDE_KEYS[key]: value for key, value in block.items()}
+
+
+def deploy_environment(initcode_hex: str, sender: str, nonce: int, block: int) -> tuple[dict, Replay]:
+    """(facet fields to record, the replay) from replaying a mined creation where it
+    ran: from `sender` at `nonce`, in `block`.
+
+    Only what the constructor read is recorded: `from` if it read its sender or its
+    own address, `nonce` if its own address, and the block values it read as
+    `block`, so `verify` can replay it the same way on any node."""
+    replay = replay_create(
+        initcode_hex,
+        {"from": sender, "nonce": hex(nonce), "blockOverrides": block_overrides({"number": hex(block)})},
+        trace=True,
+    )
+    environment = {}
+    if replay.reads_sender or replay.reads_address:
+        environment["from"] = sender
+    if replay.reads_address:
+        environment["nonce"] = nonce
+    if replay.block_overrides:
+        environment["block"] = block_from_overrides(replay.block_overrides)
+    return environment, replay
 
 
 def verify_sourcify(
@@ -273,6 +334,46 @@ def current_selectors(current: dict, current_tree: pathlib.Path | None) -> dict:
     return out
 
 
+def selector_owners(state: dict, tree: pathlib.Path) -> tuple[dict, list]:
+    """(selector -> (source_id, address), [Selector]) for a deployment state.
+
+    Includes the generated `selectors()` delegate recorded under `state.selectors`,
+    so dispatch and acceptance checks cover it like any facet selector."""
+    owners, selectors = {}, []
+    for source_id, rec in state["facets"].items():
+        for selector in facet_selectors(facet_from_source_id(source_id), tree):
+            owners[selector.selector] = (source_id, rec.get("address"))
+            selectors.append(selector)
+    impl = state.get("selectors")
+    if impl and SELECTORS_SELECTOR not in owners:
+        owners[SELECTORS_SELECTOR] = ("selectors()", impl.get("address"))
+        selectors.append(Selector(SELECTORS_SELECTOR, "selectors()"))
+    return owners, selectors
+
+
+def migration_routes(proposed: dict, current: dict, current_tree: pathlib.Path | None, root: pathlib.Path):
+    """(routes, delegates) to rehearse a migration from `current` to `proposed` with:
+    each selector's address once it has run (None for one it drops), and every
+    address either state routes to."""
+    owners, _ = selector_owners(proposed, root)
+    routes = {selector: address for selector, (_, address) in owners.items()}
+    for selector in current_selectors(current, current_tree):
+        routes.setdefault(selector, None)
+    delegates = set()
+    for state in (current, proposed):
+        records = [*state.get("facets", {}).values(), state.get("selectors", {})]
+        delegates.update(rec["address"] for rec in records if rec.get("address"))
+    return routes, delegates
+
+
+def rehearse(
+    proxy: str, migration_runtime: bytes, proposed: dict, current: dict, current_tree, root, rpc_cache: dict | None = None
+) -> list[str]:
+    """Failures from rehearsing `migration_runtime` on `proxy` (see `rehearse_migration`)."""
+    routes, delegates = migration_routes(proposed, current, current_tree, root)
+    return rehearse_migration(proxy, migration_runtime, routes, delegates, rpc_cache)
+
+
 def selectors_runtime(facets: list, root: pathlib.Path) -> bytes | None:
     selector_lists = [facet_selectors(facet, root) for facet in facets]
     if any(s.selector == SELECTORS_SELECTOR for sels in selector_lists for s in sels):
@@ -289,6 +390,7 @@ def build_migration(
     root: pathlib.Path,
     storage: ProxyStorage | None = None,
     selectors_impl: dict | None = None,
+    rpc_cache: dict | None = None,
 ):
     """A Migration that points every proposed selector at its facet and zeroes
     selectors dropped since `current`. Returns None when nothing needs changing.
@@ -299,7 +401,8 @@ def build_migration(
 
     `storage` may be a pre-populated ProxyStorage to avoid re-querying slots.
     `selectors_impl` is the generated `selectors()` delegate record (if any);
-    when given, `selectors()` is routed to it like any facet selector."""
+    when given, `selectors()` is routed to it like any facet selector.
+    `rpc_cache` is shared with the slot-detection relay (see `EvmRelay`)."""
     owner = {}  # selector -> Facet
     selectors = {}  # selector -> Selector
     for facet in facets:
@@ -321,7 +424,7 @@ def build_migration(
     removed = {s: installed[s] for s in installed if s not in kept}
 
     if storage is None:
-        storage = ProxyStorage(proxy)
+        storage = ProxyStorage(proxy, cache=rpc_cache)
         probe = {**installed, **selectors}
         if selectors_impl:
             probe[SELECTORS_SELECTOR] = Selector(SELECTORS_SELECTOR, "selectors()")
@@ -413,9 +516,12 @@ def run_deploy(ledger_path, redeploy_all: bool = False):
     run(["forge", "build"], root)
 
     run_deployed: dict[str, dict] = {}  # initcodeHash -> facet entry, shared across proxies this run
-    unmined: list[tuple[Facet, dict, str, str, str | None]] = []  # (facet, entry, initcode, sender, recorded from)
+    unmined: list[tuple[Facet, dict, str, str]] = []  # (facet, entry, initcode, sender)
     summaries: list[str] = []  # one line per proxy, reported once its deployments are mined
     checked_metadata = False  # warn_metadata_hash runs once, and only for Solidity facets
+    # Shared by slot detection and the rehearsal, which then see the same block. Planning
+    # only: its memoised eth_blockNumber predates send_all, so later relays must not use it.
+    planning_cache: dict = {}
 
     # keystore_session: prompt for a keystore password at most once, on the first deploy
     # broadcast_session: plan every deployment, then send them back to back and wait for them together
@@ -460,7 +566,7 @@ def run_deploy(ledger_path, redeploy_all: bool = False):
                     facet_entry["constructorArgs"] = args
                 proposed_facets[facet.source_id] = facet_entry
                 run_deployed.setdefault(initcode_hash, facet_entry)
-                unmined.append((facet, facet_entry, initcode, sender, recorded.get("from")))
+                unmined.append((facet, facet_entry, initcode, sender))
                 deployed += 1
 
             proposed = {"gitCommit": commit, "facets": proposed_facets}
@@ -474,9 +580,17 @@ def run_deploy(ledger_path, redeploy_all: bool = False):
 
             current_tree = trees.get(current["gitCommit"]) if current_facets else None
             migration = build_migration(
-                proxy, facets, proposed_facets, current, current_tree, root, selectors_impl=selectors_impl
+                proxy, facets, proposed_facets, current, current_tree, root,
+                selectors_impl=selectors_impl, rpc_cache=planning_cache,
             )
             if migration is not None:
+                # Before anything is sent, so a wrong storage slot costs no gas.
+                failures = rehearse(proxy, migration.encode(), proposed, current, current_tree, root, planning_cache)
+                if failures:
+                    raise click.ClickException(
+                        f"{proxy}: the migration does not route as proposed when rehearsed:\n"
+                        + "\n".join(f"  - {failure}" for failure in failures)
+                    )
                 proposed["migration"] = deploy_migration(
                     migration, prior_proposed.get("migration"), root
                 )
@@ -491,20 +605,30 @@ def run_deploy(ledger_path, redeploy_all: bool = False):
             summaries.append(f"{proxy} chain {chain}: " + ", ".join(notes))
 
         broadcast.send_all(root)
-        # Replaying constructors takes RPC round trips, so it runs while the transactions are mined.
-        for facet, facet_entry, initcode, sender, recorded_from in unmined:
-            if deployer_derived(initcode, sender):
-                facet_entry["from"] = sender  # runtime depends on sender
-            elif recorded_from:
-                facet_entry["from"] = recorded_from
         broadcast.wait(root)
-        for facet, facet_entry, *_ in unmined:
-            tx_hash = broadcast.tx_hash(facet_entry["address"])
-            facet_entry["codeHash"] = code_hash(facet_entry["address"])
-            facet_entry["createTxHash"] = tx_hash
+        unreproduced = []
+        for facet, facet_entry, initcode, sender in unmined:
+            address = facet_entry["address"]
+            creation = broadcast.deployment(address)
+            facet_entry["codeHash"] = code_hash(address)
+            facet_entry["createTxHash"] = creation.tx_hash
+            environment, replay = deploy_environment(initcode, sender, creation.nonce, creation.block)
+            facet_entry.update(environment)
+            if replay.runtime is None:
+                unreproduced.append(f"{facet.source_id} @{address}: constructor reverted{replay.revert_detail()}")
+            elif keccak_hex(replay.runtime) != facet_entry["codeHash"]:
+                unreproduced.append(
+                    f"{facet.source_id} @{address}: replay rebuilt {keccak_hex(replay.runtime)}, "
+                    f"on chain {facet_entry['codeHash']}"
+                )
             if facet.kind == "sol":
-                verify_sourcify(facet, facet_entry["address"], chain, root, tx_hash)
+                verify_sourcify(facet, address, chain, root, creation.tx_hash)
 
     for summary in summaries:
         click.echo(summary)
-    write_ledger(ledger_path, ledger)
+    write_ledger(ledger_path, ledger)  # the deployments happened, so record them either way
+    if unreproduced:
+        raise click.ClickException(
+            "deployed, but replaying the constructor did not reproduce the code on chain; "
+            "`verify` will fail for:\n" + "\n".join(f"  - {line}" for line in unreproduced)
+        )

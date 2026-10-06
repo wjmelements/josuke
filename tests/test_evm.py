@@ -12,7 +12,8 @@ import pytest
 
 from ethrpc_mock import MockEthRpc
 from josuke import evm
-from josuke.evm import EvmRelay, _governing_makefile, deployer_derived, evm_artifact
+from josuke.broadcast import create_address
+from josuke.evm import EvmRelay, _governing_makefile, evm_artifact, replay_create
 
 FIXTURE_ROOT = pathlib.Path(__file__).parent / "fixtures" / "forge-project"
 
@@ -113,7 +114,7 @@ def test_evm_artifact_without_abi_raises(tmp_path):
         evm_artifact(src / "Impl.evm", tmp_path)
 
 
-# -- EvmRelay / deployer_derived -------------------------------------------
+# -- EvmRelay / replay_create ----------------------------------------------
 
 needs_evm = pytest.mark.skipif(
     shutil.which("evm") is None or shutil.which("forge") is None,
@@ -131,14 +132,70 @@ def eth_rpc(monkeypatch):
         yield rpc
 
 
-@needs_evm
-def test_deployer_derived_true_when_constructor_reads_sender(eth_rpc):
-    assert deployer_derived(_initcode("FromDeployer"), DEPLOYER) is True
+DEPLOY = {"from": DEPLOYER, "nonce": "0x5", "blockOverrides": {"number": "0x64"}}
 
 
 @needs_evm
-def test_deployer_derived_false_without_a_constructor(eth_rpc):
-    assert deployer_derived(_initcode("NoArgs"), DEPLOYER) is False
+def test_replay_create_reads_nothing_without_a_constructor(eth_rpc):
+    replay = replay_create(_initcode("NoArgs"), DEPLOY, trace=True)
+    assert (replay.reads_sender, replay.reads_address, replay.block_overrides) == (False, False, {})
+
+
+@needs_evm
+def test_replay_create_detects_sender(eth_rpc):
+    replay = replay_create(_initcode("FromDeployer"), DEPLOY, trace=True)
+    assert (replay.reads_sender, replay.reads_address) == (True, False)
+    assert DEPLOYER.removeprefix("0x") in replay.runtime
+
+
+@needs_evm
+def test_replay_create_detects_own_address_and_creates_at_nonce(eth_rpc):
+    replay = replay_create(_initcode("SelfAddress"), DEPLOY, trace=True)
+    assert replay.reads_address
+    assert create_address(DEPLOYER, 5)[2:].lower() in replay.runtime
+
+
+@needs_evm
+def test_replay_create_reports_block_values_read_but_not_chain_id(eth_rpc):
+    replay = replay_create(_initcode("DeployedAt"), DEPLOY, trace=True)
+    assert replay.block_overrides == {"time": hex(eth_rpc.timestamp_base + 0x64)}  # block 0x64's header
+    assert f"{314:064x}" in replay.runtime  # CHAINID asked of the node, not recorded
+
+
+@needs_evm
+def test_replay_create_without_trace_reports_no_reads(eth_rpc):
+    replay = replay_create(_initcode("SelfAddress"), DEPLOY)
+    assert (replay.reads_sender, replay.reads_address) == (False, False)
+
+
+@needs_evm
+@pytest.mark.parametrize(
+    "initcode, runtime, revert_data",
+    [
+        ("60aa5f5360015ffd", None, "aa"),  # REVERT(0, 1) with 0xaa
+        ("5f5ffd", None, ""),  # REVERT(0, 0)
+        ("5f5ff3", "", ""),  # RETURN(0, 0): created, with no code
+    ],
+)
+def test_replay_create_tells_a_revert_from_runtime(eth_rpc, initcode, runtime, revert_data):
+    replay = replay_create(initcode, DEPLOY)
+    assert (replay.runtime, replay.revert_data) == (runtime, revert_data)
+
+
+@needs_evm
+def test_evm_relay_returns_json_results_without_forwarding_them(eth_rpc):
+    with EvmRelay(json_output=True) as relay:
+        result = json.loads(relay.call({"from": DEPLOYER, "data": _initcode("NoArgs")}))
+    assert set(result) >= {"status", "returnData"}
+    assert all("returnData" not in str(call) for call in eth_rpc.calls)
+
+
+@needs_evm
+def test_evm_relay_streams_a_trace_longer_than_a_pipe_buffer(eth_rpc):
+    steps = []
+    with EvmRelay(on_trace=steps.append) as relay:
+        relay.call({"data": "5f50" * 20000 + "5f5ff3"})  # 40000 PUSH0/POP steps
+    assert len(steps) > 40000 and "output" in steps[-1]  # every step, then the summary
 
 
 @needs_evm

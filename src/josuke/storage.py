@@ -12,14 +12,15 @@ def slot_address(raw: str | None) -> str | None:
 
 
 class ProxyStorage:
-    def __init__(self, address):
+    def __init__(self, address, cache: dict | None = None):
         self.address = address
+        self.cache = cache  # shared RPC cache for the relay; see EvmRelay
         self.storage_keys = {} # Selector.selector -> storage_key
         self.storage_values = {} # Selector.selector -> storage_value
 
     def fetch(self, selectors: list[Selector]):
         proxy_address = self.address.lower()
-        with EvmRelay() as relay:
+        with EvmRelay(cache=self.cache) as relay:
             for selector in selectors:
                 # Calling the method directly works even if `implementation` is not installed
                 relay.call(

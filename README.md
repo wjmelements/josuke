@@ -62,6 +62,13 @@ facet address once, roughly halving the script's codesize. The
 script is deployed with the `evm -C` universal constructor unless an identical one
 is already recorded under `proposed`.
 
+Since a wrong slot guess goes unnoticed until the migration runs, `deploy` first
+rehearses the migration in `evm -nx` against the live proxy, before sending
+anything. The migration runs as the proxy's code, with every facet in `current`
+and `proposed` stood in for by a stub returning its own address. Then the
+proxy's real dispatcher is asked where each selector goes: each proposed selector
+must reach its facet, and each dropped one must revert.
+
 For a `<path>.evm` facet (evm-assembler source), josuke reads bytecode and ABI
 from the artifact its governing Makefile produces, building it with
 `make -C <dir> out/<name>.evm/<name>.json` where `<dir>` is the nearest directory
@@ -81,7 +88,8 @@ served by `current` are listed up front. The pass/fail checks follow.
 the recorded address, and the proxy dispatches each of its selectors to that
 address. For `proposed`: the same hash checks, plus `proposed.facets` is exactly
 what `facetSrc` resolves to, and the on-chain `migration` installs every
-proposed selector and zeroes every selector dropped since `current`. A recorded
+proposed selector and zeroes every selector dropped since `current`, both decoded
+and rehearsed as `deploy` does. A recorded
 `selectors` delegate must hold the method josuke generates for that facet set.
 It reports all mismatches and exits non-zero if any.
 
@@ -174,9 +182,16 @@ Notes:
   answers "was it built from this commit with these args?" and is what the
   verifier recomputes from source. A facet with no constructor has
   `initcodeHash == keccak256(initcode)` and omits `constructorArgs`.
-- `from` is the deployer address, replayed as `msg.sender` when the verifier
-  re-simulates the constructor. It is only needed when an immutable is derived
-  from the deployer; omit it otherwise.
+- `from`, `nonce` and `block` record the environment a constructor read, so
+  the verifier can replay it: `from` its sender, `nonce` (with `from`) its own
+  address, as for an `address(this)` immutable, and `block` the values of its
+  block it read, each keyed by the camelCase of its Solidity `block.<member>`
+  (`block.basefee` is `baseFee`). Once a facet's creation is mined, `deploy`
+  replays it in that block with `evm -nx`, traced, and records only what the
+  constructor read, failing if the replay doesn't reproduce the code on chain.
+  The chain id is never recorded: the ledger is keyed by it. `verify` replays
+  with what was recorded, so it needs no archive node, and checks that `from`
+  and `nonce` derive the facet's address.
 - One `gitCommit` covers a whole `deploymentState`. When `proposed` is promoted,
   unchanged facets keep their existing entries, so a long-lived `current` can
   contain facets whose bytecode predates its `gitCommit`; only the facets

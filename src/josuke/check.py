@@ -359,7 +359,7 @@ def _initcode_hash(facet, root, recorded: dict, proxy: str, findings: Findings) 
     args = recorded.get("constructorArgs") or {}
     try:
         if facet.kind == "sol":
-            missing = [arg["name"] for arg in constructor_inputs(source_id, root) if arg["name"] not in args]
+            missing = [arg["name"] for arg in constructor_inputs(facet, root) if arg["name"] not in args]
             if missing:
                 return None, missing
         initcode, _ = facet_initcode(facet, root, args, prompt=False)

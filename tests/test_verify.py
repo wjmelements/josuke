@@ -12,6 +12,8 @@ import pytest
 from eth_utils import to_checksum_address
 
 from josuke import deploy, verify
+from josuke.broadcast import create_address
+from josuke.evm import Replay
 from josuke.migration import Migration
 
 PROXY = "0x2222222222222222222222222222222222222222"
@@ -25,7 +27,7 @@ def _word(address_or_zero: str) -> str:
 
 
 class FakeStorage:
-    def __init__(self, address, values=None):
+    def __init__(self, address, values=None, cache=None):
         self.address = address
         self.storage_keys = {}
         self.storage_values = values or {}
@@ -84,7 +86,7 @@ _HASHES = {"ic": "0xICHASH", "rt": "0xRTHASH"}
 
 def _stub_facet_checks(monkeypatch, runtime="rt"):
     monkeypatch.setattr(verify, "facet_initcode", lambda f, root, args, prompt: ("ic", None))
-    monkeypatch.setattr(verify, "_replay_runtime", lambda initcode, sender, cache: runtime)
+    monkeypatch.setattr(verify, "_replay_runtime", lambda initcode, rec, cache: Replay(runtime, False, False, {}))
     monkeypatch.setattr(verify, "keccak_hex", lambda h: _HASHES.get(h, "0x" + h))
     monkeypatch.setattr(verify, "_onchain_codehash", lambda addr: "0xRTHASH")
 
@@ -124,17 +126,52 @@ def test_verify_facets_reports_wrong_recorded_codehash_once(monkeypatch):
     ]
 
 
-def test_verify_facets_replays_from_recorded_sender(monkeypatch):
-    _stub_facet_checks(monkeypatch)
-    seen = {}
-    monkeypatch.setattr(
-        verify, "_replay_runtime",
-        lambda initcode, sender, cache: seen.setdefault("sender", sender) or "rt",
-    )
-    state = _state({"a.sol:A": {"address": A1, "initcodeHash": "0xICHASH", "codeHash": "0xRTHASH", "from": A1}})
-    verify.verify_facets(state, "current", ".", _report())
+def test_replay_runtime_replays_the_recorded_environment(monkeypatch):
+    seen = []
+    monkeypatch.setattr(verify, "replay_create", lambda initcode, request, cache: seen.append(request) or Replay("rt", False, False, {}))
+    rec = {"from": A1, "nonce": 5, "block": {"timestamp": "0x6700", "coinbase": B2}, "codeHash": "0xRTHASH"}
 
-    assert seen["sender"] == A1
+    assert verify._replay_runtime("ic", rec, None).runtime == "rt"
+    assert verify._replay_runtime("ic", {"codeHash": "0xRTHASH"}, None).runtime == "rt"
+    assert seen == [{"from": A1, "nonce": "0x5", "blockOverrides": {"time": "0x6700", "feeRecipient": B2}}, {}]
+
+
+def test_verify_facets_passes_when_from_and_nonce_create_the_address(monkeypatch):
+    _stub_facet_checks(monkeypatch)
+    rec = {"address": create_address(A1, 7), "initcodeHash": "0xICHASH", "codeHash": "0xRTHASH", "from": A1, "nonce": 7}
+    report = _report()
+    verify.verify_facets(_state({"a.sol:A": rec}), "current", ".", report)
+
+    assert report.failures == []
+
+
+def test_verify_facets_flags_nonce_that_does_not_create_the_address(monkeypatch):
+    _stub_facet_checks(monkeypatch)
+    rec = {"address": A1, "initcodeHash": "0xICHASH", "codeHash": "0xRTHASH", "from": A1, "nonce": 7}
+    report = _report()
+    verify.verify_facets(_state({"a.sol:A": rec}), "current", ".", report)
+
+    assert report.failures == [f"{PROXY} current a.sol:A @{A1}: from {A1} at nonce 7 creates {create_address(A1, 7)}"]
+
+
+def test_verify_facets_flags_nonce_without_from(monkeypatch):
+    _stub_facet_checks(monkeypatch)
+    rec = {"address": A1, "initcodeHash": "0xICHASH", "codeHash": "0xRTHASH", "nonce": 7}
+    report = _report()
+    verify.verify_facets(_state({"a.sol:A": rec}), "current", ".", report)
+
+    assert report.failures == [f"{PROXY} current a.sol:A: nonce recorded without from"]
+
+
+@pytest.mark.parametrize("revert_data, detail", [("08c379a0", " with 0x08c379a0"), ("", "")])
+def test_verify_facets_reports_a_constructor_that_reverts_on_replay(monkeypatch, revert_data, detail):
+    _stub_facet_checks(monkeypatch)
+    monkeypatch.setattr(verify, "_replay_runtime", lambda initcode, rec, cache: Replay(None, False, False, {}, revert_data))
+    state = _state({"a.sol:A": {"address": A1, "initcodeHash": "0xICHASH", "codeHash": "0xRTHASH"}})
+    report = _report()
+    verify.verify_facets(state, "current", ".", report)
+
+    assert report.failures == [f"{PROXY} current a.sol:A: constructor reverted when replayed from source{detail}"]
 
 
 def test_verify_facets_passes_clean(monkeypatch):
@@ -173,7 +210,7 @@ def test_verify_facets_rebuilds_runtime_from_source(monkeypatch):
     facet = deploy.facet_from_source_id(source_id)
     initcode, _ = deploy.facet_initcode(facet, root, None, prompt=False)
     with patch("josuke.evm.post", MockEthRpc()):
-        true_codehash = verify.keccak_hex(verify._replay_runtime(initcode, deployer, {}))
+        true_codehash = verify.keccak_hex(verify._replay_runtime(initcode, {"from": deployer}, {}).runtime)
 
     def check(codehash, sender, onchain):
         rec = {"address": A1, "initcodeHash": verify.keccak_hex(initcode), "codeHash": codehash, "from": sender}
@@ -188,6 +225,45 @@ def test_verify_facets_rebuilds_runtime_from_source(monkeypatch):
     assert any("rebuilt from source" in f for f in check("0xFORGED", deployer, "0xFORGED"))
     # `from` dropped: constructor replays from zero, immutable differs, caught
     assert any("rebuilt from source" in f for f in check(true_codehash, None, true_codehash))
+
+
+@pytest.mark.skipif(
+    shutil.which("evm") is None or shutil.which("forge") is None,
+    reason="requires the `evm` and `forge` binaries",
+)
+def test_verify_facets_replays_own_address_at_recorded_nonce(monkeypatch):
+    """End-to-end: an address(this) immutable rebuilds only at the recorded nonce,
+    even though the facet's address already holds its code on chain."""
+    from unittest.mock import patch
+
+    from ethrpc_mock import MockEthRpc
+
+    monkeypatch.setenv("ETH_RPC_URL", "http://mock.rpc/test")
+    root = pathlib.Path(__file__).parent / "fixtures" / "forge-project"
+    source_id = "src/SelfAddress.sol:SelfAddress"
+    deployer = to_checksum_address("0x" + "ab" * 20)
+    address = create_address(deployer, 5)
+
+    facet = deploy.facet_from_source_id(source_id)
+    initcode, _ = deploy.facet_initcode(facet, root, None, prompt=False)
+    rpc = MockEthRpc()
+    with patch("josuke.evm.post", rpc):
+        deployed = verify._replay_runtime(initcode, {"from": deployer, "nonce": 5}, {}).runtime
+    rpc.set_code(address, deployed)  # live at its address, as after deploy
+    rpc.nonce[address.lower()] = "0x1"
+    codehash = verify.keccak_hex(deployed)
+    monkeypatch.setattr(verify, "_onchain_codehash", lambda addr: codehash)
+
+    def failures(rec):
+        report = _report()
+        with patch("josuke.evm.post", rpc):
+            verify.verify_facets(_state({source_id: rec}), "current", root, report)
+        return report.failures
+
+    rec = {"address": address, "initcodeHash": verify.keccak_hex(initcode), "codeHash": codehash, "from": deployer}
+    assert failures({**rec, "nonce": 5}) == []
+    # without the nonce, the replay creates elsewhere and bakes in another address
+    assert any("rebuilt from source" in f for f in failures(rec))
 
 
 # -- verify_proposed_set ----------------------------------------------------
@@ -210,7 +286,7 @@ def test_verify_proposed_set_reports_missing_and_extra(monkeypatch):
 
 
 def test_verify_dispatch_flags_wrong_route(monkeypatch):
-    monkeypatch.setattr(verify, "facet_selectors", lambda facet, tree: [_sel("0x11111111")])
+    monkeypatch.setattr(deploy, "facet_selectors", lambda facet, tree: [_sel("0x11111111")])
     current = _state({"a.sol:A": {"address": A1}})
     storage = FakeStorage(PROXY, {"0x11111111": _word(B2)})  # proxy points at B2, not A1
     report = _report()
@@ -221,7 +297,7 @@ def test_verify_dispatch_flags_wrong_route(monkeypatch):
 
 
 def test_verify_dispatch_passes_when_route_matches(monkeypatch):
-    monkeypatch.setattr(verify, "facet_selectors", lambda facet, tree: [_sel("0x11111111")])
+    monkeypatch.setattr(deploy, "facet_selectors", lambda facet, tree: [_sel("0x11111111")])
     current = _state({"a.sol:A": {"address": A1}})
     storage = FakeStorage(PROXY, {"0x11111111": _word(A1)})
     report = _report()
@@ -276,8 +352,8 @@ def test_verify_selectors_noop_without_record():
 def test_selector_owners_includes_generated_selectors(monkeypatch):
     from josuke.erc8167 import SELECTORS_SELECTOR
 
-    monkeypatch.setattr(verify, "facet_selectors", lambda facet, tree: [_sel("0x11111111")])
-    owners, _ = verify._selector_owners(
+    monkeypatch.setattr(deploy, "facet_selectors", lambda facet, tree: [_sel("0x11111111")])
+    owners, _ = deploy.selector_owners(
         _state({"a.sol:A": {"address": A1}}) | {"selectors": {"address": B2}}, "."
     )
     assert owners[SELECTORS_SELECTOR] == ("selectors()", B2)
@@ -397,7 +473,8 @@ def stub_trees(monkeypatch, stub_source_trees):
     stub_source_trees(verify)
     monkeypatch.setattr(verify, "chain_id", lambda: "314")
     monkeypatch.setattr(verify, "ProxyStorage", FakeStorage)
-    monkeypatch.setattr(verify, "_replay_runtime", lambda initcode, sender, cache: "")
+    monkeypatch.setattr(verify, "_replay_runtime", lambda initcode, rec, cache: Replay("", False, False, {}))
+    monkeypatch.setattr(verify, "rehearse", lambda *a: [])
 
 
 def test_run_verify_requires_rpc_url(monkeypatch, tmp_path):
@@ -419,7 +496,7 @@ def test_run_verify_skips_chain_without_deployment(monkeypatch, tmp_path, stub_t
 def test_run_verify_reports_failures(monkeypatch, tmp_path, stub_trees):
     monkeypatch.setenv("ETH_RPC_URL", "http://mock.rpc")
     monkeypatch.chdir(tmp_path)
-    monkeypatch.setattr(verify, "facet_selectors", lambda facet, tree: [_sel("0x11111111")])
+    monkeypatch.setattr(deploy, "facet_selectors", lambda facet, tree: [_sel("0x11111111")])
     monkeypatch.setattr(verify, "facet_initcode", lambda f, root, args, prompt: ("dead", None))
     monkeypatch.setattr(verify, "keccak_hex", lambda h: "0xbad")
     monkeypatch.setattr(verify, "_onchain_codehash", lambda addr: "0xbad")
@@ -455,8 +532,7 @@ def test_run_verify_flags_function_removed_from_kept_facet(monkeypatch, tmp_path
         assert root == pathlib.Path("trees", "c1")
         return [_sel("0x11111111")]
 
-    monkeypatch.setattr(verify, "ProxyStorage", lambda addr: FakeStorage(addr, {"0x99999999": _word(OLD)}))
-    monkeypatch.setattr(verify, "facet_selectors", selectors)
+    monkeypatch.setattr(verify, "ProxyStorage", lambda addr, cache=None: FakeStorage(addr, {"0x99999999": _word(OLD)}))
     monkeypatch.setattr(deploy, "facet_selectors", selectors)
     for check in ("verify_facets", "verify_dispatch", "verify_selectors", "verify_proposed_set", "summarize_upgrade"):
         monkeypatch.setattr(verify, check, lambda *a, **k: None)
