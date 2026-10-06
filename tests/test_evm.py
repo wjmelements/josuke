@@ -230,19 +230,26 @@ def _storage_batch(count: int) -> list[dict]:
     ]
 
 
-def _error(code: int, id=None) -> dict:
-    return {"jsonrpc": "2.0", "id": id, "error": {"code": code, "message": "too large"}}
+def _error(code: int, message: str, id=None) -> dict:
+    return {"jsonrpc": "2.0", "id": id, "error": {"code": code, "message": message}}
 
 
 # How each node rejects a batch of more requests than it takes.
 REJECTIONS = {
-    "geth": lambda batch: (200, [_error(-32600, batch[0]["id"])]),
-    "jsonrpsee": lambda batch: (200, _error(-32010)),
-    "jsonrpsee body": lambda batch: (413, _error(-32007)),
-    "nethermind, besu": lambda batch: (200, _error(-32005)),
+    "geth": lambda batch: (200, [_error(-32600, "batch too large", batch[0]["id"])]),
+    "erigon": lambda batch: (200, [_error(-32600, "batch limit 100 exceeded (can increase by --rpc.batch.limit). "
+                                                  f"Requested batch of size: {len(batch)}", batch[0]["id"])]),
+    "jsonrpsee": lambda batch: (200, _error(-32010, "The batch request was too large")),
+    "jsonrpsee response": lambda batch: (200, _error(-32011, "The batch response was too large")),
+    "jsonrpsee body": lambda batch: (413, _error(-32007, "Request is too big")),
+    "nethermind": lambda batch: (503, _error(-32005, "Batch size limit exceeded")),
+    "besu": lambda batch: (200, _error(-32005, "Number of requests exceeds max batch size")),
 }
 # How each node answers the requests left once a batch's response grows too large.
-CUTOFFS = {"geth": -32003, "nethermind": -32005}
+CUTOFFS = {
+    "geth": (-32003, "response too large"),
+    "nethermind": (-32005, "MaxBatchResponseBodySize of 32768KB exceeded"),
+}
 
 
 @pytest.fixture
@@ -263,7 +270,7 @@ def node(monkeypatch):
             status, body = node.reject(json)
             return FakeResponse(status, json_module.dumps(body))
         answers = json_module.loads(rpc(url, json=json[: node.limit]).text)
-        answers += [_error(node.cutoff, req["id"]) for req in json[node.limit :]]
+        answers += [_error(*node.cutoff, req["id"]) for req in json[node.limit :]]
         return FakeResponse(200, json_module.dumps(answers))
 
     monkeypatch.setattr(evm, "post", post)
@@ -302,3 +309,30 @@ def test_a_rejected_batch_of_one_fails(node):
     node.limit, node.reject = 0, REJECTIONS["jsonrpsee"]
     with pytest.raises(click.ClickException, match="rejected a batch of one request"):
         evm._post_batch("http://node", _storage_batch(1))
+
+
+# -32005 also means a node is overloaded, or rate-limits, rather than that a batch is too large.
+OVERLOADS = {
+    "erigon": lambda batch: (503, _error(-32005, "server overloaded, retry later")),
+    "erigon database": lambda batch: (
+        503, [_error(-32005, "server overloaded, retry later", req["id"]) for req in batch]
+    ),
+    "rate limit": lambda batch: (429, _error(-32005, "Too many requests")),
+    # As besu rejects too large a batch, but for some other limit.
+    "limit over HTTP 200": lambda batch: (200, _error(-32005, "Too many requests")),
+}
+
+
+@pytest.mark.parametrize("overload", OVERLOADS.values(), ids=OVERLOADS.keys())
+def test_an_overloaded_node_fails_the_batch_without_shrinking_it(node, overload):
+    node.limit, node.reject = 30, overload
+    with pytest.raises(click.ClickException, match="ETH_RPC_URL: "):
+        evm._post_batch("http://node", _storage_batch(70))
+    assert node.posts == [70]
+
+
+def test_requests_limited_by_other_than_size_are_answered_as_errors(node):
+    node.limit, node.cutoff = 30, (-32005, "Too many requests")
+    answers = evm._post_batch("http://node", _storage_batch(70))
+    assert node.posts == [70]
+    assert answers[69]["error"] == {"code": -32005, "message": "Too many requests"}
