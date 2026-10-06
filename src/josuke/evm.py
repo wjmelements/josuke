@@ -171,12 +171,12 @@ class EvmRelay:
         self._proc.stdin.write(line.encode() + b"\n")
 
     def close(self) -> None:
-        # At end of input evm exits on its own, flushing any trace; terminate only a stuck one.
+        # Each call's trace was delivered as it returned, so what is left belongs to one an
+        # exception cut short. Unread, it would stall such a call, which may never end.
         self._proc.stdin.close()
         if self._on_trace is not None:
-            os.set_blocking(self._trace, True)
-            self._read_trace()  # to the end, which evm writes as it exits
             os.close(self._trace)
+        # At end of input evm exits on its own; terminate only a stuck one.
         try:
             self._proc.wait(timeout=5)
         except subprocess.TimeoutExpired:
