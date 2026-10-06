@@ -83,9 +83,9 @@ class Broadcast:
         return next((c for c in self.creations if c.address == address), None)
 
     def _gas(self, unsent: list[Creation]) -> tuple[list[str], list[int]]:
-        """(fee flags shared by every send, gas limit per creation), from one batched
-        request, so each `cast send` needs no lookups of its own. A creation whose
-        constructor reverts fails here, before anything is sent."""
+        """(fee flags shared by every send, gas limit per creation), from batched requests,
+        so each `cast send` needs no lookups of its own. A creation whose constructor
+        reverts fails here, before anything is sent."""
         block, priority, *limits = rpc_batch(
             [
                 ("eth_getBlockByNumber", ["latest", False]),

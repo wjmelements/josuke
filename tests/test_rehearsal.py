@@ -55,7 +55,7 @@ def chain(monkeypatch):
     rpc.set_storage(PROXY, slot(KEEP), word(OLD))
     rpc.set_storage(PROXY, slot(DROP), word(OLD))
     monkeypatch.setattr(rehearsal, "eth_get_code", lambda address: rpc.code[address.lower()])
-    with patch("josuke.evm.post", rpc):
+    with patch("josuke.ethjsonrpc.post", rpc):
         yield rpc
 
 

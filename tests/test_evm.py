@@ -1,7 +1,6 @@
 """Tests for josuke.evm's .evm-facet artifact build and the `evm -nx` relay."""
 
 import json
-import json as json_module
 import pathlib
 import shutil
 import subprocess
@@ -11,7 +10,7 @@ from unittest.mock import patch
 import click
 import pytest
 
-from ethrpc_mock import FakeResponse, MockEthRpc
+from ethrpc_mock import MockEthRpc
 from josuke import evm
 from josuke.broadcast import create_address
 from josuke.evm import EvmRelay, _governing_makefile, evm_artifact, replay_create
@@ -129,7 +128,7 @@ DEPLOYER = "0x" + "aa" * 20
 def eth_rpc(monkeypatch):
     monkeypatch.setenv("ETH_RPC_URL", "http://mock.rpc/test")
     rpc = MockEthRpc()
-    with patch("josuke.evm.post", rpc):
+    with patch("josuke.ethjsonrpc.post", rpc):
         yield rpc
 
 
@@ -222,117 +221,3 @@ def test_evm_relay_reports_exchanges(eth_rpc):
     methods = {r["method"] for batch in seen for r in (batch if isinstance(batch, list) else [batch])}
     assert "eth_blockNumber" in methods and "eth_getCode" in methods
 
-
-def _storage_batch(count: int) -> list[dict]:
-    return [
-        {"jsonrpc": "2.0", "id": i, "method": "eth_getStorageAt", "params": [DEPLOYER, f"0x{i:064x}", "0x10"]}
-        for i in range(count)
-    ]
-
-
-def _error(code: int, message: str, id=None) -> dict:
-    return {"jsonrpc": "2.0", "id": id, "error": {"code": code, "message": message}}
-
-
-# How each node rejects a batch of more requests than it takes.
-REJECTIONS = {
-    "geth": lambda batch: (200, [_error(-32600, "batch too large", batch[0]["id"])]),
-    "erigon": lambda batch: (200, [_error(-32600, "batch limit 100 exceeded (can increase by --rpc.batch.limit). "
-                                                  f"Requested batch of size: {len(batch)}", batch[0]["id"])]),
-    "jsonrpsee": lambda batch: (200, _error(-32010, "The batch request was too large")),
-    "jsonrpsee response": lambda batch: (200, _error(-32011, "The batch response was too large")),
-    "jsonrpsee body": lambda batch: (413, _error(-32007, "Request is too big")),
-    "nethermind": lambda batch: (503, _error(-32005, "Batch size limit exceeded")),
-    "besu": lambda batch: (200, _error(-32005, "Number of requests exceeds max batch size")),
-}
-# How each node answers the requests left once a batch's response grows too large.
-CUTOFFS = {
-    "geth": (-32003, "response too large"),
-    "nethermind": (-32005, "MaxBatchResponseBodySize of 32768KB exceeded"),
-}
-
-
-@pytest.fixture
-def node(monkeypatch):
-    """A node taking at most `limit` requests in a batch, rejecting more with `reject`,
-    or answering those past `limit` with `cutoff`; `posts` holds each batch's size."""
-    monkeypatch.setattr(evm, "_batch_limits", {})
-    rpc = MockEthRpc()
-    for i in range(250):
-        rpc.set_storage(DEPLOYER, f"0x{i:064x}", f"0x{i + 1:064x}")
-    node = type("Node", (), {"limit": None, "reject": None, "cutoff": None, "posts": []})()
-
-    def post(url, json):
-        node.posts.append(len(json))
-        if node.limit is None or len(json) <= node.limit:
-            return rpc(url, json=json)
-        if node.reject is not None:
-            status, body = node.reject(json)
-            return FakeResponse(status, json_module.dumps(body))
-        answers = json_module.loads(rpc(url, json=json[: node.limit]).text)
-        answers += [_error(*node.cutoff, req["id"]) for req in json[node.limit :]]
-        return FakeResponse(200, json_module.dumps(answers))
-
-    monkeypatch.setattr(evm, "post", post)
-    return node
-
-
-def _assert_answered(answers: dict, count: int) -> None:
-    assert answers == {
-        i: {"jsonrpc": "2.0", "id": i, "result": f"0x{i + 1:064x}"} for i in range(count)
-    }
-
-
-def test_batches_carry_at_most_a_hundred_requests(node):
-    _assert_answered(evm._post_batch("http://node", _storage_batch(250)), 250)
-    assert node.posts == [100, 100, 50]
-
-
-@pytest.mark.parametrize("reject", REJECTIONS.values(), ids=REJECTIONS.keys())
-def test_a_batch_rejected_as_too_large_is_halved(node, reject):
-    node.limit, node.reject = 30, reject
-    _assert_answered(evm._post_batch("http://node", _storage_batch(70)), 70)
-    assert node.posts == [70, 35, 17, 17, 17, 17, 2]
-    node.posts.clear()
-    evm._post_batch("http://node", _storage_batch(34))
-    assert node.posts == [17, 17]  # the node's limit is remembered
-
-
-@pytest.mark.parametrize("cutoff", CUTOFFS.values(), ids=CUTOFFS.keys())
-def test_requests_cut_off_by_too_large_a_response_are_resent(node, cutoff):
-    node.limit, node.cutoff = 30, cutoff
-    _assert_answered(evm._post_batch("http://node", _storage_batch(70)), 70)
-    assert node.posts == [70, 30, 10]
-
-
-def test_a_rejected_batch_of_one_fails(node):
-    node.limit, node.reject = 0, REJECTIONS["jsonrpsee"]
-    with pytest.raises(click.ClickException, match="rejected a batch of one request"):
-        evm._post_batch("http://node", _storage_batch(1))
-
-
-# -32005 also means a node is overloaded, or rate-limits, rather than that a batch is too large.
-OVERLOADS = {
-    "erigon": lambda batch: (503, _error(-32005, "server overloaded, retry later")),
-    "erigon database": lambda batch: (
-        503, [_error(-32005, "server overloaded, retry later", req["id"]) for req in batch]
-    ),
-    "rate limit": lambda batch: (429, _error(-32005, "Too many requests")),
-    # As besu rejects too large a batch, but for some other limit.
-    "limit over HTTP 200": lambda batch: (200, _error(-32005, "Too many requests")),
-}
-
-
-@pytest.mark.parametrize("overload", OVERLOADS.values(), ids=OVERLOADS.keys())
-def test_an_overloaded_node_fails_the_batch_without_shrinking_it(node, overload):
-    node.limit, node.reject = 30, overload
-    with pytest.raises(click.ClickException, match="ETH_RPC_URL: "):
-        evm._post_batch("http://node", _storage_batch(70))
-    assert node.posts == [70]
-
-
-def test_requests_limited_by_other_than_size_are_answered_as_errors(node):
-    node.limit, node.cutoff = 30, (-32005, "Too many requests")
-    answers = evm._post_batch("http://node", _storage_batch(70))
-    assert node.posts == [70]
-    assert answers[69]["error"] == {"code": -32005, "message": "Too many requests"}

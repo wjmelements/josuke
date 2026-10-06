@@ -4,11 +4,10 @@ import pathlib
 import selectors
 import subprocess
 from dataclasses import dataclass
-from os import environ
 
 import click
-from requests import post
 
+from .ethjsonrpc import post_batch, post_request
 from .proc import run
 from .trace import brief, log, span
 
@@ -118,9 +117,9 @@ class EvmRelay:
         if misses:
             payload = [req for _, req, _ in misses]
             if isinstance(rpc_request, list):
-                by_id = _post_batch(environ["ETH_RPC_URL"], payload)
+                by_id = post_batch(payload, label="evm rpc")
             else:
-                by_id = {payload[0].get("id"): _post(environ["ETH_RPC_URL"], payload[0])[1]}
+                by_id = {payload[0].get("id"): post_request(payload[0], label="evm rpc")}
             for i, req, key in misses:
                 answer = by_id[req.get("id")]
                 if "result" in answer:
@@ -195,90 +194,6 @@ class EvmRelay:
 
     def __exit__(self, *exc):
         self.close()
-
-
-# Batches carry at most this many requests (erigon's default limit), fewer once a node
-# rejects that many.
-_BATCH_LIMIT = 100
-_batch_limits: dict[str, int] = {}  # ETH_RPC_URL -> the most requests it has taken in one batch
-# Rejecting a whole batch as too large: geth and erigon -32600; jsonrpsee (reth, forest)
-# -32010 for its requests, -32011 for its response, -32007 for its body. -32005: _too_large.
-_BATCH_TOO_LARGE = {-32600, -32007, -32010, -32011}
-# geth's answer to the requests left once a batch's response grows too large.
-_RESPONSE_TOO_LARGE = {-32003}
-
-
-def _post(url: str, payload):
-    """POST one JSON-RPC request or batch; the response and its decoded body, or None if it has none.
-    A batch may come back with 413 or 503, which nodes also send when it is too large."""
-    requests = payload if isinstance(payload, list) else [payload]
-    label = ", ".join(f"{req['method']} {brief(req.get('params', []))}" for req in requests)
-    with span(f"evm rpc [{len(requests)}] {label}"):
-        response = post(url, json=payload)
-    try:
-        body = json.loads(response.text)
-    except ValueError:
-        body = None
-    if response.status_code != 200 and not (response.status_code in (413, 503) and isinstance(payload, list)):
-        raise click.ClickException(f"ETH_RPC_URL: HTTP {response.status_code}")
-    return response, body
-
-
-def _error(answer) -> dict | None:
-    error = answer.get("error") if isinstance(answer, dict) else None
-    return error if isinstance(error, dict) else None
-
-
-def _too_large(answer, codes: set[int]) -> bool:
-    """Whether `answer` is an error saying a batch was too large, by one of `codes`, or by
-    -32005 naming the batch: nethermind's "Batch size limit exceeded" and
-    "MaxBatchResponseBodySize … exceeded", and besu's "… exceeds max batch size". Nodes
-    send -32005 for other limits too: erigon's and nethermind's overload ("server
-    overloaded", "Too many requests"), providers' rate limits, and limits of a method."""
-    error = _error(answer)
-    if error is None:
-        return False
-    if error.get("code") == -32005:
-        return "batch" in str(error.get("message", "")).lower()
-    return error.get("code") in codes
-
-
-def _post_batch(url: str, batch: list[dict]) -> dict:
-    """The answer to each request of `batch`, by id. It is sent in batches of at most
-    the node's limit, and a batch the node finds too large is halved and resent."""
-    answers = {}
-    pending = list(batch)
-    while pending:
-        chunk = pending[: _batch_limits.get(url, _BATCH_LIMIT)]
-        response, body = _post(url, chunk)
-        fetched = body if isinstance(body, list) else [body]
-        by_id = {answer.get("id"): answer for answer in fetched if isinstance(answer, dict)}
-        rejected = (
-            response.status_code == 413
-            or any(req.get("id") not in by_id for req in chunk)
-            and any(_too_large(answer, _BATCH_TOO_LARGE) for answer in fetched)
-        )
-        if rejected:
-            # The node answered the batch with one error rather than each request.
-            if len(chunk) == 1:
-                raise click.ClickException(f"ETH_RPC_URL: rejected a batch of one request: {body}")
-            _batch_limits[url] = len(chunk) // 2
-            continue
-        if response.status_code != 200:
-            # Overloaded (erigon and nethermind answer 503), not too large a batch.
-            errors = [error["message"] for answer in fetched if (error := _error(answer)) and "message" in error]
-            raise click.ClickException(f"ETH_RPC_URL: HTTP {response.status_code}: {errors[0] if errors else body}")
-        if any(req.get("id") not in by_id for req in chunk):
-            raise click.ClickException(f"ETH_RPC_URL: no answer to some requests of a batch: {body}")
-        # Requests cut off by too large a response are resent in a smaller batch.
-        cut = [req for req in chunk if _too_large(by_id[req.get("id")], _RESPONSE_TOO_LARGE)]
-        if cut and len(chunk) > 1:
-            _batch_limits[url] = max(1, len(chunk) - len(cut))
-        else:
-            cut = []
-        answers.update((req.get("id"), by_id[req.get("id")]) for req in chunk if req not in cut)
-        pending = cut + pending[len(chunk) :]
-    return answers
 
 
 # Opcodes that observe the created contract's own address, which CREATE derives

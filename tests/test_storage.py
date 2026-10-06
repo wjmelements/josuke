@@ -54,7 +54,7 @@ def eth_rpc(monkeypatch):
     monkeypatch.setenv("ETH_RPC_URL", "http://mock.rpc/test")
     rpc = MockEthRpc(block_number=BLOCK_NUMBER)
     rpc.set_code(PROXY_ADDRESS, PROXY_CODE)
-    with patch("josuke.evm.post", rpc):
+    with patch("josuke.ethjsonrpc.post", rpc):
         yield rpc
 
 
@@ -130,7 +130,7 @@ def probe(code: str, storage: dict, selectors: list[str], codes: dict | None = N
     for key, value in storage.items():
         rpc.set_storage(PROXY_ADDRESS, key, value)
     proxy_storage = ProxyStorage(PROXY_ADDRESS)
-    with patch("josuke.evm.post", rpc):
+    with patch("josuke.ethjsonrpc.post", rpc):
         proxy_storage.fetch([Selector(s, f"f{s}()") for s in selectors])
     return proxy_storage
 

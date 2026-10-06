@@ -1,10 +1,10 @@
 """Shared JSON-RPC mock for exercising josuke's ``ETH_RPC_URL`` calls without a node.
 
-Patch it over ``requests.post`` in whichever module is under test, e.g.::
+Patch it over ``josuke.ethjsonrpc.post``, which sends every request, e.g.::
 
     rpc = MockEthRpc()
     rpc.set_code(ADDRESS, "0x60006000...")
-    with patch("josuke.delegate.post", rpc):
+    with patch("josuke.ethjsonrpc.post", rpc):
         ...
 """
 
