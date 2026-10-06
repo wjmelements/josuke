@@ -10,6 +10,9 @@ from .selectors import Selector
 _ADDRESS_MASK = (1 << 160) - 1
 # Stands in for a delegate while slot detection tries each slot the proxy reads.
 _STUB = "0x" + "5b" * 20
+# Calls the proxy as a user would. Not the zero address, which equals any slot not yet
+# fetched, so a check of msg.sender against one would match.
+_CALLER = "0x" + "c0" * 20
 
 
 def slot_address(raw: str | None) -> str | None:
@@ -26,13 +29,20 @@ def delegate_stub(address: str) -> str:
     return f"0x{PUSH20}{address.removeprefix('0x').lower()}{PUSH0}{MSTORE}{MSIZE}{PUSH0}{RETURN}"
 
 
-def _proxy_reads(steps: list[dict], proxy: int) -> list[str]:
-    """Each slot of `proxy`'s storage read in one traced call to it, in order.
+_CALLS = {"CALL", "STATICCALL", "DELEGATECALL", "CALLCODE", "CREATE", "CREATE2"}
+# Far more than any dispatch needs, so a loop the stub's address drives as a count runs out.
+_GAS = 1_000_000
+
+
+def _proxy_events(steps: list[dict], proxy: int) -> list[tuple[int, str | None]]:
+    """For one traced call to `proxy`, in order: (depth, slot) for each read of its
+    storage, and (depth, None) for each call made. `steps` need only be those of
+    SLOAD and the calls.
 
     A frame runs in its callee's storage after CALL and STATICCALL, but in its
     caller's after DELEGATECALL and CALLCODE, so the reads of a dispatcher the proxy
     delegates to count, as do its delegate's."""
-    reads = {}
+    events = []
     frames = [proxy]  # whose storage each depth uses; None for a created contract
     callee = None
     for step in steps:
@@ -42,15 +52,33 @@ def _proxy_reads(steps: list[dict], proxy: int) -> list[str]:
         else:
             del frames[depth:]
         op, stack = step["opName"], step["stack"]
-        if op == "SLOAD" and frames[-1] == proxy:
-            reads.setdefault(f"0x{int(stack[-1], 16):064x}")
+        if op == "SLOAD":
+            if frames[-1] == proxy:
+                events.append((depth, f"0x{int(stack[-1], 16):064x}"))
+            continue
+        events.append((depth, None))
         if op in ("CALL", "STATICCALL"):
             callee = int(stack[-2], 16) & _ADDRESS_MASK
         elif op in ("DELEGATECALL", "CALLCODE"):
             callee = frames[-1]
-        elif op in ("CREATE", "CREATE2"):
+        else:
             callee = None
-    return list(reads)
+    return events
+
+
+def _steered_by(events: list[tuple[int, str | None]], key: str) -> set[str]:
+    """The slots read after `key` until the frame that read it, or one that called
+    that frame, makes a call: the reads that could still change where the dispatch goes."""
+    reads, at = set(), None
+    for depth, slot in events:
+        if at is None:
+            at = depth if slot == key else None
+        elif slot is None:
+            if depth <= at:
+                break
+        else:
+            reads.add(slot)
+    return reads
 
 
 class ProxyStorage:
@@ -66,31 +94,45 @@ class ProxyStorage:
         routes the selector. Fails if none does.
 
         Slots failing the stub test are then fetched in batch, and the walks go on.
-        Unfetched slots read as zero, so a test only counts once every other slot it read is fetched.
-        Thus a real delegate runs only behind a failed slot."""
+        Unfetched slots read as zero, so a test only counts once every other slot it read is fetched,
+        up to where the dispatch hands off: what a delegate reads is not chased. Every call has _GAS,
+        and a test that runs out of it fails, as when the stub's address is taken for a count."""
         wanted = list(dict.fromkeys(selector.selector for selector in selectors))
         # A lone selector is probed beside a dummy, so a slot routing every selector is not unique.
         dummies = [d for d in ("0xffffffff", "0xfffffffe") if d not in wanted]
         probed = wanted + dummies[: max(0, 2 - len(wanted))]
         proxy = self.address.lower()
-        # A whole account, so evm fetches none of it.
-        stub = {_STUB: {"code": delegate_stub(_STUB), "nonce": "0x0", "balance": "0x0"}}
+        # Whole accounts, so evm fetches none of them.
+        accounts = {
+            _STUB: {"code": delegate_stub(_STUB), "nonce": "0x0", "balance": "0x0"},
+            _CALLER: {"code": "0x", "nonce": "0x0", "balance": "0x0"},
+        }
         routed = f"0x{_STUB[2:].rjust(64, '0')}"
         known = {}  # the proxy's storage, as fetched
         trace = []
-        with EvmRelay(cache=self.cache, json_output=True, on_trace=trace.append) as relay:
+        with EvmRelay(cache=self.cache, json_output=True, on_trace=trace.append, trace_ops={"SLOAD", *_CALLS}) as relay:
 
-            def call(selector: str, storage: dict) -> tuple[dict, list[str]]:
-                """The call's result, and the slots of the proxy's storage it read, in order."""
+            def call(selector: str, storage: dict) -> tuple[bool, bool, list[tuple[int, str | None]]]:
+                """Whether the call reached the stub, whether any frame of it ran out of gas, and its events."""
                 trace.clear()
-                overrides = {**stub, proxy: {"state": storage}}
-                result = json.loads(relay.call({"to": proxy, "data": selector, "stateOverrides": overrides}))
-                return result, _proxy_reads([step for step in trace if "opName" in step], int(proxy, 16))
+                overrides = {**accounts, proxy: {"state": storage}}
+                request = {"from": _CALLER, "to": proxy, "data": selector, "gas": hex(_GAS)}
+                request["stateOverrides"] = overrides
+                result = json.loads(relay.call(request))
+                reached = int(result["status"], 16) == 1 and result["returnData"] == routed
+                exhausted = any(step.get("error") == "out of gas" for step in trace)
+                steps = [step for step in trace if step.get("opName") in _CALLS or step.get("opName") == "SLOAD"]
+                return reached, exhausted, _proxy_events(steps, int(proxy, 16))
+
+            def reads(selector: str) -> list[str]:
+                """The slots of the proxy's storage the selector's dispatch reads, in order."""
+                events = call(selector, known)[2]
+                return list(dict.fromkeys(slot for _, slot in events if slot is not None))
 
             shared = set()  # slots that route more than one selector
             claims = {}  # slot -> the selector it routes
             found = {}  # selector -> slot
-            failed = set()  # (selector, slot) that did not route, with every other slot it read fetched
+            failed = set()  # (selector, slot) that did not route, with every slot steering it fetched
             pending = probed
             while pending:
                 needs = set()  # slots to fetch before the waiting selectors can go on
@@ -98,15 +140,16 @@ class ProxyStorage:
                 queue = list(pending)
                 while queue:
                     selector = queue.pop()
-                    for key in call(selector, known)[1]:
+                    for key in reads(selector):
                         if key not in shared and (selector, key) not in failed:
-                            result, read = call(selector, {**known, key: routed})
-                            unknown = set(read) - known.keys() - {key}
+                            reached, exhausted, events = call(selector, {**known, key: routed})
+                            # Out of gas, it is no route, whatever else it read.
+                            unknown = set() if exhausted else _steered_by(events, key) - known.keys() - {key}
                             if unknown:
                                 needs |= unknown
                                 waiting.append(selector)
                                 break
-                            if int(result["status"], 16) == 1 and result["returnData"] == routed:
+                            if reached and not exhausted:
                                 other = claims.pop(key, None)
                                 if other is None:
                                     claims[key] = selector

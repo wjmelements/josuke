@@ -51,13 +51,19 @@ class EvmRelay:
     line of evm's EIP-3155 trace, parsed, over a pipe rather than a file. evm
     flushes its trace before each line it writes to stdout, so by the time a state
     fetch is answered, or :meth:`call` returns, every step before it has been
-    delivered (a step awaiting the fetch is delivered after it)."""
+    delivered (a step awaiting the fetch is delivered after it). ``trace_ops``
+    limits ``on_trace`` to the steps of those opcodes, steps that failed (with an
+    ``error``, such as "out of gas"), and each call's summary line, sparing the
+    cost of parsing the rest."""
 
-    def __init__(self, cache: dict | None = None, json_output: bool = False, on_trace=None):
+    def __init__(
+        self, cache: dict | None = None, json_output: bool = False, on_trace=None, trace_ops: set[str] | None = None
+    ):
         self.cache = {} if cache is None else cache
         args = ["evm", "-nxs" if json_output else "-nx"]
         trace_write = None
         self._on_trace = on_trace
+        self._trace_ops = None if trace_ops is None else {op.encode() for op in trace_ops}
         self._selector = selectors.DefaultSelector()
         if on_trace is not None:
             self._trace, trace_write = os.pipe()
@@ -165,7 +171,8 @@ class EvmRelay:
                 return
             *lines, self._trace_buf = (self._trace_buf + chunk).split(b"\n")
             for line in lines:
-                self._on_trace(json.loads(line))
+                if self._trace_ops is None or _delivered(line, self._trace_ops):
+                    self._on_trace(json.loads(line))
 
     def _write(self, line: str) -> None:
         self._proc.stdin.write(line.encode() + b"\n")
@@ -190,6 +197,15 @@ class EvmRelay:
 
     def __exit__(self, *exc):
         self.close()
+
+
+def _delivered(line: bytes, ops: set[bytes]) -> bool:
+    """Whether an EIP-3155 trace line is a summary, a step that failed, or a step of one of `ops`."""
+    start = line.find(b'"opName":"')
+    if start < 0 or b'"error":' in line:
+        return True
+    start += len(b'"opName":"')
+    return line[start : line.index(b'"', start)] in ops
 
 
 # Opcodes that observe the created contract's own address, which CREATE derives

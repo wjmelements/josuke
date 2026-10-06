@@ -1,3 +1,5 @@
+import pathlib
+import subprocess
 from collections import defaultdict
 from unittest.mock import patch
 
@@ -8,8 +10,9 @@ from eth_utils import keccak
 from ethrpc_mock import MockEthRpc
 from reference_proxy import PROXY_CODE as ERC8167_PROXY_CODE, mapping_slot, prefixed_proxy, word
 from josuke.opcodes import (
-    ADD, CALLDATACOPY, CALLDATALOAD, CALLDATASIZE, DELEGATECALL, DUP1, DUP5, EXTCODEHASH, EXTCODESIZE, GAS, ISZERO,
-    JUMP, JUMPDEST, JUMPI, MSIZE, MSTORE, POP, PUSH0, PUSH1, PUSH4, PUSH32, RETURN, RETURNDATACOPY, RETURNDATASIZE,
+    ADD, CALLDATACOPY, CALLDATALOAD, CALLDATASIZE, DELEGATECALL, DUP1, DUP2, DUP5, EXTCODEHASH, EXTCODESIZE, GAS,
+    ISZERO, JUMP, JUMPDEST, JUMPI, LT, MSIZE, MSTORE, POP, PUSH0, PUSH1, PUSH4, PUSH32, RETURN, RETURNDATACOPY,
+    RETURNDATASIZE,
     REVERT, SHA3, SHR, SLOAD, STOP, SWAP1, XOR,
 )
 from josuke.selectors import Selector
@@ -453,3 +456,51 @@ def test_runs_no_delegate_reading_endlessly_deeper(monkeypatch):
     assert storage.storage_keys == {LINKED: mapping_slot(LINKED)}
     assert storage.storage_values == {LINKED: word(DELEGATE)}
     assert [req["params"][1] for req in rpc.requests_for("eth_getStorageAt")] == [mapping_slot(LINKED)]
+
+
+# address[] guards at slot 2, its elements from slot 3: for (i = 0; i < guards.length; i++) guards[i];
+# then the reference proxy. Pointed at the stub, the length is about 2**160.
+GUARDS_LOOP = (
+    f"{JUMPDEST}{DUP2}{DUP2}{LT}{ISZERO}{PUSH1}18{JUMPI}"  # at 4: until i == length, to 24
+    f"{DUP1}{PUSH1}03{ADD}{SLOAD}{POP}{PUSH1}01{ADD}{PUSH1}04{JUMP}"  # guards[i]; i++
+)
+GUARDED_PROXY_CODE = prefixed_proxy(f"{PUSH1}02{SLOAD}{PUSH0}" + GUARDS_LOOP + f"{JUMPDEST}{POP}{POP}")
+
+
+@pytest.mark.timeout(5)
+def test_finds_the_route_after_a_loop_over_an_array(monkeypatch):
+    monkeypatch.setenv("ETH_RPC_URL", "http://mock.rpc/test")
+    guards = {"0x2": "0x" + "00" * 31 + "01", "0x3": word(OLD_IMPLEMENTATION)}
+    storage = probe(GUARDED_PROXY_CODE, {**guards, mapping_slot(LINKED): word(DELEGATE)}, [LINKED, UNLINKED])
+
+    assert storage.storage_keys == {LINKED: mapping_slot(LINKED), UNLINKED: mapping_slot(UNLINKED)}
+    assert storage.storage_values == {LINKED: word(DELEGATE), UNLINKED: "0x" + "00" * 32}
+
+
+# The reference dispatch behind a loop that reverts for any caller in `guards`.
+GUARDED_EVM = pathlib.Path(__file__).parent / "fixtures" / "guarded-proxy.evm"
+GUARDS_LENGTH = f"0x{1 << 160:064x}"
+GUARDS_END = int("55" * 31 + "54", 16)
+
+
+@pytest.mark.timeout(5)
+def test_finds_the_route_behind_a_guard_loop_the_stub_runs_out_of_gas(monkeypatch):
+    # Pointed at the stub, guards.length is about 2**160, so that test runs out of
+    # gas; the walk takes it for no route, fetches the length, and goes on.
+    monkeypatch.setenv("ETH_RPC_URL", "http://mock.rpc/test")
+    code = subprocess.run(["evm", str(GUARDED_EVM)], capture_output=True, text=True, check=True).stdout.strip()
+    guard = f"0x{GUARDS_END + 1:064x}"
+    rpc = MockEthRpc(block_number=BLOCK_NUMBER)
+    rpc.set_code(PROXY_ADDRESS, code)
+    for key, value in {GUARDS_LENGTH: "0x" + "00" * 31 + "01", guard: word(OLD_IMPLEMENTATION)}.items():
+        rpc.set_storage(PROXY_ADDRESS, key, value)
+    rpc.set_storage(PROXY_ADDRESS, selector_slot(LINKED), word(DELEGATE))
+    storage = ProxyStorage(PROXY_ADDRESS)
+    with patch("josuke.ethjsonrpc.post", rpc):
+        storage.fetch([Selector(s, f"f{s}()") for s in (LINKED, UNLINKED)])
+
+    assert storage.storage_keys == {LINKED: selector_slot(LINKED), UNLINKED: selector_slot(UNLINKED)}
+    assert storage.storage_values == {LINKED: word(DELEGATE), UNLINKED: "0x" + "00" * 32}
+    # Not the guards the stub's count read before it ran out of gas.
+    fetched = {req["params"][1] for req in rpc.requests_for("eth_getStorageAt")}
+    assert fetched == {GUARDS_LENGTH, guard, selector_slot(LINKED), selector_slot(UNLINKED)}

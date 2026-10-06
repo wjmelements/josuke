@@ -11,7 +11,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - name: Shallow-clone EVM assembler
-        run: git clone --depth 1 --revision 5caefc3163466242452dc10458031ee18bf58eae --recurse-submodules --shallow-submodules --no-tags https://github.com/wjmelements/evm.git
+        run: git clone --depth 1 --revision 98409233b4ed9fb79efa013fe17ad42b155adf03 --recurse-submodules --shallow-submodules --no-tags https://github.com/wjmelements/evm.git
       - name: Install libcurl
         run: sudo apt-get update && sudo apt-get install -y libcurl4-openssl-dev
       - name: Build EVM assembler
