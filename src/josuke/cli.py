@@ -5,6 +5,7 @@ import pathlib
 import click
 from eth_utils import to_checksum_address
 
+from .abi import run_abi
 from .accept import run_accept
 from .audit import run_audit
 from .check import run_check
@@ -158,3 +159,15 @@ def check(ledger_path, chain, strict, fmt):
     each facet as new, changed, unchanged or removed against `current`.
     """
     run_check(ledger_path, chain, strict, fmt)
+
+
+@main.command()
+@click.argument("address")
+@ledger_option
+def abi(address, ledger_path):
+    """Print proxy ADDRESS's ABI, merged from the facets its `facetSrc` resolves to.
+
+    Builds with `forge` and needs no RPC. Each function appears once per selector,
+    and `selectors()` is added when no facet implements it, as `deploy` would.
+    """
+    run_abi(ledger_path, parse_address(address))
