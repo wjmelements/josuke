@@ -1,8 +1,8 @@
 import json
 import os
 import pathlib
+import selectors
 import subprocess
-import threading
 from dataclasses import dataclass
 from os import environ
 
@@ -49,30 +49,36 @@ class EvmRelay:
 
     ``json_output`` runs ``evm -nxs``, whose result lines are JSON objects that
     also report the block values each request read. ``on_trace`` receives each
-    line of evm's EIP-3155 trace, parsed, over a pipe rather than a file; every
-    line has been delivered once the relay is closed."""
+    line of evm's EIP-3155 trace, parsed, over a pipe rather than a file. evm
+    flushes its trace before each line it writes to stdout, so by the time a state
+    fetch is answered, or :meth:`call` returns, every step before it has been
+    delivered (a step awaiting the fetch is delivered after it)."""
 
     def __init__(self, cache: dict | None = None, json_output: bool = False, on_trace=None):
         self.cache = {} if cache is None else cache
         args = ["evm", "-nxs" if json_output else "-nx"]
         trace_write = None
-        self._tracer = None
+        self._on_trace = on_trace
+        self._selector = selectors.DefaultSelector()
         if on_trace is not None:
-            trace_read, trace_write = os.pipe()
+            self._trace, trace_write = os.pipe()
             args += ["-t", "-T", f"/dev/fd/{trace_write}"]
-            # Drained concurrently: a full pipe would block evm while we wait on its stdout.
-            self._tracer = threading.Thread(target=_read_trace, args=(trace_read, on_trace), daemon=True)
-            self._tracer.start()
+            # Drained alongside stdout: a full pipe would block evm while we wait on its stdout.
+            os.set_blocking(self._trace, False)
+            self._selector.register(self._trace, selectors.EVENT_READ)
+            self._trace_buf = b""
         self._proc = subprocess.Popen(
             args,
             stdin=subprocess.PIPE,
             stdout=subprocess.PIPE,
-            text=True,
-            bufsize=1,
+            bufsize=0,
             pass_fds=() if trace_write is None else (trace_write,),
         )
         if trace_write is not None:
-            os.close(trace_write)  # evm holds the only write end, so the reader sees EOF when it exits
+            os.close(trace_write)  # evm holds the only write end, so the trace ends when it exits
+        self._stdout = self._proc.stdout.fileno()
+        self._selector.register(self._stdout, selectors.EVENT_READ)
+        self._out = b""
 
     def call(self, request: dict, on_exchange=None) -> str:
         """Run one request (a ``{"data": ...}`` create or a ``{"to": ...}`` call)
@@ -82,7 +88,7 @@ class EvmRelay:
         with span(f"evm {brief(request)}"):
             self._write(json.dumps(request))
             while True:
-                line = self._proc.stdout.readline()
+                line = self._readline()
                 if line == "":
                     raise click.ClickException("evm -nx exited before returning a result")
                 line = line.strip()
@@ -111,13 +117,10 @@ class EvmRelay:
                 misses.append((i, req, key))
         if misses:
             payload = [req for _, req, _ in misses]
-            label = ", ".join(f"{req['method']} {brief(req.get('params', []))}" for req in payload)
-            with span(f"evm rpc [{len(payload)}] {label}"):
-                response = post(environ["ETH_RPC_URL"], json=payload if isinstance(rpc_request, list) else payload[0])
-            if response.status_code != 200:
-                raise click.ClickException(f"ETH_RPC_URL: HTTP {response.status_code}")
-            fetched = json.loads(response.text)
-            by_id = {r.get("id"): r for r in (fetched if isinstance(fetched, list) else [fetched])}
+            if isinstance(rpc_request, list):
+                by_id = _post_batch(environ["ETH_RPC_URL"], payload)
+            else:
+                by_id = {payload[0].get("id"): _post(environ["ETH_RPC_URL"], payload[0])[1]}
             for i, req, key in misses:
                 answer = by_id[req.get("id")]
                 if "result" in answer:
@@ -125,21 +128,67 @@ class EvmRelay:
                 answers[i] = answer
         return answers if isinstance(rpc_request, list) else answers[0]
 
+    def storage_at(self, address: str, keys) -> dict[str, str]:
+        """Fetch `keys` of `address`'s storage in one batch, at the block evm reads, into
+        the cache as evm would fetch them. The relay must have run a call first."""
+        block = self.cache[("eth_blockNumber", "[]")]
+        batch = [
+            {"jsonrpc": "2.0", "id": i, "method": "eth_getStorageAt", "params": [address, key, block]}
+            for i, key in enumerate(keys)
+        ]
+        answers = self._answer(batch)
+        if any("result" not in answer for answer in answers):
+            raise click.ClickException(f"ETH_RPC_URL: eth_getStorageAt {address} failed")
+        return {req["params"][1]: answer["result"] for req, answer in zip(batch, answers)}
+
+    def _readline(self) -> str:
+        """evm's next stdout line, or "" once it has exited, after the trace it flushed before it."""
+        while b"\n" not in self._out:
+            ready = {key.fd for key, _ in self._selector.select()}
+            if self._on_trace is not None and self._trace in ready:
+                self._read_trace()
+            if self._stdout in ready:
+                chunk = os.read(self._stdout, 1 << 16)
+                if not chunk:
+                    return ""
+                self._out += chunk
+        if self._on_trace is not None:
+            self._read_trace()
+        line, _, self._out = self._out.partition(b"\n")
+        return line.decode() + "\n"
+
+    def _read_trace(self) -> None:
+        """Deliver every complete trace line in the pipe."""
+        while True:
+            try:
+                chunk = os.read(self._trace, 1 << 16)
+            except BlockingIOError:
+                return
+            if not chunk:
+                if self._trace in self._selector.get_map():
+                    self._selector.unregister(self._trace)
+                return
+            *lines, self._trace_buf = (self._trace_buf + chunk).split(b"\n")
+            for line in lines:
+                self._on_trace(json.loads(line))
+
     def _write(self, line: str) -> None:
-        self._proc.stdin.write(line + "\n")
-        self._proc.stdin.flush()
+        self._proc.stdin.write(line.encode() + b"\n")
 
     def close(self) -> None:
         # At end of input evm exits on its own, flushing any trace; terminate only a stuck one.
         self._proc.stdin.close()
+        if self._on_trace is not None:
+            os.set_blocking(self._trace, True)
+            self._read_trace()  # to the end, which evm writes as it exits
+            os.close(self._trace)
         try:
             self._proc.wait(timeout=5)
         except subprocess.TimeoutExpired:
             self._proc.terminate()
             self._proc.wait()
         self._proc.stdout.close()
-        if self._tracer is not None:
-            self._tracer.join()
+        self._selector.close()
 
     def __enter__(self):
         return self
@@ -148,10 +197,70 @@ class EvmRelay:
         self.close()
 
 
-def _read_trace(fd: int, on_trace) -> None:
-    with os.fdopen(fd) as lines:
-        for line in lines:
-            on_trace(json.loads(line))
+# Batches carry at most this many requests (erigon's default limit), fewer once a node
+# rejects that many.
+_BATCH_LIMIT = 100
+_batch_limits: dict[str, int] = {}  # ETH_RPC_URL -> the most requests it has taken in one batch
+# How nodes reject a whole batch as too large: geth and erigon with -32600, nethermind
+# and besu with -32005, and jsonrpsee (reth, forest) with -32010 for too many requests,
+# -32011 for too large a response, and HTTP 413 with -32007 for too large a body.
+_BATCH_TOO_LARGE = {-32600, -32005, -32007, -32010, -32011}
+# How geth (-32003) and nethermind (-32005) answer the requests left once a batch's
+# response grows too large.
+_RESPONSE_TOO_LARGE = {-32003, -32005}
+
+
+def _post(url: str, payload):
+    """POST one JSON-RPC request or batch; the response and its decoded body, or None if it has none."""
+    requests = payload if isinstance(payload, list) else [payload]
+    label = ", ".join(f"{req['method']} {brief(req.get('params', []))}" for req in requests)
+    with span(f"evm rpc [{len(requests)}] {label}"):
+        response = post(url, json=payload)
+    try:
+        body = json.loads(response.text)
+    except ValueError:
+        body = None
+    if response.status_code != 200 and not (response.status_code == 413 and isinstance(payload, list)):
+        raise click.ClickException(f"ETH_RPC_URL: HTTP {response.status_code}")
+    return response, body
+
+
+def _error_code(answer) -> int | None:
+    return answer.get("error", {}).get("code") if isinstance(answer, dict) else None
+
+
+def _post_batch(url: str, batch: list[dict]) -> dict:
+    """The answer to each request of `batch`, by id. It is sent in batches of at most
+    the node's limit, and a batch the node finds too large is halved and resent."""
+    answers = {}
+    pending = list(batch)
+    while pending:
+        chunk = pending[: _batch_limits.get(url, _BATCH_LIMIT)]
+        response, body = _post(url, chunk)
+        fetched = body if isinstance(body, list) else [body]
+        by_id = {answer.get("id"): answer for answer in fetched if isinstance(answer, dict)}
+        rejected = (
+            response.status_code == 413
+            or any(req.get("id") not in by_id for req in chunk)
+            and any(_error_code(answer) in _BATCH_TOO_LARGE for answer in fetched)
+        )
+        if rejected:
+            # The node answered the batch with one error rather than each request.
+            if len(chunk) == 1:
+                raise click.ClickException(f"ETH_RPC_URL: rejected a batch of one request: {body}")
+            _batch_limits[url] = len(chunk) // 2
+            continue
+        if any(req.get("id") not in by_id for req in chunk):
+            raise click.ClickException(f"ETH_RPC_URL: no answer to some requests of a batch: {body}")
+        # Requests cut off by too large a response are resent in a smaller batch.
+        cut = [req for req in chunk if _error_code(by_id[req.get("id")]) in _RESPONSE_TOO_LARGE]
+        if cut and len(chunk) > 1:
+            _batch_limits[url] = max(1, len(chunk) - len(cut))
+        else:
+            cut = []
+        answers.update((req.get("id"), by_id[req.get("id")]) for req in chunk if req not in cut)
+        pending = cut + pending[len(chunk) :]
+    return answers
 
 
 # Opcodes that observe the created contract's own address, which CREATE derives
