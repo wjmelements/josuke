@@ -256,4 +256,5 @@ def evm_artifact(source: pathlib.Path, root: pathlib.Path) -> dict:
     return {
         "initcode": data["bytecode"]["object"].removeprefix("0x"),
         "abi": abi,
+        "runtime": data.get("deployedBytecode", {}).get("object"),
     }

@@ -36,7 +36,8 @@ from .deploy import (
     recorded_facet,
     resolve_facets,
 )
-from .erc8167 import SELECTORS_SELECTOR
+from .erc8167 import SELECTORS_SELECTOR, generated_selectors, selectors_method
+from .evm import evm_artifact
 from .forge import get_forge_config
 from .layout import compiler_version, storage_layouts
 from .ledger import load_ledger, validate_ledger
@@ -46,6 +47,8 @@ from .worktree import SourceTrees
 # Compiler settings that change bytecode, shown so a hash difference can be
 # traced to the build rather than the source.
 BUILD_SETTINGS = ("solc", "via_ir", "evm_version", "bytecode_hash", "cbor_metadata")
+
+MAX_CODE_SIZE = 24_576  # EIP-170, also enforced by the Filecoin EVM actor.
 
 _ELEMENTARY = re.compile(r"^(u?int\d*|bool|address|bytes\d+)$")
 
@@ -101,6 +104,12 @@ def _built_solc_version(root: pathlib.Path) -> str | None:
     return next(filter(None, map(compiler_version, sorted(out.glob("*/*.json")))), None)
 
 
+def _check_code_size(source: str, runtime: str, findings: Findings) -> None:
+    size = len(runtime.removeprefix("0x")) // 2
+    if size > MAX_CODE_SIZE:
+        findings.fail(f"{source} runtime code is {size} bytes; exceeds {MAX_CODE_SIZE} bytes (EIP-170)")
+
+
 def _resolve(entry: dict, root: pathlib.Path, solc_version: str | None, findings: Findings) -> tuple[dict, list[Decl]] | None:
     """(source_id -> (Facet, [Selector], storage layout or None for `.evm`),
     the storage they declare) at HEAD, or None if `facetSrc` doesn't resolve."""
@@ -114,10 +123,21 @@ def _resolve(entry: dict, root: pathlib.Path, solc_version: str | None, findings
     for facet in facets:
         try:
             selectors[facet.source_id] = facet_selectors(facet, root)
+            runtime = (
+                run(["forge", "inspect", facet.source_id, "deployedBytecode"], root).strip()
+                if facet.kind == "sol" else evm_artifact(root / facet.path, root).get("runtime")
+            )
+            if runtime is None:
+                findings.warn(f"{proxy} {facet.source_id}: runtime code size not checked; artifact has no deployedBytecode")
+            else:
+                _check_code_size(f"{proxy} {facet.source_id}", runtime, findings)
         except click.ClickException as e:
-            findings.fail(f"{proxy} {facet.source_id}: cannot read its ABI: {e.message}")
+            findings.fail(f"{proxy} {facet.source_id}: cannot read its ABI or runtime: {e.message}")
     if len(selectors) != len(facets):
         return None
+    if not any(s.selector == SELECTORS_SELECTOR for items in selectors.values() for s in items):
+        runtime = selectors_method(generated_selectors(list(selectors.values())))
+        _check_code_size(f"{proxy} generated selectors()", runtime.hex(), findings)
     try:
         layouts, namespaces = storage_layouts(root, facets, solc_version)
     except click.ClickException as e:
@@ -132,23 +152,26 @@ def _position(start: int) -> str:
     return f"slot {slot if slot < 2**64 else hex(slot)}" + (f" offset {offset}" if offset else "")
 
 
-def _shape(types: dict, type_id: str) -> tuple:
+def _shape(types: dict, type_id: str, path: tuple = ()) -> tuple:
     """A type as it sits in storage, comparable across commits: solc's type ids
     carry AST ids, and struct labels the contract that happens to define them."""
     t = types[type_id]
     size = int(t["numberOfBytes"])
+    if type_id in path:
+        return ("recursive", size, path.index(type_id))
+    path = (*path, type_id)
     encoding = t["encoding"]
     if encoding == "mapping":
-        return ("mapping", size, _shape(types, t["key"]), _shape(types, t["value"]))
+        return ("mapping", size, _shape(types, t["key"], path), _shape(types, t["value"], path))
     if encoding == "bytes":
         return ("bytes", size)
     if encoding == "dynamic_array":
-        return ("dynamic_array", size, _shape(types, t["base"]))
+        return ("dynamic_array", size, _shape(types, t["base"], path))
     if "members" in t:
-        members = tuple((m["label"], int(m["slot"]), m["offset"], _shape(types, m["type"])) for m in t["members"])
+        members = tuple((m["label"], int(m["slot"]), m["offset"], _shape(types, m["type"], path)) for m in t["members"])
         return ("struct", size, members)
     if "base" in t:
-        return ("array", size, _shape(types, t["base"]))
+        return ("array", size, _shape(types, t["base"], path), int(re.search(r"\[(\d+)\]$", t["label"])[1]))
     label = t.get("underlying", t["label"]).removesuffix(" payable")
     if label.startswith("contract "):
         label = "address"
@@ -162,38 +185,57 @@ def _shape(types: dict, type_id: str) -> tuple:
 def _fit(old: tuple, new: tuple, notes: set) -> bool:
     """Whether storage written as shape `old` reads back correctly as `new`.
     Adds "renamed" or "grown" to `notes` for the differences that allows."""
-    if old == new:
-        return True
-    kind = old[0]
-    if kind != new[0]:
-        return False
-    if kind == "mapping":
-        # Every value has slots of its own, so a value may grow.
-        return old[2] == new[2] and _fit(old[3], new[3], notes)
-    if kind in ("array", "dynamic_array"):
-        # Elements sit one after another: an element may change only in place.
-        if old[2][1] != new[2][1] or new[1] < old[1] or not _fit(old[2], new[2], notes):
+    compared = set()
+
+    def fits(old, new, old_path=(), new_path=()):
+        # Recursive structs refer to an ancestor by position, never by solc's AST id.
+        if old[0] == "recursive":
+            old = old_path[old[2]]
+        if new[0] == "recursive":
+            new = new_path[new[2]]
+        pair = (id(old), id(new))
+        if pair in compared:
+            return True
+        compared.add(pair)
+        kind = old[0]
+        if kind != new[0]:
             return False
-        if new[1] > old[1]:
-            notes.add("grown")
-        return True
-    if kind == "struct":
-        if len(new[2]) < len(old[2]):
-            return False
-        # A member that keeps its name keeps its place; else a swap of two
-        # members of one type would pass as two renames.
-        was_at = {label: at for label, *at, _ in old[2]}
-        if any(was_at.get(label, at) != at for label, *at, _ in new[2]):
-            return False
-        for (old_label, *old_at, old_shape), (new_label, *new_at, new_shape) in zip(old[2], new[2]):
-            if old_at != new_at or not _fit(old_shape, new_shape, notes):
+        old_path, new_path = (*old_path, old), (*new_path, new)
+
+        def child(a, b):
+            return fits(a, b, old_path, new_path)
+
+        if kind == "mapping":
+            # Every value has slots of its own, so a value may grow.
+            return old[2] == new[2] and child(old[3], new[3])
+        if kind in ("array", "dynamic_array"):
+            # Elements sit one after another: their stride must not change.
+            if old[2][1] != new[2][1] or new[1] < old[1] or not child(old[2], new[2]):
                 return False
-            if old_label != new_label:
-                notes.add("renamed")
-        if new[1] != old[1] or len(new[2]) > len(old[2]):
-            notes.add("grown")
-        return True
-    return False
+            if kind == "array":
+                if new[3] < old[3]:
+                    return False
+                if new[3] > old[3]:
+                    notes.add("grown")
+            return True
+        if kind == "struct":
+            if len(new[2]) < len(old[2]):
+                return False
+            # A same-type swap must not pass as two renames.
+            was_at = {label: at for label, *at, _ in old[2]}
+            if any(was_at.get(label, at) != at for label, *at, _ in new[2]):
+                return False
+            for (old_label, *old_at, old_shape), (new_label, *new_at, new_shape) in zip(old[2], new[2]):
+                if old_at != new_at or not child(old_shape, new_shape):
+                    return False
+                if old_label != new_label:
+                    notes.add("renamed")
+            if new[1] != old[1] or len(new[2]) > len(old[2]):
+                notes.add("grown")
+            return True
+        return old == new
+
+    return fits(old, new)
 
 
 def _declarations(layouts: dict) -> list[Decl]:
@@ -229,10 +271,6 @@ def _check_storage(proxy: str, resolved: dict, declared: list[Decl], findings: F
                 continue
             if (a.start, a.end, a.label, a.shape) == (b.start, b.end, b.label, b.shape):
                 shared.add(a.start // 32)
-                continue
-            if a.label.startswith("erc7201:") and (a.start, a.end, a.label) == (b.start, b.end, b.label) and _fit(a.shape, b.shape, set()) and _fit(b.shape, a.shape, set()):
-                # One namespace defined twice, as OZ's `_owner` and a local `owner`: same bytes.
-                findings.warn(f"{proxy} {a.label}: {a.source} and {b.source} name its members differently")
                 continue
             findings.fail(
                 f"{proxy} storage {_position(b.start)}: {b.source} declares {b.type} {b.label} "

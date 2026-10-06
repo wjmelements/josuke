@@ -100,7 +100,7 @@ def test_explicit_interface_has_no_creation_code(tmp_path):
 def test_missing_contract_fails(tmp_path):
     result = _check(tmp_path, [_entry(["src/Clash.sol:Gone"])])
     assert result.exit_code == 1
-    assert "src/Clash.sol:Gone: cannot read its ABI" in result.output
+    assert "src/Clash.sol:Gone: cannot read its ABI or runtime" in result.output
 
 
 def test_missing_constructor_args_are_reported_not_blocking(tmp_path):
@@ -193,6 +193,58 @@ def test_struct_selectors_match_solc():
     assert {s.selector for s in facet_selectors(facet_from_source_id(CONFIGURED), ROOT)} == {
         "0x" + selector for selector in identifiers.values()
     }
+
+
+def test_oversize_runtime_fails_even_when_forge_build_succeeds(tmp_path, monkeypatch):
+    project = tmp_path / "project"
+    (project / "src").mkdir(parents=True)
+    (project / "foundry.toml").write_text('[profile.default]\nsolc="0.8.28"\n')
+    (project / "src/Big.sol").write_text(
+        'pragma solidity 0.8.28; contract Big { function data() external pure returns(bytes memory) { return hex"'
+        + "ab" * 26000 + '"; }}'
+    )
+    monkeypatch.chdir(project)
+    result = _check(tmp_path, [_entry(["src/Big.sol:Big"])])
+    assert result.exit_code == 1, result.output
+    assert "src/Big.sol:Big runtime code" in result.output
+    assert "exceeds 24576 bytes" in result.output
+
+
+def test_generated_selectors_runtime_is_size_checked(tmp_path, monkeypatch):
+    from josuke.selectors import Selector
+
+    selectors = [Selector(f"0x{i:08x}", f"f{i}()") for i in range(3000)]
+    monkeypatch.setattr("josuke.check.facet_selectors", lambda *args: selectors)
+    result = _check(tmp_path, [_entry([OWNABLE])])
+    assert result.exit_code == 1, result.output
+    assert "generated selectors() runtime code" in result.output
+    assert "exceeds 24576 bytes" in result.output
+
+
+@pytest.mark.skipif(shutil.which("make") is None, reason="requires make")
+@pytest.mark.parametrize("size", [24576, 24577, None])
+def test_evm_runtime_limit_and_missing_artifact_warning(tmp_path, monkeypatch, size):
+    project = tmp_path / "project"
+    (project / "src").mkdir(parents=True)
+    (project / "src/Only.evm").write_text("// artifact built by make\n")
+    (project / "foundry.toml").write_text('[profile.default]\nsolc="0.8.28"\n')
+    artifact = {
+        "bytecode": {"object": "0x6000"},
+        "abi": [{"type": "function", "name": "only", "inputs": [], "outputs": []}],
+    }
+    if size is not None:
+        artifact["deployedBytecode"] = {"object": "0x" + "00" * size}
+    (project / "artifact.json").write_text(json.dumps(artifact))
+    (project / "Makefile").write_text('out/Only.evm/Only.json:\n\tmkdir -p $(@D)\n\tcp artifact.json $@\n')
+    monkeypatch.chdir(project)
+    result = _check(tmp_path, [_entry(["src/Only.evm"])])
+    assert result.exit_code == (1 if size == 24577 else 0), result.output
+    if size is None:
+        assert "runtime code size not checked" in result.output
+    elif size == 24577:
+        assert "exceeds 24576 bytes" in result.output
+    else:
+        assert "WARNING" not in result.output
 
 
 # -- storage -----------------------------------------------------------------

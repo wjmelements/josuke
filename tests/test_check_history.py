@@ -276,7 +276,53 @@ def test_one_namespace_defined_twice_must_agree(deployed):
     assert result.exit_code == 1, result.output
     assert "erc7201:test.ns" in result.output
 
-    # OZ's `_owner` beside a local `owner`: the same bytes, named differently.
+    # A historical rename is allowed, but installed facets must agree.
     result = check("address internal owner_;", {"A": a, "B": a.replace("uint256 a", "uint256 b")})
+    assert result.exit_code == 1, result.output
+    assert "erc7201:test.ns" in result.output
+
+
+def test_legacy_view_contract_rename_preserves_layout(deployed):
+    check = deployed("address public viewContractAddress;", {"Mono": ""})
+
+    def recorded(commit, records):
+        return {"legacy": {"source": "src/Mono.sol:Mono", "gitCommit": commit}}
+
+    result = check("address internal _viewContractAddress;", {"A": "", "B": ""}, recorded)
     assert result.exit_code == 0, result.output
-    assert "name its members differently" in result.output
+    assert "is renamed in address _viewContractAddress" in result.output
+    assert "WARNING" in result.output
+
+
+@pytest.mark.parametrize("members", [
+    "uint256 value; mapping(uint256 => Node) children;",
+    "uint256 value; Node[] children;",
+])
+def test_recursive_storage_is_compared_without_losing_nested_changes(deployed, members):
+    layout = "struct Node { " + members + " } Node internal root;"
+    check = deployed(layout, {"A": ""})
+    result = check(layout, {"A": ""})
+    assert result.exit_code == 0, result.output
+    result = check(layout.replace("uint256 value", "int256 value"), {"A": ""})
+    assert result.exit_code == 1, result.output
+    assert "over struct Layout.Node root" in result.output
+
+
+def test_recursive_mapping_value_can_grow(deployed):
+    layout = "struct Node { uint256 value; mapping(uint256 => Node) children; MORE } mapping(uint256 => Node) internal roots;"
+    check = deployed(layout.replace("MORE", ""), {"A": ""})
+    result = check(layout.replace("MORE", "uint256 extra;"), {"A": ""})
+    assert result.exit_code == 0, result.output
+    assert "1 grown" in result.output
+
+
+def test_fixed_array_length_changes_are_not_hidden_by_slot_rounding(deployed):
+    check = deployed("uint8[2] internal values;", {"A": ""})
+    result = check("uint8[1] internal values;", {"A": ""})
+    assert result.exit_code == 1, result.output
+    result = check("uint8[3] internal values;", {"A": ""})
+    assert result.exit_code == 0, result.output
+    assert "1 grown" in result.output
+    result = check("", {"A": "uint8[1] internal values;", "B": "uint8[3] internal values;"})
+    assert result.exit_code == 1, result.output
+    assert "over src/A.sol:A's uint8[1] values" in result.output

@@ -120,10 +120,17 @@ to facets with creation code, when facets `deploy` would put at different
 addresses export the same selector, when two facets declare different state
 variables over the same storage bytes, when storage a recorded deployment
 (`legacy`, `current`, `proposed` or a retired facet in `history`) declares would
-read back differently at HEAD, or when recorded constructor args don't encode.
+read back differently at HEAD, when recorded constructor args don't encode, or
+when a facet's runtime exceeds the 24,576-byte EIP-170 limit. The generated
+`selectors()` contract is size-checked too. Solidity runtime size comes from the
+build artifact; `.evm` artifacts must include `deployedBytecode` for this check,
+otherwise a warning reports the missing size check.
 A variable or struct member may be renamed (a warning), dropped (a warning: its
 data stays), and a struct or fixed array may grow where its new bytes were free;
 a moved, retyped or overlapped variable or member fails.
+Renames are allowed between deployments, for example `viewContractAddress` to
+`_viewContractAddress`, provided positions and types stay compatible. Facets
+installed together must agree on names, including members of ERC-7201 structs.
 
 `legacy` records, by hand, the implementation a proxy ran before its first
 ERC-8167 migration, such as a UUPS contract:
@@ -142,6 +149,10 @@ with the staged deployment (`proposed`, else `current`); `--strict` makes a
 difference there fail, for release branches. `--chain` limits it to one chain,
 and `--format markdown` suits `$GITHUB_STEP_SUMMARY`. It trusts the recorded
 hashes; `verify` is what ties them to the chain.
+For ordinary pull requests, run without `--strict`: source changes relative to a
+deployment are expected. CI needs the recorded commits, submodules and their
+Solidity compiler versions available locally. Build scripts and sources are
+executed, so run untrusted pull requests without credentials.
 
 `deploy` builds with `forge` and broadcasts with `cast`, sending its
 deployments together and reporting each as it confirms. It reads the
