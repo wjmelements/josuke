@@ -1,3 +1,4 @@
+from collections import defaultdict
 from unittest.mock import patch
 
 import click
@@ -8,8 +9,8 @@ from ethrpc_mock import MockEthRpc
 from reference_proxy import PROXY_CODE as ERC8167_PROXY_CODE, mapping_slot, prefixed_proxy, word
 from josuke.opcodes import (
     ADD, CALLDATACOPY, CALLDATALOAD, CALLDATASIZE, DELEGATECALL, DUP1, DUP5, EXTCODEHASH, EXTCODESIZE, GAS, ISZERO,
-    JUMPDEST, JUMPI, MSIZE, MSTORE, POP, PUSH0, PUSH1, PUSH4, PUSH32, RETURN, RETURNDATACOPY, RETURNDATASIZE,
-    REVERT, SHA3, SHR, SLOAD, STOP,
+    JUMP, JUMPDEST, JUMPI, MSIZE, MSTORE, POP, PUSH0, PUSH1, PUSH4, PUSH32, RETURN, RETURNDATACOPY, RETURNDATASIZE,
+    REVERT, SHA3, SHR, SLOAD, STOP, SWAP1, XOR,
 )
 from josuke.selectors import Selector
 from josuke.storage import ProxyStorage
@@ -74,7 +75,7 @@ def test_fetch(eth_rpc):
 
 
 @pytest.mark.timeout(2)
-def test_fetch_batches_the_routes_and_never_fetches_the_stub(eth_rpc):
+def test_fetch_batches_the_routes_and_runs_neither_stub_nor_delegate(eth_rpc):
     selectors = [f"0x{i:08x}" for i in range(1, 6)]
     eth_rpc.set_code(PROXY_ADDRESS, ERC8167_PROXY_CODE)
     eth_rpc.set_code(DELEGATE, "00")
@@ -85,7 +86,7 @@ def test_fetch_batches_the_routes_and_never_fetches_the_stub(eth_rpc):
 
     posts = [post if isinstance(post, list) else [post] for post in eth_rpc.calls]
     assert [len(post) for post in posts if post[0]["method"] == "eth_getStorageAt"] == [len(selectors)]
-    assert {req["params"][0] for post in posts for req in post if req["params"]} == {PROXY_ADDRESS.lower(), DELEGATE}
+    assert {req["params"][0] for post in posts for req in post if req["params"]} == {PROXY_ADDRESS.lower()}
 
 
 # keccak("eip1967.proxy.implementation") - 1, where ERC-1822 kept its implementation too
@@ -363,3 +364,92 @@ def test_finds_the_route_behind_a_delegated_dispatcher(monkeypatch, selectors):
     values = {LINKED: word(DELEGATE), UNLINKED: "0x" + "00" * 32}
     assert storage.storage_keys == {s: mapping_slot(s) for s in selectors}
     assert storage.storage_values == {s: values[s] for s in selectors}
+
+
+SELECTOR = f"{PUSH0}{CALLDATALOAD}{PUSH1}e0{SHR}"  # msg.sig, as a word
+
+
+def selector_slot(selector: str) -> str:
+    return "0x" + selector[2:].rjust(64, "0")
+
+
+
+# A gate at slot 1 that must be set, read before the route at slot msg.sig or after
+# it, but checked after both: testing the route while the gate reads as zero fails.
+GATE = f"{PUSH1}01{SLOAD}"
+ROUTE = SELECTOR + SLOAD
+GATE_TAG = len(GATE + ROUTE + f"{SWAP1}{PUSH1}00{JUMPI}{PUSH0}{PUSH0}{REVERT}") // 2
+GATE_CHECK = f"{JUMPI}{PUSH0}{PUSH0}{REVERT}{JUMPDEST}"
+GATED_PROXY_CODES = {
+    "gate before route": GATE + ROUTE + f"{SWAP1}{PUSH1}{GATE_TAG:02x}" + GATE_CHECK + FORWARD,
+    "gate after route": ROUTE + GATE + f"{PUSH1}{GATE_TAG - 1:02x}" + GATE_CHECK + FORWARD,
+}
+
+
+@pytest.mark.timeout(5)
+@pytest.mark.parametrize("code", GATED_PROXY_CODES.values(), ids=GATED_PROXY_CODES.keys())
+def test_finds_the_route_behind_a_gate_checked_after_it(monkeypatch, code):
+    monkeypatch.setenv("ETH_RPC_URL", "http://mock.rpc/test")
+    storage = probe(code, {"0x1": word(OLD_IMPLEMENTATION), selector_slot(LINKED): word(DELEGATE)}, [LINKED, UNLINKED])
+
+    assert storage.storage_keys == {LINKED: selector_slot(LINKED), UNLINKED: selector_slot(UNLINKED)}
+    assert storage.storage_values == {LINKED: word(DELEGATE), UNLINKED: "0x" + "00" * 32}
+
+
+# A layout version at slot 1 picks the route: msg.sig ^ XOR_KEY once it is set, msg.sig
+# before. With the version read as zero, the old layout's slot would route too.
+VERSION_HEAD = f"{PUSH1}01{SLOAD}" + SELECTOR + f"{SWAP1}{PUSH1}00{JUMPI}{SLOAD}{PUSH1}00{JUMP}"
+NEW_LAYOUT_TAG = len(VERSION_HEAD) // 2
+NEW_LAYOUT = f"{JUMPDEST}{PUSH32}{XOR_KEY}{XOR}{SLOAD}"
+FORWARD_TAG = NEW_LAYOUT_TAG + len(NEW_LAYOUT) // 2
+VERSIONED_PROXY_CODE = (
+    VERSION_HEAD.replace(f"{PUSH1}00{JUMPI}", f"{PUSH1}{NEW_LAYOUT_TAG:02x}{JUMPI}").replace(
+        f"{PUSH1}00{JUMP}", f"{PUSH1}{FORWARD_TAG:02x}{JUMP}"
+    )
+    + NEW_LAYOUT
+    + JUMPDEST
+    + FORWARD
+)
+
+
+@pytest.mark.timeout(5)
+def test_follows_the_layout_its_version_picks(monkeypatch):
+    monkeypatch.setenv("ETH_RPC_URL", "http://mock.rpc/test")
+    stale = {"0x1": word(OLD_IMPLEMENTATION), selector_slot(LINKED): word(OLD_IMPLEMENTATION)}
+    storage = probe(VERSIONED_PROXY_CODE, {**stale, xor_slot(LINKED): word(DELEGATE)}, [LINKED, UNLINKED])
+
+    assert storage.storage_keys == {LINKED: xor_slot(LINKED), UNLINKED: xor_slot(UNLINKED)}
+    assert storage.storage_values == {LINKED: word(DELEGATE), UNLINKED: "0x" + "00" * 32}
+
+
+@pytest.mark.timeout(5)
+def test_fails_on_a_paused_proxy(monkeypatch):
+    # Unpaused, the proxy may dispatch some other way entirely, so no route is found
+    # by pretending it is.
+    monkeypatch.setenv("ETH_RPC_URL", "http://mock.rpc/test")
+    with pytest.raises(click.ClickException, match=f"routes {LINKED} to a delegate"):
+        probe(PAUSED_ERC8167_PROXY_CODE, {"0x0": word(OLD_IMPLEMENTATION), mapping_slot(LINKED): word(DELEGATE)},
+              [LINKED, UNLINKED])
+
+
+
+# x = 0; for (;;) x += 1 + sload(x): every step reads a higher slot, at a distance its
+# value sets, so each fetch of the slots read sends the next trace to slots unread.
+CHAIN_WALKER = f"{PUSH0}{JUMPDEST}{DUP1}{SLOAD}{ADD}{PUSH1}01{ADD}{PUSH1}01{JUMP}"
+
+@pytest.mark.timeout(5)
+def test_runs_no_delegate_reading_endlessly_deeper(monkeypatch):
+    # Chasing the delegate's reads would fetch one more slot every round.
+    monkeypatch.setenv("ETH_RPC_URL", "http://mock.rpc/test")
+    rpc = MockEthRpc(block_number=BLOCK_NUMBER)
+    rpc.storage = defaultdict(lambda: "0x" + "00" * 31 + "01")
+    rpc.set_code(PROXY_ADDRESS, ERC8167_PROXY_CODE)
+    rpc.set_code(DELEGATE, CHAIN_WALKER)
+    rpc.set_storage(PROXY_ADDRESS, mapping_slot(LINKED), word(DELEGATE))
+    storage = ProxyStorage(PROXY_ADDRESS)
+    with patch("josuke.ethjsonrpc.post", rpc):
+        storage.fetch([Selector(LINKED, f"f{LINKED}()")])
+
+    assert storage.storage_keys == {LINKED: mapping_slot(LINKED)}
+    assert storage.storage_values == {LINKED: word(DELEGATE)}
+    assert [req["params"][1] for req in rpc.requests_for("eth_getStorageAt")] == [mapping_slot(LINKED)]

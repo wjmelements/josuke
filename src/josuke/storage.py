@@ -61,70 +61,75 @@ class ProxyStorage:
         self.storage_values = {} # Selector.selector -> storage_value
 
     def fetch(self, selectors: list[Selector]):
-        """Find the slot routing each selector by calling the proxy with it under an
-        EIP-3155 trace, then calling it again with each slot of its storage read, in
-        turn, pointed at a stub delegate. The first slot that routes the call to the
-        stub is the selector's, unless it routes another selector too, as an
-        implementation slot holding a dispatcher does. A lone selector is probed
-        beside a dummy to expose such a slot. Calling the method directly works even
-        if `implementation` is not installed. Fails if no slot routes a selector.
+        """Find the slot routing each selector by walking its dispatch: each slot the
+        proxy reads, in order, is pointed at a stub delegate to see whether it uniquely
+        routes the selector. Fails if none does.
 
-        Every call replaces the proxy's storage with the slots read so far, so a slot
-        is fetched only once a trace reads it, and the slots every selector newly
-        reads are fetched in one batch, rather than one round trip each."""
+        Every slot read before the one tested has been fetched, so the walk follows the
+        real dispatch: a slot that fails is fetched before the walk goes on. Slots not
+        yet fetched read as zero, so a test that reads one after the tested slot is
+        repeated once it is fetched. A delegate thus runs only once its slot has
+        failed, and each round fetches the slots every selector needs in one batch."""
         wanted = list(dict.fromkeys(selector.selector for selector in selectors))
+        # A lone selector is probed beside a dummy, so a slot routing every selector is not unique.
         dummies = [d for d in ("0xffffffff", "0xfffffffe") if d not in wanted]
         probed = wanted + dummies[: max(0, 2 - len(wanted))]
         proxy = self.address.lower()
         # A whole account, so evm fetches none of it.
         stub = {_STUB: {"code": delegate_stub(_STUB), "nonce": "0x0", "balance": "0x0"}}
         routed = f"0x{_STUB[2:].rjust(64, '0')}"
-        known = {}  # the proxy's storage, as read so far
+        known = {}  # the proxy's storage, as fetched
         trace = []
         with EvmRelay(cache=self.cache, json_output=True, on_trace=trace.append) as relay:
 
-            def call(selector: str, storage: dict) -> dict:
+            def call(selector: str, storage: dict) -> tuple[dict, list[str]]:
+                """The call's result, and the slots of the proxy's storage it read, in order."""
                 trace.clear()
                 overrides = {**stub, proxy: {"state": storage}}
-                return json.loads(relay.call({"to": proxy, "data": selector, "stateOverrides": overrides}))
+                result = json.loads(relay.call({"to": proxy, "data": selector, "stateOverrides": overrides}))
+                return result, _proxy_reads([step for step in trace if "opName" in step], int(proxy, 16))
 
-            def reads(selector: str) -> list[str]:
-                call(selector, known)
-                return _proxy_reads([step for step in trace if "opName" in step], int(proxy, 16))
-
-            def routes(selector: str, key: str) -> bool:
-                result = call(selector, {**known, key: routed})
-                return int(result["status"], 16) == 1 and result["returnData"] == routed
-
-            # Retraces the selectors that read a slot not yet fetched, until none do.
-            candidates = {}
-            pending = probed
-            while pending:
-                candidates.update((selector, reads(selector)) for selector in pending)
-                missing = {key for selector in pending for key in candidates[selector]} - known.keys()
-                if missing:
-                    known.update(relay.storage_at(proxy, sorted(missing)))
-                pending = [selector for selector in pending if not missing.isdisjoint(candidates[selector])]
-            candidates = {selector: iter(read) for selector, read in candidates.items()}
             shared = set()  # slots that route more than one selector
             claims = {}  # slot -> the selector it routes
             found = {}  # selector -> slot
-            queue = list(probed)
-            while queue:
-                selector = queue.pop()
-                # Resumes where this selector left off, should a later one share its slot.
-                for key in candidates[selector]:
-                    if key in shared or not routes(selector, key):
-                        continue
-                    other = claims.pop(key, None)
-                    if other is not None:
-                        shared.add(key)
-                        del found[other]
-                        queue.append(other)
-                        continue
-                    claims[key] = selector
-                    found[selector] = key
-                    break
+            failed = set()  # (selector, slot) that did not route, with every other slot it read fetched
+            pending = probed
+            while pending:
+                needs = set()  # slots to fetch before the waiting selectors can go on
+                waiting = []
+                queue = list(pending)
+                while queue:
+                    selector = queue.pop()
+                    for key in call(selector, known)[1]:
+                        if key not in shared and (selector, key) not in failed:
+                            result, read = call(selector, {**known, key: routed})
+                            unknown = set(read) - known.keys() - {key}
+                            if unknown:
+                                needs |= unknown
+                                waiting.append(selector)
+                                break
+                            if int(result["status"], 16) == 1 and result["returnData"] == routed:
+                                other = claims.pop(key, None)
+                                if other is None:
+                                    claims[key] = selector
+                                    found[selector] = key
+                                    break
+                                shared.add(key)
+                                del found[other]
+                                queue.append(other)
+                            else:
+                                failed.add((selector, key))
+                        # Not the route, so it is on the way to it, and its real value decides what is read next.
+                        if key not in known:
+                            needs.add(key)
+                            waiting.append(selector)
+                            break
+                if needs:
+                    known.update(relay.storage_at(proxy, sorted(needs)))
+                pending = [selector for selector in dict.fromkeys(waiting) if selector not in found]
+            values = {found[selector] for selector in wanted if selector in found} - known.keys()
+            if values:
+                known.update(relay.storage_at(proxy, sorted(values)))
         for selector in wanted:
             if selector not in found:
                 raise click.ClickException(f"{self.address}: no storage read routes {selector} to a delegate")

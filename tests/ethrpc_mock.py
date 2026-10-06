@@ -101,7 +101,10 @@ class MockEthRpc:
 
     def _rpc_eth_getStorageAt(self, params):
         key = (norm_addr(params[0]), norm_slot(params[1]))
-        return self.storage.get(key, "0x" + "00" * 32)
+        try:
+            return self.storage[key]  # a defaultdict's default too
+        except KeyError:
+            return "0x" + "00" * 32
 
     def _rpc_eth_getLogs(self, params):
         query = params[0]
