@@ -6,10 +6,10 @@ recorded hashes; `josuke verify` is what ties those to the chain.
 
 Blocking: the ledger breaks the schema or lists a proxy twice; `facetSrc` does
 not resolve to buildable facets; two facets `deploy` would put at different
-addresses export one selector; two facets declare different variables over
-the same storage bytes; storage that a recorded deployment (`legacy`,
-`current`, `proposed` or `history`) declares reads back differently at HEAD;
-a facet's recorded constructor args don't encode.
+addresses export one selector; two signatures share a 4-byte selector; two
+facets declare different variables over the same storage bytes; storage that a
+recorded deployment (`legacy`, `current`, `proposed` or `history`) declares
+reads back differently at HEAD; a facet's recorded constructor args don't encode.
 
 Warned about: a variable renamed, or dropped with its data left behind.
 
@@ -42,7 +42,7 @@ from .erc8167 import SELECTORS_SELECTOR, generated_selectors, selectors_method
 from .evm import evm_artifact
 from .forge import get_forge_config
 from .layout import storage_layouts
-from .selectors import canonical_type
+from .selectors import SelectorCollision, canonical_type
 from .ledger import load_ledger, validate_ledger
 from .proc import run
 from .worktree import SourceTrees
@@ -128,6 +128,8 @@ def _resolve(entry: dict, root: pathlib.Path, findings: Findings) -> tuple[dict,
                 findings.warn(f"{proxy} {facet.source_id}: runtime code size not checked; artifact has no deployedBytecode")
             else:
                 _check_code_size(f"{proxy} {facet.source_id}", runtime, findings)
+        except SelectorCollision as e:
+            findings.fail(f"{proxy} {facet.source_id}: {e.message}")
         except click.ClickException as e:
             findings.fail(f"{proxy} {facet.source_id}: cannot read its ABI or runtime: {e.message}")
     if len(selectors) != len(facets):

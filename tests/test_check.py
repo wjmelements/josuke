@@ -68,6 +68,12 @@ def test_selector_exported_by_two_facets_fails(tmp_path):
     assert "owner()" in result.output
 
 
+def test_colliding_signatures_fail(tmp_path):
+    result = _check(tmp_path, [_entry(["src/Collide.sol:Burn", "src/Collide.sol:Collate"])])
+    assert result.exit_code == 1
+    assert "selector 0x42966c68 is both burn(uint256) and collate_propagate_storage(bytes16)" in result.output
+
+
 def test_identical_bytecode_shares_one_deployment_so_no_clash(tmp_path):
     result = _check(tmp_path, [_entry(["src/Clash.sol:Clash", "src/Clash.sol:ClashTwin"])])
     assert result.exit_code == 0, result.output

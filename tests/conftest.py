@@ -38,3 +38,13 @@ def _fresh_facet_abis():
     facet_abi.cache_clear()
     yield
     facet_abi.cache_clear()
+
+
+@pytest.fixture(autouse=True)
+def _fresh_selector_signatures():
+    """Selectors register their signatures per process; tests reuse stub selectors."""
+    from josuke.selectors import _signatures
+
+    _signatures.clear()
+    yield
+    _signatures.clear()

@@ -7,7 +7,7 @@ from eth_abi import encode as abi_encode
 from eth_utils import keccak
 
 from josuke.evm import execute
-from josuke.selectors import Selector
+from josuke.selectors import Selector, SelectorCollision
 from josuke.erc8167 import selectors_method
 
 ABI_PATH = Path(__file__).parent / "fixtures" / "FilecoinPayV1.abi.json"
@@ -66,6 +66,13 @@ def test_from_abi_without_internal_type_falls_back_to_type():
 
 
 def test_same_selector_with_different_internal_types_is_equal():
-    a = Selector("0x12345678", "f(struct A.S)")
-    b = Selector("0x12345678", "f(struct B.S)")
+    a = Selector("0x12345678", "f(struct A.S)", "f((uint256))")
+    b = Selector("0x12345678", "f(struct B.S)", "f((uint256))")
     assert a == b and len({a, b}) == 1
+
+
+def test_colliding_signatures_raise():
+    # A known 4-byte collision: both hash to 0x42966c68.
+    Selector.from_abi(_fn("burn", {"type": "uint256"}))
+    with pytest.raises(SelectorCollision, match="burn\\(uint256\\) and collate_propagate_storage\\(bytes16\\)"):
+        Selector.from_abi(_fn("collate_propagate_storage", {"type": "bytes16"}))
