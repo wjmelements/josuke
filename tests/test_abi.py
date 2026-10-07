@@ -54,6 +54,26 @@ def test_events_and_errors_appear_once():
     assert merged == [event("E"), error, SELECTORS_ABI]
 
 
+def test_events_sharing_a_signature_are_both_kept():
+    # Transfer(address,address,uint256) has one topic0 for both, but ERC721
+    # indexes tokenId where ERC20 leaves value in the data.
+    def transfer(last, indexed):
+        return {
+            "type": "event",
+            "name": "Transfer",
+            "inputs": [
+                {"name": "from", "type": "address", "indexed": True, "internalType": "address"},
+                {"name": "to", "type": "address", "indexed": True, "internalType": "address"},
+                {"name": last, "type": "uint256", "indexed": indexed, "internalType": "uint256"},
+            ],
+            "anonymous": False,
+        }
+
+    erc20, erc721 = transfer("value", False), transfer("tokenId", True)
+    merged = merge_abis({"ERC20.sol:ERC20": [erc20], "ERC721.sol:ERC721": [erc721]})
+    assert merged == [erc20, erc721, SELECTORS_ABI]
+
+
 def test_shared_selector_warns_and_keeps_the_first(capsys):
     merged = merge_abis({"A.sol:A": [fn("a", outputs=["uint256"])], "B.sol:B": [fn("a", outputs=["bool"])]})
     assert merged == [fn("a", outputs=["uint256"]), SELECTORS_ABI]
