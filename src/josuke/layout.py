@@ -6,6 +6,7 @@ under a second where a via-IR build of the same sources takes minutes. That make
 a layout cheap for HEAD and for any recorded commit checked out without a build.
 """
 
+import functools
 import json
 import os
 import pathlib
@@ -35,10 +36,9 @@ def _svm_dirs() -> list[pathlib.Path]:
     ]
 
 
-def solc_binary(root: pathlib.Path, fallback_version: str | None = None) -> str:
+def solc_binary(root: pathlib.Path, config: dict, fallback_version: str | None = None) -> str:
     """Locate the configured compiler or a version resolved from this checkout."""
-    configured = get_forge_config(root).get("solc")
-    version = configured or fallback_version
+    version = config.get("solc") or fallback_version
     if not version:
         raise click.ClickException(
             f"{root}: no configured or resolved Solidity compiler"
@@ -65,26 +65,34 @@ def _walk(node, kind: str):
             yield from _walk(child, kind)
 
 
-def _compile(root: pathlib.Path, sources: dict, selection: dict, fallback_version: str | None) -> dict:
+def _errors(out: dict) -> list[str]:
+    return [e.get("formattedMessage", e.get("message", "")).strip() for e in out.get("errors", []) if e.get("severity") == "error"]
+
+
+def _compile(root: pathlib.Path, config: dict, sources: dict, selection: dict, fallback_version: str | None) -> dict:
     """solc's analysis of `sources`: ASTs, and the storage layouts `selection` asks for."""
-    config = get_forge_config(root)
-    standard_json = {
-        "language": "Solidity",
-        "sources": sources,
-        "settings": {
-            "remappings": run(["forge", "remappings"], root).split(),
-            # The AST holds UDVTs' underlying types.
-            "outputSelection": {"*": {"": ["ast"]}, **selection},
-        },
+    settings = {
+        "remappings": config.get("remappings") or [],
+        # The AST holds UDVTs' underlying types.
+        "outputSelection": {"*": {"": ["ast"]}, **selection},
     }
-    solc = solc_binary(root, fallback_version)
+    if config.get("evm_version"):
+        # Analysis checks inline assembly opcodes against the EVM version.
+        settings["evmVersion"] = config["evm_version"]
+    standard_json = {"language": "Solidity", "sources": sources, "settings": settings}
+    solc = solc_binary(root, config, fallback_version)
     includes = config.get("include_paths") or []
     allowed = [".", *(config.get("allow_paths") or []), *(config.get("libs") or []), *includes]
     command = [solc, "--standard-json", "--base-path", ".", "--allow-paths", ",".join(allowed)]
     for path in includes:
         command.extend(["--include-path", path])
     out = json.loads(run(command, root, stdin=json.dumps(standard_json)))
-    errors = [e.get("formattedMessage", e.get("message", "")).strip() for e in out.get("errors", []) if e.get("severity") == "error"]
+    if "evmVersion" in settings and any("Invalid EVM version" in error for error in _errors(out)):
+        # Foundry lowers an EVM version this solc predates to the newest it knows,
+        # which is solc's default.
+        del settings["evmVersion"]
+        out = json.loads(run(command, root, stdin=json.dumps(standard_json)))
+    errors = _errors(out)
     if errors:
         raise click.ClickException("solc: " + "\n".join(errors))
     return out
@@ -117,7 +125,7 @@ _NAMESPACE = re.compile(r"@custom:storage-location\s+erc7201:(\S+)")
 _SYNTHETIC = "josuke-erc7201.sol"
 
 
-def _namespaces(root: pathlib.Path, out: dict, fallback_version: str | None) -> dict:
+def _namespaces(root: pathlib.Path, config: dict, out: dict, fallback_version: str | None) -> dict:
     """"<path>:<Struct>" -> a layout declaring that ERC-7201 struct at its slot,
     for every annotated struct in `out`'s sources. solc lays the structs out: a
     second analysis declares one state variable per struct."""
@@ -132,7 +140,7 @@ def _namespaces(root: pathlib.Path, out: dict, fallback_version: str | None) -> 
     imports = "".join(f'import "{path}" as N{i};\n' for i, (path, _, _) in enumerate(found))
     variables = "".join(f"    N{i}.{name} ns{i};\n" for i, (_, name, _) in enumerate(found))
     synthetic = f"// SPDX-License-Identifier: UNLICENSED\n{imports}contract JosukeERC7201 {{\n{variables}}}\n"
-    out = _compile(root, {_SYNTHETIC: {"content": synthetic}}, {_SYNTHETIC: {"JosukeERC7201": ["storageLayout"]}}, fallback_version)
+    out = _compile(root, config, {_SYNTHETIC: {"content": synthetic}}, {_SYNTHETIC: {"JosukeERC7201": ["storageLayout"]}}, fallback_version)
     layout = _layout(out, _SYNTHETIC, "JosukeERC7201")
 
     # A remapping may send a synthetic import elsewhere than the facets' own.
@@ -152,18 +160,31 @@ def _namespaces(root: pathlib.Path, out: dict, fallback_version: str | None) -> 
     return namespaces
 
 
-def _facet_layouts(root: pathlib.Path, wanted: list, version: str | None) -> tuple[dict, dict]:
+def _facet_layouts(root: pathlib.Path, config: dict, wanted: list, version: str | None) -> tuple[dict, dict]:
     selection: dict = {}
     for facet in wanted:
         selection.setdefault(facet.path, {})[facet.contract] = ["storageLayout"]
-    out = _compile(root, {path: {"urls": [path]} for path in selection}, selection, version)
+    out = _compile(root, config, {path: {"urls": [path]} for path in selection}, selection, version)
     layouts = {}
     for facet in wanted:
         layout = _layout(out, facet.path, facet.contract)
         if layout is None:
             raise click.ClickException(f"{facet.source_id}: no such contract")
         layouts[facet.source_id] = layout
-    return layouts, _namespaces(root, out, version)
+    return layouts, _namespaces(root, config, out, version)
+
+
+# Memoised per checkout, so every proxy in a ledger shares one resolution.
+@functools.cache
+def _resolved_versions(root: pathlib.Path) -> tuple[str, ...]:
+    """Installed solc versions this checkout's pragmas resolve to, newest first,
+    without a bytecode build."""
+    resolved = json.loads(run(["env", "FOUNDRY_OFFLINE=true", "forge", "compiler", "resolve", "--json"], root))
+    return tuple(sorted(
+        [compiler["version"] for compiler in resolved.get("Solidity", [])],
+        key=lambda version: tuple(map(int, version.split("+", 1)[0].split("."))),
+        reverse=True,
+    ))
 
 
 def storage_layouts(root: pathlib.Path, facets: list) -> tuple[dict, dict]:
@@ -175,20 +196,15 @@ def storage_layouts(root: pathlib.Path, facets: list) -> tuple[dict, dict]:
     wanted = [facet for facet in facets if facet.kind == "sol"]
     if not wanted:
         return {}, {}
-    if get_forge_config(root).get("solc"):
-        return _facet_layouts(root, wanted, None)
+    config = get_forge_config(root)
+    if config.get("solc"):
+        return _facet_layouts(root, config, wanted, None)
 
-    # Resolve installed versions from this checkout's pragmas without a bytecode build.
-    resolved = json.loads(run(["env", "FOUNDRY_OFFLINE=true", "forge", "compiler", "resolve", "--json"], root))
-    versions = sorted(
-        [compiler["version"] for compiler in resolved.get("Solidity", [])],
-        key=lambda version: tuple(map(int, version.split("+", 1)[0].split("."))),
-        reverse=True,
-    )
+    versions = _resolved_versions(root)
     if not versions:
         raise click.ClickException(f"{root}: no Solidity compiler resolved; pin solc in foundry.toml")
     if len(versions) == 1:
-        return _facet_layouts(root, wanted, versions[0])
+        return _facet_layouts(root, config, wanted, versions[0])
 
     # In a multi-version project each facet and its imports must compile together.
     layouts, namespaces = {}, {}
@@ -196,7 +212,7 @@ def storage_layouts(root: pathlib.Path, facets: list) -> tuple[dict, dict]:
         errors = []
         for version in versions:
             try:
-                found, annotated = _facet_layouts(root, [facet], version)
+                found, annotated = _facet_layouts(root, config, [facet], version)
             except click.ClickException as error:
                 errors.append(error.message)
                 continue

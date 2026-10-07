@@ -31,13 +31,19 @@ def stub_source_trees(monkeypatch):
 
 
 @pytest.fixture(autouse=True)
-def _fresh_facet_abis():
-    """`facet_abi` is memoised per process; tests stub what it reads, so each starts empty."""
+def _fresh_memos():
+    """Per-checkout reads are memoised per process; tests stub or rewrite what they
+    read, so each starts empty."""
     from josuke.deploy import facet_abi
+    from josuke.forge import get_forge_config
+    from josuke.layout import _resolved_versions
 
-    facet_abi.cache_clear()
+    memos = (facet_abi, get_forge_config, _resolved_versions)
+    for memo in memos:
+        memo.cache_clear()
     yield
-    facet_abi.cache_clear()
+    for memo in memos:
+        memo.cache_clear()
 
 
 @pytest.fixture(autouse=True)

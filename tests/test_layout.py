@@ -2,6 +2,7 @@
 
 import shutil
 
+import click
 import pytest
 
 from josuke.deploy import facet_from_source_id
@@ -41,3 +42,24 @@ def test_unpinned_project_can_use_multiple_compiler_versions(tmp_path):
     layouts, _ = storage_layouts(tmp_path, [facet_from_source_id("src/A.sol:A"), facet_from_source_id("src/B.sol:B")])
     assert layouts["src/A.sol:A"]["storage"][0]["label"] == "a"
     assert layouts["src/B.sol:B"]["storage"][0]["label"] == "b"
+
+
+TSTORE = 'pragma solidity 0.8.28; contract A { uint256 internal a; function f() external { assembly { tstore(0, 1) } } }'
+
+
+def test_layout_analyses_with_the_configured_evm_version(tmp_path):
+    # solc 0.8.28 defaults to cancun; Foundry builds for shanghai, which has no tstore.
+    (tmp_path / "src").mkdir()
+    (tmp_path / "foundry.toml").write_text('[profile.default]\nsolc="0.8.28"\nevm_version="shanghai"\n')
+    (tmp_path / "src/A.sol").write_text(TSTORE)
+    with pytest.raises(click.ClickException, match="Cancun-compatible"):
+        storage_layouts(tmp_path, [facet_from_source_id("src/A.sol:A")])
+
+
+def test_evm_version_newer_than_solc_falls_back_like_foundry(tmp_path):
+    (tmp_path / "src").mkdir()
+    (tmp_path / "foundry.toml").write_text('[profile.default]\nsolc="0.8.28"\nevm_version="osaka"\n')
+    (tmp_path / "src/A.sol").write_text(TSTORE)
+    run(["forge", "build"], tmp_path)
+    layouts, _ = storage_layouts(tmp_path, [facet_from_source_id("src/A.sol:A")])
+    assert layouts["src/A.sol:A"]["storage"][0]["label"] == "a"
