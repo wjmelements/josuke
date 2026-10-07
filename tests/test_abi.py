@@ -48,30 +48,56 @@ def test_drops_what_the_proxy_never_dispatches_to():
     assert merge_abis({"A.sol:A": abi}) == [fn("a"), SELECTORS_ABI]
 
 
-def test_events_and_errors_appear_once():
+def test_events_and_errors_appear_once(capsys):
     error = {"type": "error", "name": "Nope", "inputs": []}
     merged = merge_abis({"A.sol:A": [event("E"), error], "B.sol:B": [event("E"), error]})
     assert merged == [event("E"), error, SELECTORS_ABI]
+    assert capsys.readouterr().err == ""
 
 
-def test_events_sharing_a_signature_are_both_kept():
+def transfer(last, indexed):
+    return {
+        "type": "event",
+        "name": "Transfer",
+        "inputs": [
+            {"name": "from", "type": "address", "indexed": True, "internalType": "address"},
+            {"name": "to", "type": "address", "indexed": True, "internalType": "address"},
+            {"name": last, "type": "uint256", "indexed": indexed, "internalType": "uint256"},
+        ],
+        "anonymous": False,
+    }
+
+
+def test_events_sharing_a_signature_are_both_kept(capsys):
     # Transfer(address,address,uint256) has one topic0 for both, but ERC721
     # indexes tokenId where ERC20 leaves value in the data.
-    def transfer(last, indexed):
-        return {
-            "type": "event",
-            "name": "Transfer",
-            "inputs": [
-                {"name": "from", "type": "address", "indexed": True, "internalType": "address"},
-                {"name": "to", "type": "address", "indexed": True, "internalType": "address"},
-                {"name": last, "type": "uint256", "indexed": indexed, "internalType": "uint256"},
-            ],
-            "anonymous": False,
-        }
-
     erc20, erc721 = transfer("value", False), transfer("tokenId", True)
     merged = merge_abis({"ERC20.sol:ERC20": [erc20], "ERC721.sol:ERC721": [erc721]})
     assert merged == [erc20, erc721, SELECTORS_ABI]
+    assert capsys.readouterr().err == ""
+
+
+def test_events_differing_only_in_names_warn_and_keep_the_first(capsys):
+    value, amount = transfer("value", False), transfer("amount", False)
+    merged = merge_abis({"A.sol:A": [value], "B.sol:B": [amount]})
+    assert merged == [value, SELECTORS_ABI]
+    assert (
+        "event Transfer(address indexed,address indexed,uint256) is declared differently "
+        "by A.sol:A and B.sol:B; keeping A.sol:A"
+    ) in capsys.readouterr().err
+
+
+def test_errors_differing_only_in_names_warn_and_keep_the_first(capsys):
+    def insufficient(name):
+        arg = {"name": name, "type": "uint256", "internalType": "uint256"}
+        return {"type": "error", "name": "Insufficient", "inputs": [arg]}
+
+    balance, needed = insufficient("balance"), insufficient("needed")
+    merged = merge_abis({"A.sol:A": [balance], "B.sol:B": [needed]})
+    assert merged == [balance, SELECTORS_ABI]
+    assert (
+        "error Insufficient(uint256) is declared differently by A.sol:A and B.sol:B; keeping A.sol:A"
+    ) in capsys.readouterr().err
 
 
 def test_shared_selector_warns_and_keeps_the_first(capsys):

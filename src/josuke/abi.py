@@ -10,7 +10,7 @@ from .deploy import facet_abi, resolve_facets
 from .erc8167 import SELECTORS_SELECTOR
 from .ledger import load_ledger
 from .proc import run
-from .selectors import Selector
+from .selectors import Selector, canonical_type
 
 # The generated `selectors()` delegate, added when no facet implements it.
 SELECTORS_ABI = {
@@ -30,13 +30,19 @@ def _key(item: dict) -> str:
     return json.dumps(item, sort_keys=True)
 
 
+def _signature(item: dict) -> str:
+    """The event's or error's signature, marking which event inputs are indexed."""
+    inputs = ",".join(canonical_type(arg) + (" indexed" if arg.get("indexed") else "") for arg in item["inputs"])
+    return f"{item['name']}({inputs})" + (" anonymous" if item.get("anonymous") else "")
+
+
 def merge_abis(abis: dict) -> list:
-    """Merge {source_id: abi} into one ABI: each function once per selector (the
-    first facet's, warning of any other), each event and error once, then
-    `selectors()` if no facet exports it."""
+    """Merge {source_id: abi} into one ABI: each function once per selector, each
+    event once per signature and indexing, and each error once per signature (the
+    first facet's, warning of any other), then `selectors()` if no facet exports it."""
     merged = []
     functions = {}  # selector -> (source_id, entry)
-    seen = set()
+    declared = {}  # (type, signature) -> (source_id, entry), for events and errors
     for source_id, abi in abis.items():
         for item in abi:
             if item["type"] in UNREACHABLE:
@@ -55,9 +61,19 @@ def merge_abis(abis: dict) -> list:
                     )
                     continue
                 functions[selector.selector] = (source_id, item)
-            elif _key(item) in seen:
-                continue
-            seen.add(_key(item))
+            else:
+                key = (item["type"], _signature(item))
+                prior = declared.get(key)
+                if prior is not None:
+                    # Same encoding, so the names differ only in decoding.
+                    if _key(prior[1]) != _key(item):
+                        click.echo(
+                            f"warning: {key[0]} {key[1]} is declared differently by "
+                            f"{prior[0]} and {source_id}; keeping {prior[0]}",
+                            err=True,
+                        )
+                    continue
+                declared[key] = (source_id, item)
             merged.append(item)
     if SELECTORS_SELECTOR not in functions:
         merged.append(SELECTORS_ABI)
