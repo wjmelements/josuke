@@ -51,8 +51,8 @@ def merge_abis(abis: dict) -> list:
                 selector = Selector.from_abi(item)
                 prior = functions.get(selector.selector)
                 if prior is not None:
-                    # `deploy` refuses this unless both facets share bytecode, which
-                    # would take a build of each to tell; `check` makes that call.
+                    # `deploy` refuses this unless both resolve to one deployment,
+                    # which would take a build of each to tell; `check` makes that call.
                     keeping = f"; keeping {prior[0]}" if _key(prior[1]) != _key(item) else ""
                     click.echo(
                         f"warning: selector {selector.selector} {selector.expressive} is exported "
