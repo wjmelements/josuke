@@ -74,6 +74,14 @@ def test_colliding_signatures_fail(tmp_path):
     assert "selector 0x42966c68 is both burn(uint256) and collate_propagate_storage(bytes16)" in result.output
 
 
+def test_internal_function_in_storage_warns(tmp_path):
+    result = _check(tmp_path, [_entry(["src/Pointers.sol:Pointers"])])
+    assert result.exit_code == 0, result.output
+    assert "slot 0: function () hook holds an internal function" in result.output
+    assert "mapping(uint256 => struct Pointers.Hooks) hooks holds an internal function" in result.output
+    assert "callback holds" not in result.output
+
+
 def test_identical_bytecode_shares_one_deployment_so_no_clash(tmp_path):
     result = _check(tmp_path, [_entry(["src/Clash.sol:Clash", "src/Clash.sol:ClashTwin"])])
     assert result.exit_code == 0, result.output

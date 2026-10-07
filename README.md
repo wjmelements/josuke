@@ -117,7 +117,8 @@ is unaccounted for, not that none could have been installed silently.
 compares it with the ledger, so it fits a pull-request job. It fails when the
 ledger breaks the schema or lists a proxy twice, when `facetSrc` doesn't resolve
 to facets with creation code, when facets `deploy` would put at different
-addresses export the same selector, when two facets declare different state
+addresses export the same selector, when two signatures share a 4-byte
+selector, when two facets declare different state
 variables over the same storage bytes, when storage a recorded deployment
 (`legacy`, `current`, `proposed` or a retired facet in `history`) declares would
 read back differently at HEAD, when recorded constructor args don't encode, or
@@ -127,7 +128,9 @@ build artifact; `.evm` artifacts must include `deployedBytecode` for this check,
 otherwise a warning reports the missing size check.
 A variable or struct member may be renamed (a warning), dropped (a warning: its
 data stays), and a struct or fixed array may grow where its new bytes were free;
-a moved, retyped or overlapped variable or member fails.
+a moved, retyped or overlapped variable or member fails. Storage holding an
+internal function warns: its value is a code offset, which an upgrade does not
+preserve.
 Renames are allowed between deployments, for example `viewContractAddress` to
 `_viewContractAddress`, provided positions and types stay compatible. Facets
 installed together must agree on names, including members of ERC-7201 structs.

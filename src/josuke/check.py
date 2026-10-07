@@ -11,7 +11,8 @@ facets declare different variables over the same storage bytes; storage that a
 recorded deployment (`legacy`, `current`, `proposed` or `history`) declares
 reads back differently at HEAD; a facet's recorded constructor args don't encode.
 
-Warned about: a variable renamed, or dropped with its data left behind.
+Warned about: a variable renamed, or dropped with its data left behind; storage
+holding an internal function.
 
 Reported, and blocking only with `--strict`: HEAD differs from the deployment
 the ledger stages (`proposed`, else `current`).
@@ -182,6 +183,9 @@ def _shape(types: dict, type_id: str) -> tuple:
             node = ("array", size, add(t["base"]), int(re.search(r"\[(\d+)\]$", t["label"])[1]))
         elif "enumMembers" in t:
             node = ("enum", size, tuple(t["enumMembers"]))
+        elif type_id.startswith("t_function_"):
+            # An internal one is a code offset; an external one an address and selector.
+            node = ("function", size, type_id.startswith("t_function_internal"))
         else:
             label = t.get("underlying", t["label"]).removesuffix(" payable")
             if label.startswith("contract "):
@@ -276,6 +280,13 @@ def _check_storage(proxy: str, resolved: dict, declared: list[Decl], findings: F
     Sees declared state variables and annotated ERC-7201 structs: fixed-slot
     assembly and `.evm` facets are invisible to it."""
     unseen = [source_id for source_id, (_, _, layout) in resolved.items() if layout is None]
+
+    for d in declared:
+        if any(node[0] == "function" and node[2] for node in d.shape):
+            findings.warn(
+                f"{proxy} storage {_position(d.start)}: {d.type} {d.label} holds an internal "
+                "function, a code offset that an upgrade does not preserve"
+            )
 
     shared = set()  # slots declared identically by more than one facet
     for i, a in enumerate(declared):
