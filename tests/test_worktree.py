@@ -78,6 +78,39 @@ def test_source_trees_checks_out_head_when_root_is_dirty(tmp_path, repo):
         assert not (tree / "src" / "B.sol").exists()
 
 
+@pytest.mark.parametrize("case", ["dirty-head", "historical"])
+def test_source_trees_builds_project_subdirectory(tmp_path, repo, case):
+    _, _, builds = repo
+    project = tmp_path / "service_contracts"
+    project.mkdir()
+    (tmp_path / "src").rename(project / "src")
+    (project / "foundry.toml").write_text('[profile.default]\nsrc = "src"\n')
+    source = project / "src" / "A.sol"
+    expected = source.read_text()
+    _git(tmp_path, "add", "-A")
+    _git(tmp_path, "commit", "-qm", "nested project")
+    commit = _git(tmp_path, "rev-parse", "HEAD")
+
+    source.write_text("contract A { function c() external {} }\n")
+    _git(tmp_path, "add", "-A")
+    _git(tmp_path, "commit", "-qm", "change nested source")
+    if case == "dirty-head":
+        commit = _git(tmp_path, "rev-parse", "HEAD")
+        expected = source.read_text()
+        (tmp_path / "unrelated.txt").write_text("untracked outside the project\n")
+
+    with worktree.SourceTrees(project) as trees:
+        tree = trees.get(commit)
+        assert tree != project
+        assert (tree / "foundry.toml").is_file()
+        assert (tree / "src" / "A.sol").read_text() == expected
+        assert builds == [str(tree)]
+        checkout = tree.parent
+
+    assert not checkout.exists()
+    assert _git(tmp_path, "worktree", "list").count("\n") == 0
+
+
 def _allow_local_submodules(monkeypatch):
     # every git call here, including SourceTrees' own, may clone a local submodule
     monkeypatch.setenv("GIT_CONFIG_COUNT", "1")

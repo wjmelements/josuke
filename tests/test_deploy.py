@@ -16,7 +16,8 @@ import pytest
 from eth_utils import keccak, to_checksum_address
 
 from josuke import broadcast, deploy
-from josuke.deploy import Facet, coerce_arg, keccak_hex, resolve_facets
+from josuke.ledger import validate_ledger
+from josuke.deploy import Facet, coerce_arg, coerce_input, keccak_hex, resolve_facets
 from josuke.evm import Replay
 
 A1 = to_checksum_address("0x" + "a1" * 20)  # deploy_initcode always returns checksummed
@@ -50,6 +51,25 @@ def test_keccak_hex_matches_keccak():
 )
 def test_coerce_arg(abi_type, value, expected):
     assert coerce_arg(abi_type, value) == expected
+
+
+_STRUCT = {
+    "type": "tuple",
+    "components": [{"name": "who", "type": "address"}, {"name": "tag", "type": "bytes4"}],
+}
+
+
+def test_coerce_input_struct_by_name_or_position():
+    who = "0x" + "11" * 20
+    expected = (who, b"\xde\xad\xbe\xef")
+    assert coerce_input(_STRUCT, {"who": who, "tag": "0xdeadbeef"}) == expected
+    assert coerce_input(_STRUCT, [who, "0xdeadbeef"]) == expected
+
+
+def test_coerce_input_struct_array():
+    arg = {**_STRUCT, "type": "tuple[]"}
+    who = "0x" + "22" * 20
+    assert coerce_input(arg, [[who, "0x00000000"]]) == [(who, b"\x00" * 4)]
 
 
 # -- resolve_facets ---------------------------------------------------------
@@ -190,6 +210,7 @@ def test_run_deploy_first_time_deploys_all_into_proposed(stub_chain, monkeypatch
     assert proposed["gitCommit"] == "f" * 40
     assert set(proposed["facets"]) == {"a.evm", "b.evm"}
     assert len(stub_chain["deployed"]) == 2
+    assert validate_ledger(json.loads(path.read_text())) == []
 
 
 def test_run_deploy_records_create_tx_hash(stub_chain, monkeypatch, tmp_path):
@@ -642,15 +663,11 @@ def _sel(hex4):
 
 @pytest.fixture(autouse=True)
 def _isolate_maps():
-    from josuke import selectors as _s
     from josuke import delegate as _d
 
-    sm, dm = dict(_s.selector_map), dict(_d.source_map)
-    _s.selector_map.clear()
+    dm = dict(_d.source_map)
     _d.source_map.clear()
     yield
-    _s.selector_map.clear()
-    _s.selector_map.update(sm)
     _d.source_map.clear()
     _d.source_map.update(dm)
 
@@ -951,18 +968,41 @@ def test_run_deploy_clears_stale_proposed_when_no_migration_needed(stub_chain, m
     assert "proposed" not in history
 
 
-def test_facet_abi_runs_forge_inspect_once_per_facet_and_root(monkeypatch):
+def _artifact(root, path, contract, abi, nested=""):
+    out = root / "out" / nested / pathlib.PurePosixPath(path).name
+    out.mkdir(parents=True, exist_ok=True)
+    artifact = {
+        "abi": abi,
+        "bytecode": {"object": "0x6000"},
+        "deployedBytecode": {"object": "0x00"},
+        "metadata": {"settings": {"compilationTarget": {path: contract}}},
+    }
+    (out / f"{contract}.json").write_text(json.dumps(artifact))
+    return out / f"{contract}.json"
+
+
+def test_facet_artifact_is_read_once_per_facet_and_root(tmp_path, monkeypatch):
     abi = [
         {"type": "constructor", "inputs": [{"name": "x", "type": "uint256"}]},
         {"type": "function", "name": "f", "inputs": [], "outputs": [], "stateMutability": "view"},
     ]
-    inspected = []
-    monkeypatch.setattr(deploy, "run", lambda cmd, root: inspected.append((cmd[2], root)) or json.dumps(abi))
+    monkeypatch.setattr(deploy, "get_forge_config", lambda root: {"out": "out"})
     facet = _facet("a.sol:A")
+    c0, c1 = tmp_path / "c0", tmp_path / "c1"
+    path = _artifact(c0, "a.sol", "A", abi)
+    _artifact(c1, "a.sol", "A", abi[1:])
 
-    for _ in range(2):
-        assert [s.selector for s in deploy.facet_selectors(facet, pathlib.Path("c0"))] == ["0x26121ff0"]
-    assert deploy.constructor_inputs(facet, pathlib.Path("c0")) == abi[0]["inputs"]
-    deploy.facet_selectors(facet, pathlib.Path("c1"))  # another checkout is read anew
+    assert [s.selector for s in deploy.facet_selectors(facet, c0)] == ["0x26121ff0"]
+    path.unlink()  # memoised: c0 is not read again
+    assert deploy.constructor_inputs(facet, c0) == abi[0]["inputs"]
+    assert deploy.facet_initcode(facet, c0, {"x": 1}, prompt=False)[0].startswith("6000")
+    assert deploy.constructor_inputs(facet, c1) == []  # another checkout is read anew
 
-    assert inspected == [("a.sol:A", pathlib.Path("c0")), ("a.sol:A", pathlib.Path("c1"))]
+
+def test_facet_artifact_matches_its_source_when_file_names_clash(tmp_path, monkeypatch):
+    monkeypatch.setattr(deploy, "get_forge_config", lambda root: {"out": "out"})
+    _artifact(tmp_path, "src/a/Errors.sol", "Errors", [])
+    _artifact(tmp_path, "src/b/Errors.sol", "Errors", [{"type": "function", "name": "g", "inputs": []}], nested="b")
+    assert deploy.facet_abi(_facet("src/b/Errors.sol:Errors"), tmp_path)[0]["name"] == "g"
+    with pytest.raises(click.ClickException, match="no build artifact"):
+        deploy.facet_artifact(_facet("src/c/Errors.sol:Errors"), tmp_path)

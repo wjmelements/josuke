@@ -43,14 +43,10 @@ def _sel(hex4):
 @pytest.fixture(autouse=True)
 def _isolate_maps():
     from josuke import delegate as _d
-    from josuke import selectors as _s
 
-    sm, dm = dict(_s.selector_map), dict(_d.source_map)
-    _s.selector_map.clear()
+    dm = dict(_d.source_map)
     _d.source_map.clear()
     yield
-    _s.selector_map.clear()
-    _s.selector_map.update(sm)
     _d.source_map.clear()
     _d.source_map.update(dm)
 

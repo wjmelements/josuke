@@ -36,7 +36,7 @@
     "proxy": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["address", "facetSrc", "deployments"],
+      "required": ["address", "facetSrc"],
       "properties": {
         "address": {
           "$ref": "#/$defs/address",
@@ -54,7 +54,7 @@
           "minProperties": 1,
           "propertyNames": { "pattern": "^[1-9][0-9]*$" },
           "additionalProperties": { "$ref": "#/$defs/deploymentHistory" },
-          "description": "Keyed by EVM chain id in decimal (\"314\" = Filecoin mainnet)."
+          "description": "Keyed by EVM chain id in decimal (\"314\" = Filecoin mainnet). Absent until the first `josuke deploy`."
         }
       }
     },
@@ -62,11 +62,20 @@
     "deploymentHistory": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["current"],
       "properties": {
+        "legacy": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["source", "gitCommit"],
+          "properties": {
+            "source": { "$ref": "#/$defs/sourceId" },
+            "gitCommit": { "$ref": "#/$defs/gitCommit" }
+          },
+          "description": "The implementation the proxy ran before its first ERC-8167 migration, such as a UUPS contract. Written by hand and kept: its storage stays, so `josuke check` compares every later layout with it."
+        },
         "current": {
           "$ref": "#/$defs/deploymentState",
-          "description": "The facet set currently installed on the proxy."
+          "description": "The facet set currently installed on the proxy. Absent until the first `josuke accept`."
         },
         "proposed": {
           "$ref": "#/$defs/deploymentState",

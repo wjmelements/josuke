@@ -27,6 +27,7 @@ def _initcode(contract: str) -> str:
 
 ARTIFACT = {
     "bytecode": {"object": "0xdeadbeef"},
+    "deployedBytecode": {"object": "0xbeef"},
     "abi": [{"type": "function", "name": "impl", "inputs": [], "outputs": []}],
 }
 
@@ -69,7 +70,7 @@ def test_evm_artifact_builds_and_reads(tmp_path):
     _stub_makefile(tmp_path, "Impl")
 
     got = evm_artifact(src / "Impl.evm", tmp_path)
-    assert got == {"initcode": "deadbeef", "abi": ARTIFACT["abi"]}
+    assert got == {"initcode": "deadbeef", "abi": ARTIFACT["abi"], "runtime": "0xbeef"}
 
 
 @needs_make
