@@ -31,6 +31,7 @@ from .deploy import (
     constructor_inputs,
     coerce_input,
     existing_deployment,
+    facet_artifact,
     facet_from_source_id,
     facet_initcode,
     facet_selectors,
@@ -121,7 +122,7 @@ def _resolve(entry: dict, root: pathlib.Path, findings: Findings) -> tuple[dict,
         try:
             selectors[facet.source_id] = facet_selectors(facet, root)
             runtime = (
-                run(["forge", "inspect", facet.source_id, "deployedBytecode"], root).strip()
+                facet_artifact(facet, root)["deployedBytecode"]["object"]
                 if facet.kind == "sol" else evm_artifact(root / facet.path, root).get("runtime")
             )
             if runtime is None:

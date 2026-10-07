@@ -103,13 +103,30 @@ def facet_from_source_id(source_id: str) -> Facet:
     return Facet("sol", path, contract, source_id)
 
 
-# Memoised for the process: `deploy` and `verify` read each facet's ABI from several
-# checks, and for Solidity each read is a `forge inspect`. A key can't go stale within a
-# run, since each commit is checked out at its own worktree and built before it is read.
+# Memoised for the process: `deploy`, `verify` and `check` read each facet's ABI and
+# bytecode from several checks. A key can't go stale within a run, since each commit is
+# checked out at its own worktree and built before it is read.
+@functools.cache
+def facet_artifact(facet: Facet, root: pathlib.Path) -> dict:
+    """Forge's build artifact for a Solidity facet, read from `out/` instead of a
+    `forge inspect` per field. Forge nests an artifact whose file name another
+    source shares, so the match is by the compilation target it records."""
+    out_dir = root / get_forge_config(root).get("out", "out")
+    name = pathlib.PurePosixPath(facet.path).name
+    candidates = [out_dir / name / f"{facet.contract}.json", *sorted(out_dir.glob(f"**/{name}/{facet.contract}*.json"))]
+    for path in dict.fromkeys(candidates):
+        if not path.exists():
+            continue
+        artifact = json.loads(path.read_text())
+        if artifact.get("metadata", {}).get("settings", {}).get("compilationTarget") == {facet.path: facet.contract}:
+            return artifact
+    raise click.ClickException(f"{facet.source_id}: no build artifact in {out_dir}")
+
+
 @functools.cache
 def facet_abi(facet: Facet, root: pathlib.Path) -> tuple:
     if facet.kind == "sol":
-        abi = json.loads(run(["forge", "inspect", facet.source_id, "abi", "--json"], root))
+        abi = facet_artifact(facet, root)["abi"]
     else:
         abi = evm_artifact(root / facet.path, root)["abi"]
     return tuple(abi)  # shared by every caller, so not a list they could append to
@@ -166,8 +183,7 @@ def facet_initcode(facet: Facet, root: pathlib.Path, recorded_args, prompt: bool
     if facet.kind == "evm":
         return evm_artifact(root / facet.path, root)["initcode"], None
 
-    initcode = run(["forge", "inspect", facet.source_id, "bytecode"], root).strip()
-    initcode = initcode.removeprefix("0x")
+    initcode = facet_artifact(facet, root)["bytecode"]["object"].removeprefix("0x")
     inputs = constructor_inputs(facet, root)
     if not inputs:
         return initcode, None

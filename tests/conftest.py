@@ -34,11 +34,11 @@ def stub_source_trees(monkeypatch):
 def _fresh_memos():
     """Per-checkout reads are memoised per process; tests stub or rewrite what they
     read, so each starts empty."""
-    from josuke.deploy import facet_abi
+    from josuke.deploy import facet_abi, facet_artifact
     from josuke.forge import get_forge_config
     from josuke.layout import _resolved_versions
 
-    memos = (facet_abi, get_forge_config, _resolved_versions)
+    memos = (facet_abi, facet_artifact, get_forge_config, _resolved_versions)
     for memo in memos:
         memo.cache_clear()
     yield
