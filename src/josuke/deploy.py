@@ -183,7 +183,18 @@ def facet_initcode(facet: Facet, root: pathlib.Path, recorded_args, prompt: bool
     if facet.kind == "evm":
         return evm_artifact(root / facet.path, root)["initcode"], None
 
-    initcode = facet_artifact(facet, root)["bytecode"]["object"].removeprefix("0x")
+    bytecode = facet_artifact(facet, root)["bytecode"]
+    libraries = [
+        f"{path}:{name}" for path, names in bytecode.get("linkReferences", {}).items() for name in names
+    ]
+    if libraries:
+        noun = "library" if len(libraries) == 1 else "libraries"
+        raise click.ClickException(
+            f"{facet.source_id}: links external {noun} {', '.join(libraries)}; "
+            "josuke does not support linked libraries"
+        )
+
+    initcode = bytecode["object"].removeprefix("0x")
     inputs = constructor_inputs(facet, root)
     if not inputs:
         return initcode, None

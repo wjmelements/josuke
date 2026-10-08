@@ -111,6 +111,15 @@ def test_explicit_interface_has_no_creation_code(tmp_path):
     assert "src/Clash.sol:IClash: no creation code" in result.output
 
 
+def test_linked_library_names_the_library(tmp_path):
+    result = _check(tmp_path, [_entry(["src/Linked.sol:Linked"])])
+    assert result.exit_code == 1
+    assert (
+        f"{PROXY} src/Linked.sol:Linked: links external library src/Linked.sol:Doubler; "
+        "josuke does not support linked libraries"
+    ) in result.output
+
+
 def test_missing_contract_fails(tmp_path):
     result = _check(tmp_path, [_entry(["src/Clash.sol:Gone"])])
     assert result.exit_code == 1
