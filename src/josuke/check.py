@@ -431,13 +431,10 @@ def _initcode_hash(facet, root, recorded: dict, proxy: str, findings: Findings) 
                 return None, missing
         initcode, _ = facet_initcode(facet, root, args, prompt=False)
     except click.ClickException as e:
-        findings.fail(f"{proxy} {source_id}: {e.message}")
+        findings.fail(f"{proxy} {source_id}: {e.message.removeprefix(f'{source_id}: ')}")
         return None, []
     except (EncodingError, ValueError, TypeError, KeyError) as e:
         findings.fail(f"{proxy} {source_id}: recorded constructorArgs do not encode: {e}")
-        return None, []
-    if "__$" in initcode:
-        findings.fail(f"{proxy} {source_id}: creation code has unlinked library references")
         return None, []
     try:
         code = bytes.fromhex(initcode)
