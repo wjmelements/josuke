@@ -18,7 +18,7 @@ from .ledger import load_ledger, write_ledger
 from .migration import Migration, SetDelegate
 from .proc import run
 from .rehearsal import rehearse_migration
-from .selectors import Selector
+from .selectors import Selector, canonical_type
 from .signer import keystore_session
 from .storage import ProxyStorage, slot_address
 from .worktree import SourceTrees
@@ -103,13 +103,30 @@ def facet_from_source_id(source_id: str) -> Facet:
     return Facet("sol", path, contract, source_id)
 
 
-# Memoised for the process: `deploy` and `verify` read each facet's ABI from several
-# checks, and for Solidity each read is a `forge inspect`. A key can't go stale within a
-# run, since each commit is checked out at its own worktree and built before it is read.
+# Memoised for the process: `deploy`, `verify` and `check` read each facet's ABI and
+# bytecode from several checks. A key can't go stale within a run, since each commit is
+# checked out at its own worktree and built before it is read.
+@functools.cache
+def facet_artifact(facet: Facet, root: pathlib.Path) -> dict:
+    """Forge's build artifact for a Solidity facet, read from `out/` instead of a
+    `forge inspect` per field. Forge nests an artifact whose file name another
+    source shares, so the match is by the compilation target it records."""
+    out_dir = root / get_forge_config(root).get("out", "out")
+    name = pathlib.PurePosixPath(facet.path).name
+    candidates = [out_dir / name / f"{facet.contract}.json", *sorted(out_dir.glob(f"**/{name}/{facet.contract}*.json"))]
+    for path in dict.fromkeys(candidates):
+        if not path.exists():
+            continue
+        artifact = json.loads(path.read_text())
+        if artifact.get("metadata", {}).get("settings", {}).get("compilationTarget") == {facet.path: facet.contract}:
+            return artifact
+    raise click.ClickException(f"{facet.source_id}: no build artifact in {out_dir}")
+
+
 @functools.cache
 def facet_abi(facet: Facet, root: pathlib.Path) -> tuple:
     if facet.kind == "sol":
-        abi = json.loads(run(["forge", "inspect", facet.source_id, "abi", "--json"], root))
+        abi = facet_artifact(facet, root)["abi"]
     else:
         abi = evm_artifact(root / facet.path, root)["abi"]
     return tuple(abi)  # shared by every caller, so not a list they could append to
@@ -139,6 +156,21 @@ def coerce_arg(abi_type: str, value):
     return value
 
 
+def coerce_input(arg: dict, value):
+    """`coerce_arg` for an ABI input, recursing into struct components. A struct
+    value is a JSON object keyed by component name, or a list in component order."""
+    abi_type = arg["type"]
+    if not abi_type.startswith("tuple"):
+        return coerce_arg(abi_type, value)
+    if abi_type.endswith("]"):
+        inner = {**arg, "type": abi_type[: abi_type.rindex("[")]}
+        return [coerce_input(inner, v) for v in value]
+    components = arg["components"]
+    if isinstance(value, dict):
+        value = [value[component["name"]] for component in components]
+    return tuple(coerce_input(component, v) for component, v in zip(components, value, strict=True))
+
+
 def _prompt_arg(source_id: str, name: str, abi_type: str):
     raw = click.prompt(f"{source_id} constructor arg {name} ({abi_type})")
     try:
@@ -151,8 +183,7 @@ def facet_initcode(facet: Facet, root: pathlib.Path, recorded_args, prompt: bool
     if facet.kind == "evm":
         return evm_artifact(root / facet.path, root)["initcode"], None
 
-    initcode = run(["forge", "inspect", facet.source_id, "bytecode"], root).strip()
-    initcode = initcode.removeprefix("0x")
+    initcode = facet_artifact(facet, root)["bytecode"]["object"].removeprefix("0x")
     inputs = constructor_inputs(facet, root)
     if not inputs:
         return initcode, None
@@ -170,8 +201,8 @@ def facet_initcode(facet: Facet, root: pathlib.Path, recorded_args, prompt: bool
 
     args = {arg["name"]: resolve(arg) for arg in inputs}
     encoded_args = abi_encode(
-        [arg["type"] for arg in inputs],
-        [coerce_arg(arg["type"], args[arg["name"]]) for arg in inputs],
+        [canonical_type(arg) for arg in inputs],
+        [coerce_input(arg, args[arg["name"]]) for arg in inputs],
     ).hex()
     return initcode + encoded_args, args
 
@@ -256,6 +287,46 @@ def verify_sourcify(
         run(cmd, root)
     except click.ClickException as e:
         click.echo(f"warning: Sourcify verification failed for {contract}: {e}", err=True)
+
+
+# -- reuse ------------------------------------------------------------------
+
+
+def recorded_facet(source_id: str, current_facets: dict, proposed_facets: dict) -> dict:
+    """The record whose `constructorArgs` and `from` a (re)deploy of `source_id`
+    reuses: the staged one, else the installed one."""
+    return proposed_facets.get(source_id) or current_facets.get(source_id) or {}
+
+
+def existing_deployment(
+    source_id: str,
+    initcode_hash: str,
+    current_facets: dict,
+    proposed_facets: dict,
+    run_deployed: dict,
+    redeploy_all: bool = False,
+) -> tuple[dict | None, bool]:
+    """(record, shared) for a deployment of this exact bytecode that `deploy`
+    reuses instead of deploying: the installed facet if it still matches, else
+    one staged by a prior `proposed` run (keeps re-runs before promotion
+    idempotent), else one already made this run for another source or proxy
+    (`shared`). (None, False) when a new deployment is needed.
+
+    `run_deployed` maps initcodeHash -> record across the run; a reused
+    installed or staged record is registered in it here."""
+    if not redeploy_all:
+        live = current_facets.get(source_id)
+        if live and live.get("initcodeHash") == initcode_hash:
+            run_deployed.setdefault(initcode_hash, live)
+            return live, False
+        staged = proposed_facets.get(source_id)
+        if staged and staged.get("initcodeHash") == initcode_hash and staged.get("address"):
+            run_deployed.setdefault(initcode_hash, staged)
+            return staged, False
+    shared = run_deployed.get(initcode_hash)
+    if shared and shared.get("address"):
+        return shared, True
+    return None, False
 
 
 # -- migration script -----------------------------------------------------
@@ -489,33 +560,17 @@ def run_deploy(ledger_path, redeploy_all: bool = False):
             proposed_facets = {}
             deployed = 0
             for facet in facets:
-                recorded = (
-                    prior_proposed_facets.get(facet.source_id)
-                    or current_facets.get(facet.source_id)
-                    or {}
-                )
+                recorded = recorded_facet(facet.source_id, current_facets, prior_proposed_facets)
                 initcode, args = facet_initcode(facet, root, recorded.get("constructorArgs"))
                 initcode_hash = keccak_hex(initcode)
 
-                # Reuse an existing deployment of this exact bytecode: the installed
-                # facet if it still matches, otherwise one already staged in a prior
-                # `proposed` run (keeps re-runs before promotion idempotent).
-                live = current_facets.get(facet.source_id)
-                staged = prior_proposed_facets.get(facet.source_id)
-                if not redeploy_all:
-                    if live and live.get("initcodeHash") == initcode_hash:
-                        proposed_facets[facet.source_id] = live
-                        run_deployed.setdefault(initcode_hash, live)
-                        continue
-                    if staged and staged.get("initcodeHash") == initcode_hash and staged.get("address"):
-                        proposed_facets[facet.source_id] = staged
-                        run_deployed.setdefault(initcode_hash, staged)
-                        continue
-
-                shared = run_deployed.get(initcode_hash)
-                if shared and shared.get("address"):
-                    click.echo(f"reusing {shared['address']} for {facet.source_id}")
-                    proposed_facets[facet.source_id] = shared
+                existing, shared = existing_deployment(
+                    facet.source_id, initcode_hash, current_facets, prior_proposed_facets, run_deployed, redeploy_all
+                )
+                if existing is not None:
+                    if shared:
+                        click.echo(f"reusing {existing['address']} for {facet.source_id}")
+                    proposed_facets[facet.source_id] = existing
                     continue
 
                 click.echo(f"deploying {facet.source_id}")

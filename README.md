@@ -34,6 +34,8 @@ josuke deploy                    # deploy changed/new facets, record them under 
 josuke verify                    # check the ledger against the chain in $ETH_RPC_URL
 josuke accept                    # after migrating, merge `proposed` into `current`
 josuke audit                     # cross-check every delegate ever installed against the ledger
+josuke check                     # offline: what the working tree would change, for pull requests
+josuke abi <address>             # print the proxy's ABI, merged from its facets
 ```
 
 Pass `-f/--file` to any command to point at a ledger other than `./josuke.json`.
@@ -111,6 +113,59 @@ way `verify` checks `current`. `SelectorDelegated` is only RECOMMENDED by ERC-81
 can run arbitrary code, so a clean audit means no delegate the proxy announced
 is unaccounted for, not that none could have been installed silently.
 `DiamondDelegateCall` invocations are printed but not yet verified.
+
+`check` needs no RPC and no keys: it builds the working tree with `forge` and
+compares it with the ledger, so it fits a pull-request job. It fails when the
+ledger breaks the schema or lists a proxy twice, when `facetSrc` doesn't resolve
+to facets with creation code, when facets `deploy` would put at different
+addresses export the same selector, when two signatures share a 4-byte
+selector, when two facets declare different state
+variables over the same storage bytes, when storage a recorded deployment
+(`legacy`, `current`, `proposed` or a retired facet in `history`) declares would
+read back differently at HEAD, when recorded constructor args don't encode, or
+when a facet's runtime exceeds the 24,576-byte EIP-170 limit. The generated
+`selectors()` contract is size-checked too. Solidity runtime size comes from the
+build artifact; `.evm` artifacts must include `deployedBytecode` for this check,
+otherwise a warning reports the missing size check.
+A variable or struct member may be renamed (a warning), dropped (a warning: its
+data stays), and a struct or fixed array may grow where its new bytes were free;
+a moved, retyped or overlapped variable or member fails. Storage holding an
+internal function warns: its value is a code offset, which an upgrade does not
+preserve.
+Renames are allowed between deployments, for example `viewContractAddress` to
+`_viewContractAddress`, provided positions and types stay compatible. Facets
+installed together must agree on names, including members of ERC-7201 structs.
+Enum values keep their ordinal positions: appending values is allowed between
+deployments, but removing or reordering them fails.
+
+`legacy` records, by hand, the implementation a proxy ran before its first
+ERC-8167 migration, such as a UUPS contract:
+`"legacy": {"source": "src/Service.sol:Service", "gitCommit": "<sha>"}` under the
+chain in `deployments`. Keep it after the migration: its storage stays.
+
+The storage checks read solc's storage layout: declared state variables, plus
+every struct annotated `@custom:storage-location erc7201:<id>` that the facets'
+sources import, placed at its ERC-7201 slot. The annotation is trusted, not the
+slot the code computes. Other fixed-slot access and `.evm` facets are invisible.
+solc produces a layout from analysis alone, so neither HEAD nor a recorded
+commit gets a second build for it. Each recorded commit is
+checked out, so a shallow CI clone needs them fetched (`fetch-depth: 0`). It lists each facet as new, changed, unchanged or removed against
+`current`, and the constructor args `deploy` will ask for. It also compares HEAD
+with the staged deployment (`proposed`, else `current`); `--strict` makes a
+difference there fail, for release branches. `--chain` limits it to one chain,
+and `--format markdown` suits `$GITHUB_STEP_SUMMARY`. It trusts the recorded
+hashes; `verify` is what ties them to the chain.
+For ordinary pull requests, run without `--strict`: source changes relative to a
+deployment are expected. CI needs the recorded commits, submodules and their
+Solidity compiler versions available locally. Build scripts and sources are
+executed, so run untrusted pull requests without credentials.
+
+`abi` prints a proxy's ABI, merged from the facets its `facetSrc` resolves to in
+the working tree. Each function appears once per selector; a selector exported by two facets is
+warned about and the first facet's entry kept. Events and errors appear once
+each. Facets' constructors, `fallback` and `receive` are left out, since the
+proxy never dispatches to them, and `selectors()` is added when no facet
+implements it, as `deploy` would generate it.
 
 `deploy` builds with `forge` and broadcasts with `cast`, sending its
 deployments together and reporting each as it confirms. It reads the

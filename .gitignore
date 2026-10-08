@@ -10,3 +10,5 @@ __pycache__/
 tests/fixtures/forge-project/out/
 tests/fixtures/forge-project/cache/
 tests/fixtures/forge-project/broadcast/
+tests/fixtures/check-project/out/
+tests/fixtures/check-project/cache/

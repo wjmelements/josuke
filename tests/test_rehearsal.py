@@ -31,17 +31,6 @@ def sel(selector: str) -> Selector:
     return Selector(selector, f"f{selector}()")
 
 
-@pytest.fixture(autouse=True)
-def _isolate_selector_map():
-    from josuke import selectors
-
-    saved = dict(selectors.selector_map)
-    selectors.selector_map.clear()
-    yield
-    selectors.selector_map.clear()
-    selectors.selector_map.update(saved)
-
-
 def migration(*routes) -> bytes:
     return Migration([SetDelegate(s, k, Delegate(a, ContractSource("", ""))) for s, k, a in routes]).encode()
 

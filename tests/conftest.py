@@ -7,7 +7,7 @@ class StubTrees:
     """Stands in for `SourceTrees`: each commit "checks out" to `trees/<commit>`,
     with no git and no build."""
 
-    def __init__(self, root=None):
+    def __init__(self, root=None, build=True):
         pass
 
     def __enter__(self):
@@ -31,10 +31,26 @@ def stub_source_trees(monkeypatch):
 
 
 @pytest.fixture(autouse=True)
-def _fresh_facet_abis():
-    """`facet_abi` is memoised per process; tests stub what it reads, so each starts empty."""
-    from josuke.deploy import facet_abi
+def _fresh_memos():
+    """Per-checkout reads are memoised per process; tests stub or rewrite what they
+    read, so each starts empty."""
+    from josuke.deploy import facet_abi, facet_artifact
+    from josuke.forge import get_forge_config
+    from josuke.layout import _resolved_versions
 
-    facet_abi.cache_clear()
+    memos = (facet_abi, facet_artifact, get_forge_config, _resolved_versions)
+    for memo in memos:
+        memo.cache_clear()
     yield
-    facet_abi.cache_clear()
+    for memo in memos:
+        memo.cache_clear()
+
+
+@pytest.fixture(autouse=True)
+def _fresh_selector_signatures():
+    """Selectors register their signatures per process; tests reuse stub selectors."""
+    from josuke.selectors import _signatures
+
+    _signatures.clear()
+    yield
+    _signatures.clear()
