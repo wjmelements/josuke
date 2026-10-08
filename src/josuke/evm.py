@@ -27,13 +27,7 @@ def execute(initcode_hex: str, sender: str | None = None) -> str:
         stdin = initcode_hex
     else:
         stdin = json.dumps({"from": sender, "data": initcode_hex})
-    return subprocess.run(
-        ["evm", "-x"],
-        input=stdin,
-        text=True,
-        capture_output=True,
-        check=True,
-    ).stdout.strip()
+    return run(["evm", "-x"], stdin=stdin).strip()
 
 
 class EvmRelay:
@@ -72,6 +66,9 @@ class EvmRelay:
             os.set_blocking(self._trace, False)
             self._selector.register(self._trace, selectors.EVENT_READ)
             self._trace_buf = b""
+        # Spans the process's lifetime; each call inside it has a span of its own.
+        self._lifetime = span(f"run {' '.join(args[:4])}")
+        self._lifetime.__enter__()
         self._proc = subprocess.Popen(
             args,
             stdin=subprocess.PIPE,
@@ -191,6 +188,7 @@ class EvmRelay:
             self._proc.wait()
         self._proc.stdout.close()
         self._selector.close()
+        self._lifetime.__exit__(None, None, None)
 
     def __enter__(self):
         return self
