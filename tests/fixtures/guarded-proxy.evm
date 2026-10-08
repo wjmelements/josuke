@@ -1,0 +1,36 @@
+// A proxy that reverts for any caller in its guards, then dispatches as the reference proxy,
+// through the slot numbered by msg.sig. guards.length is at slot 1 << 160; the guards are
+// at end + 1 .. end + length, and the loop walks them down from end + length to end + 1.
+
+// prepare delegatecall
+0 0 CALLDATASIZE 0
+0x5555555555555555555555555555555555555555555555555555555555555554 // end loop
+ADD(SLOAD(SHL(160, 1)), DUP1) // offset
+JUMPI(dispatch, EQ(DUP2, DUP2))
+loop:
+JUMPI(revert, EQ(CALLER, SLOAD(DUP1)))
+1 SWAP1 SUB
+JUMPI(loop, SUB(DUP2, DUP2))
+
+dispatch:
+POP POP
+SLOAD(SHR(224, CALLDATALOAD(0)))
+
+JUMPI(delegate, DUP1)
+
+MSTORE(32, CALLDATALOAD) // msg.sig
+MSTORE(0, 0x5416eb98) // FunctionNotFound(bytes4)
+REVERT(28, 36)
+
+delegate:
+CALLDATACOPY(0, 0, CALLDATASIZE)
+GAS DELEGATECALL
+RETURNDATACOPY(0, 0, RETURNDATASIZE)
+
+success JUMPI
+
+revert:
+REVERT(0, RETURNDATASIZE)
+
+success:
+RETURN(0, RETURNDATASIZE)

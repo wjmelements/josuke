@@ -209,14 +209,14 @@ def test_verify_facets_rebuilds_runtime_from_source(monkeypatch):
 
     facet = deploy.facet_from_source_id(source_id)
     initcode, _ = deploy.facet_initcode(facet, root, None, prompt=False)
-    with patch("josuke.evm.post", MockEthRpc()):
+    with patch("josuke.ethjsonrpc.post", MockEthRpc()):
         true_codehash = verify.keccak_hex(verify._replay_runtime(initcode, {"from": deployer}, {}).runtime)
 
     def check(codehash, sender, onchain):
         rec = {"address": A1, "initcodeHash": verify.keccak_hex(initcode), "codeHash": codehash, "from": sender}
         monkeypatch.setattr(verify, "_onchain_codehash", lambda addr: onchain)
         report = _report()
-        with patch("josuke.evm.post", MockEthRpc()):
+        with patch("josuke.ethjsonrpc.post", MockEthRpc()):
             verify.verify_facets(_state({source_id: rec}), "current", root, report)
         return report.failures
 
@@ -247,7 +247,7 @@ def test_verify_facets_replays_own_address_at_recorded_nonce(monkeypatch):
     facet = deploy.facet_from_source_id(source_id)
     initcode, _ = deploy.facet_initcode(facet, root, None, prompt=False)
     rpc = MockEthRpc()
-    with patch("josuke.evm.post", rpc):
+    with patch("josuke.ethjsonrpc.post", rpc):
         deployed = verify._replay_runtime(initcode, {"from": deployer, "nonce": 5}, {}).runtime
     rpc.set_code(address, deployed)  # live at its address, as after deploy
     rpc.nonce[address.lower()] = "0x1"
@@ -256,7 +256,7 @@ def test_verify_facets_replays_own_address_at_recorded_nonce(monkeypatch):
 
     def failures(rec):
         report = _report()
-        with patch("josuke.evm.post", rpc):
+        with patch("josuke.ethjsonrpc.post", rpc):
             verify.verify_facets(_state({source_id: rec}), "current", root, report)
         return report.failures
 

@@ -1,14 +1,13 @@
 import json
 import os
 import pathlib
+import selectors
 import subprocess
-import threading
 from dataclasses import dataclass
-from os import environ
 
 import click
-from requests import post
 
+from .ethjsonrpc import post_batch, post_request
 from .proc import run
 from .trace import brief, log, span
 
@@ -49,40 +48,51 @@ class EvmRelay:
 
     ``json_output`` runs ``evm -nxs``, whose result lines are JSON objects that
     also report the block values each request read. ``on_trace`` receives each
-    line of evm's EIP-3155 trace, parsed, over a pipe rather than a file; every
-    line has been delivered once the relay is closed."""
+    line of evm's EIP-3155 trace, parsed, over a pipe rather than a file. evm
+    flushes its trace before each line it writes to stdout, so by the time a state
+    fetch is answered, or :meth:`call` returns, every step before it has been
+    delivered (a step awaiting the fetch is delivered after it). ``trace_ops``
+    limits ``on_trace`` to the steps of those opcodes, steps that failed (with an
+    ``error``, such as "out of gas"), and each call's summary line, sparing the
+    cost of parsing the rest."""
 
-    def __init__(self, cache: dict | None = None, json_output: bool = False, on_trace=None):
+    def __init__(
+        self, cache: dict | None = None, json_output: bool = False, on_trace=None, trace_ops: set[str] | None = None
+    ):
         self.cache = {} if cache is None else cache
         args = ["evm", "-nxs" if json_output else "-nx"]
         trace_write = None
-        self._tracer = None
+        self._on_trace = on_trace
+        self._trace_ops = None if trace_ops is None else {op.encode() for op in trace_ops}
+        self._selector = selectors.DefaultSelector()
         if on_trace is not None:
-            trace_read, trace_write = os.pipe()
+            self._trace, trace_write = os.pipe()
             args += ["-t", "-T", f"/dev/fd/{trace_write}"]
-            # Drained concurrently: a full pipe would block evm while we wait on its stdout.
-            self._tracer = threading.Thread(target=_read_trace, args=(trace_read, on_trace), daemon=True)
-            self._tracer.start()
+            # Drained alongside stdout: a full pipe would block evm while we wait on its stdout.
+            os.set_blocking(self._trace, False)
+            self._selector.register(self._trace, selectors.EVENT_READ)
+            self._trace_buf = b""
         self._proc = subprocess.Popen(
             args,
             stdin=subprocess.PIPE,
             stdout=subprocess.PIPE,
-            text=True,
-            bufsize=1,
+            bufsize=0,
             pass_fds=() if trace_write is None else (trace_write,),
         )
         if trace_write is not None:
-            os.close(trace_write)  # evm holds the only write end, so the reader sees EOF when it exits
+            os.close(trace_write)  # evm holds the only write end, so the trace ends when it exits
+        self._stdout = self._proc.stdout.fileno()
+        self._selector.register(self._stdout, selectors.EVENT_READ)
+        self._out = b""
 
-    def call(self, request: dict, on_exchange=None) -> str:
+    def call(self, request: dict) -> str:
         """Run one request (a ``{"data": ...}`` create or a ``{"to": ...}`` call)
         and return evm's output line: the runtime hex for a create, ``""`` on a
-        revert, or a JSON object with ``json_output``. ``on_exchange(rpc_request,
-        rpc_response)`` sees every request/response pair, cache hits included."""
+        revert, or a JSON object with ``json_output``."""
         with span(f"evm {brief(request)}"):
             self._write(json.dumps(request))
             while True:
-                line = self._proc.stdout.readline()
+                line = self._readline()
                 if line == "":
                     raise click.ClickException("evm -nx exited before returning a result")
                 line = line.strip()
@@ -91,10 +101,7 @@ class EvmRelay:
                 rpc_request = json.loads(line)
                 if isinstance(rpc_request, dict) and "method" not in rpc_request:
                     return line  # a JSON result, not a state fetch
-                rpc_response = self._answer(rpc_request)
-                self._write(json.dumps(rpc_response))
-                if on_exchange is not None:
-                    on_exchange(rpc_request, rpc_response)
+                self._write(json.dumps(self._answer(rpc_request)))
 
     def _answer(self, rpc_request):
         """Resolve one JSON-RPC request (object or batch array) from the cache,
@@ -111,13 +118,10 @@ class EvmRelay:
                 misses.append((i, req, key))
         if misses:
             payload = [req for _, req, _ in misses]
-            label = ", ".join(f"{req['method']} {brief(req.get('params', []))}" for req in payload)
-            with span(f"evm rpc [{len(payload)}] {label}"):
-                response = post(environ["ETH_RPC_URL"], json=payload if isinstance(rpc_request, list) else payload[0])
-            if response.status_code != 200:
-                raise click.ClickException(f"ETH_RPC_URL: HTTP {response.status_code}")
-            fetched = json.loads(response.text)
-            by_id = {r.get("id"): r for r in (fetched if isinstance(fetched, list) else [fetched])}
+            if isinstance(rpc_request, list):
+                by_id = post_batch(payload, label="evm rpc")
+            else:
+                by_id = {payload[0].get("id"): post_request(payload[0], label="evm rpc")}
             for i, req, key in misses:
                 answer = by_id[req.get("id")]
                 if "result" in answer:
@@ -125,21 +129,68 @@ class EvmRelay:
                 answers[i] = answer
         return answers if isinstance(rpc_request, list) else answers[0]
 
+    def storage_at(self, address: str, keys) -> dict[str, str]:
+        """Fetch `keys` of `address`'s storage in one batch, at the block evm reads, into
+        the cache as evm would fetch them. The relay must have run a call first."""
+        block = self.cache[("eth_blockNumber", "[]")]
+        batch = [
+            {"jsonrpc": "2.0", "id": i, "method": "eth_getStorageAt", "params": [address, key, block]}
+            for i, key in enumerate(keys)
+        ]
+        answers = self._answer(batch)
+        if any("result" not in answer for answer in answers):
+            raise click.ClickException(f"ETH_RPC_URL: eth_getStorageAt {address} failed")
+        return {req["params"][1]: answer["result"] for req, answer in zip(batch, answers)}
+
+    def _readline(self) -> str:
+        """evm's next stdout line, or "" once it has exited, after the trace it flushed before it."""
+        while b"\n" not in self._out:
+            ready = {key.fd for key, _ in self._selector.select()}
+            if self._on_trace is not None and self._trace in ready:
+                self._read_trace()
+            if self._stdout in ready:
+                chunk = os.read(self._stdout, 1 << 16)
+                if not chunk:
+                    return ""
+                self._out += chunk
+        if self._on_trace is not None:
+            self._read_trace()
+        line, _, self._out = self._out.partition(b"\n")
+        return line.decode() + "\n"
+
+    def _read_trace(self) -> None:
+        """Deliver every complete trace line in the pipe."""
+        while True:
+            try:
+                chunk = os.read(self._trace, 1 << 16)
+            except BlockingIOError:
+                return
+            if not chunk:
+                if self._trace in self._selector.get_map():
+                    self._selector.unregister(self._trace)
+                return
+            *lines, self._trace_buf = (self._trace_buf + chunk).split(b"\n")
+            for line in lines:
+                if self._trace_ops is None or _delivered(line, self._trace_ops):
+                    self._on_trace(json.loads(line))
+
     def _write(self, line: str) -> None:
-        self._proc.stdin.write(line + "\n")
-        self._proc.stdin.flush()
+        self._proc.stdin.write(line.encode() + b"\n")
 
     def close(self) -> None:
-        # At end of input evm exits on its own, flushing any trace; terminate only a stuck one.
+        # Each call's trace was delivered as it returned, so what is left belongs to one an
+        # exception cut short. Unread, it would stall such a call, which may never end.
         self._proc.stdin.close()
+        if self._on_trace is not None:
+            os.close(self._trace)
+        # At end of input evm exits on its own; terminate only a stuck one.
         try:
             self._proc.wait(timeout=5)
         except subprocess.TimeoutExpired:
             self._proc.terminate()
             self._proc.wait()
         self._proc.stdout.close()
-        if self._tracer is not None:
-            self._tracer.join()
+        self._selector.close()
 
     def __enter__(self):
         return self
@@ -148,10 +199,13 @@ class EvmRelay:
         self.close()
 
 
-def _read_trace(fd: int, on_trace) -> None:
-    with os.fdopen(fd) as lines:
-        for line in lines:
-            on_trace(json.loads(line))
+def _delivered(line: bytes, ops: set[bytes]) -> bool:
+    """Whether an EIP-3155 trace line is a summary, a step that failed, or a step of one of `ops`."""
+    start = line.find(b'"opName":"')
+    if start < 0 or b'"error":' in line:
+        return True
+    start += len(b'"opName":"')
+    return line[start : line.index(b'"', start)] in ops
 
 
 # Opcodes that observe the created contract's own address, which CREATE derives

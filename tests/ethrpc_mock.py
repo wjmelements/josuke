@@ -1,10 +1,10 @@
 """Shared JSON-RPC mock for exercising josuke's ``ETH_RPC_URL`` calls without a node.
 
-Patch it over ``requests.post`` in whichever module is under test, e.g.::
+Patch it over ``josuke.ethjsonrpc.post``, which sends every request, e.g.::
 
     rpc = MockEthRpc()
     rpc.set_code(ADDRESS, "0x60006000...")
-    with patch("josuke.delegate.post", rpc):
+    with patch("josuke.ethjsonrpc.post", rpc):
         ...
 """
 
@@ -101,7 +101,10 @@ class MockEthRpc:
 
     def _rpc_eth_getStorageAt(self, params):
         key = (norm_addr(params[0]), norm_slot(params[1]))
-        return self.storage.get(key, "0x" + "00" * 32)
+        try:
+            return self.storage[key]  # a defaultdict's default too
+        except KeyError:
+            return "0x" + "00" * 32
 
     def _rpc_eth_getLogs(self, params):
         query = params[0]

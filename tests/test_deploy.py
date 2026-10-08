@@ -213,6 +213,15 @@ def test_run_deploy_first_time_deploys_all_into_proposed(stub_chain, monkeypatch
     assert validate_ledger(json.loads(path.read_text())) == []
 
 
+def test_run_deploy_fails_on_empty_facet_src(stub_chain, monkeypatch, tmp_path):
+    _resolve_to(monkeypatch, [])
+    path = _write(tmp_path, [{"address": PROXY, "facetSrc": []}])
+
+    with pytest.raises(click.ClickException, match="facetSrc is empty"):
+        deploy.run_deploy(path)
+    assert stub_chain["deployed"] == []
+
+
 def test_run_deploy_records_create_tx_hash(stub_chain, monkeypatch, tmp_path):
     _resolve_to(monkeypatch, ["a.evm"])
     path = _write(tmp_path, [{"address": PROXY, "facetSrc": ["*.evm"]}])

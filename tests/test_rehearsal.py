@@ -3,27 +3,22 @@
 from unittest.mock import patch
 
 import pytest
-from eth_utils import keccak, to_checksum_address
+from eth_utils import to_checksum_address
 
 from ethrpc_mock import MockEthRpc
+from reference_proxy import PROXY_CODE, mapping_slot as slot, prefixed_proxy, word
 from josuke import deploy, rehearsal, verify
 from josuke.erc8167 import SELECTORS_SELECTOR
 from josuke.delegate import ContractSource, Delegate
 from josuke.migration import Migration, SetDelegate
+from josuke.opcodes import CALLDATALOAD, POP, PUSH0, PUSH1, SHR, SLOAD
 from josuke.rehearsal import rehearse_migration
 from josuke.selectors import Selector
 from josuke.storage import ProxyStorage
 
 PROXY = to_checksum_address("0x" + "1a" * 20)
-# The reference proxy, erc8167/src/Proxy.evm: delegates[msg.sig] at keccak(msg.sig . namespace).
-NAMESPACE = "f27774d37a8b3bf2306f60b561e4e8ec22cfb23796f1f777608c0e466ef52600"
-PROXY_CODE = (
-    "5f5f365f585f5f377f" + NAMESPACE + "5952595f20548060435751602052635416eb985f526024601cfd"
-    "5b365f5f375af43d5f5f3e6054573d5ffd5b3d5ff3"
-)
-# The same proxy, reading slot 0 before its dispatch lookup, so slot detection
-# (the first SLOAD) takes slot 0 for every selector. Its jump targets move by 3.
-GUARDED_PROXY_CODE = "5f5450" + PROXY_CODE.replace("6043", "6046").replace("6054", "6057")
+# The reference proxy, first reading the slot numbered by the selector itself.
+SELECTOR_SLOT_PROXY_CODE = prefixed_proxy(f"{PUSH0}{CALLDATALOAD}{PUSH1}e0{SHR}{SLOAD}{POP}")
 
 ADD, KEEP, DROP = "0x11111111", "0x22222222", "0x33333333"
 OLD = to_checksum_address("0x" + "0d" * 20)
@@ -32,16 +27,8 @@ SELECTORS_IMPL = to_checksum_address("0x" + "5e" * 20)
 MIGRATION = to_checksum_address("0x" + "4d" * 20)
 
 
-def slot(selector: str) -> str:
-    return "0x" + keccak(bytes.fromhex(selector[2:].ljust(64, "0") + NAMESPACE)).hex()
-
-
 def sel(selector: str) -> Selector:
     return Selector(selector, f"f{selector}()")
-
-
-def word(address: str) -> str:
-    return "0x" + address[2:].lower().rjust(64, "0")
 
 
 def migration(*routes) -> bytes:
@@ -57,7 +44,7 @@ def chain(monkeypatch):
     rpc.set_storage(PROXY, slot(KEEP), word(OLD))
     rpc.set_storage(PROXY, slot(DROP), word(OLD))
     monkeypatch.setattr(rehearsal, "eth_get_code", lambda address: rpc.code[address.lower()])
-    with patch("josuke.evm.post", rpc):
+    with patch("josuke.ethjsonrpc.post", rpc):
         yield rpc
 
 
@@ -86,14 +73,14 @@ def test_reverting_migration_fails(chain):
 
 
 @pytest.mark.timeout(5)
-def test_catches_slot_detection_fooled_by_an_earlier_sload(chain):
-    chain.set_code(PROXY, GUARDED_PROXY_CODE)
+def test_slot_detection_passes_an_earlier_sload_keyed_by_selector(chain):
+    chain.set_code(PROXY, SELECTOR_SLOT_PROXY_CODE)
     storage = ProxyStorage(PROXY)
     storage.fetch([sel(ADD)])
-    assert storage.storage_keys[ADD] == "0x" + "00" * 32  # the guess is wrong
+    assert storage.storage_keys[ADD] == slot(ADD)
 
     runtime = migration((ADD, storage.storage_keys[ADD], NEW))
-    assert rehearse_migration(PROXY, runtime, {ADD: NEW}, {NEW}) == [f"{ADD} reverts, expected {NEW}"]
+    assert rehearse_migration(PROXY, runtime, {ADD: NEW}, {NEW}) == []
 
 
 def _own(monkeypatch, selectors_by_source):

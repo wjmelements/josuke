@@ -68,7 +68,7 @@ def _isolate_source_map():
 def eth_rpc(monkeypatch):
     monkeypatch.setenv("ETH_RPC_URL", "http://mock.rpc/test")
     rpc = MockEthRpc()
-    with patch("josuke.delegate.post", rpc):
+    with patch("josuke.ethjsonrpc.post", rpc):
         yield rpc
 
 

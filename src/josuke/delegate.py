@@ -1,9 +1,8 @@
 from eth_abi import encode as abi_encode
 from json import loads
-from os import environ
-from requests import post
 from subprocess import run
 
+from .ethjsonrpc import eth_get_code
 from .evm import execute
 
 class ContractSource:
@@ -41,14 +40,7 @@ class Delegate:
         return self.address == other.address and self.source == other.source
 
     def fetch(self):
-        result = post(environ['ETH_RPC_URL'], json={
-            "id": 1,
-            "jsonrpc": "2.0",
-            "method": "eth_getCode",
-            "params": [self.address]
-        })
-        assert result.status_code == 200
-        self.deployed_bytecode = loads(result.text)["result"].removeprefix("0x")
+        self.deployed_bytecode = eth_get_code(self.address).removeprefix("0x")
 
     def matches_source(self) -> bool:
         assert self.deployed_bytecode is not None

@@ -129,7 +129,7 @@ DEPLOYER = "0x" + "aa" * 20
 def eth_rpc(monkeypatch):
     monkeypatch.setenv("ETH_RPC_URL", "http://mock.rpc/test")
     rpc = MockEthRpc()
-    with patch("josuke.evm.post", rpc):
+    with patch("josuke.ethjsonrpc.post", rpc):
         yield rpc
 
 
@@ -209,15 +209,3 @@ def test_evm_relay_caches_rpc_results_across_processes(eth_rpc):
     with EvmRelay(cache=cache) as relay:  # identical run, shared cache
         relay.call({"from": DEPLOYER, "data": initcode})
     assert len(eth_rpc.calls) == first  # every request served from the cache
-
-
-@needs_evm
-def test_evm_relay_reports_exchanges(eth_rpc):
-    seen = []
-    with EvmRelay() as relay:
-        relay.call(
-            {"from": DEPLOYER, "data": _initcode("NoArgs")},
-            on_exchange=lambda req, resp: seen.append(req),
-        )
-    methods = {r["method"] for batch in seen for r in (batch if isinstance(batch, list) else [batch])}
-    assert "eth_blockNumber" in methods and "eth_getCode" in methods

@@ -2,15 +2,7 @@ import json
 
 from .ethjsonrpc import eth_get_code
 from .evm import EvmRelay
-from .opcodes import MSIZE, MSTORE, PUSH0, PUSH20, RETURN
-from .storage import slot_address
-
-
-def delegate_stub(address: str) -> str:
-    """Runtime that returns `address` as a word. Standing in for a delegate, it keeps
-    the rehearsal about routing: it runs no facet code and reads no proxy storage.
-    (`ADDRESS` would be the proxy's under `DELEGATECALL`, so it is a constant.)"""
-    return f"0x{PUSH20}{address.removeprefix('0x').lower()}{PUSH0}{MSTORE}{MSIZE}{PUSH0}{RETURN}"
+from .storage import delegate_stub, slot_address
 
 
 def rehearse_migration(

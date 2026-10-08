@@ -552,6 +552,8 @@ def run_deploy(ledger_path, redeploy_all: bool = False):
             prior_proposed_facets = prior_proposed.get("facets", {})
 
             facets = resolve_facets(entry["facetSrc"], root)
+            if not facets:
+                raise click.ClickException(f"{proxy}: facetSrc is empty")
             if not checked_metadata and any(facet.kind == "sol" for facet in facets):
                 warn_metadata_hash_at(root)
                 checked_metadata = True
