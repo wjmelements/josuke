@@ -244,30 +244,51 @@ def test_generated_selectors_runtime_is_size_checked(tmp_path, monkeypatch):
     assert "exceeds 24576 bytes" in result.output
 
 
-@pytest.mark.skipif(shutil.which("make") is None, reason="requires make")
-@pytest.mark.parametrize("size", [24576, 24577, None])
-def test_evm_runtime_limit_and_missing_artifact_warning(tmp_path, monkeypatch, size):
+def _evm_project(tmp_path, monkeypatch, initcode: str, runtime: str | None = None):
     project = tmp_path / "project"
     (project / "src").mkdir(parents=True)
     (project / "src/Only.evm").write_text("// artifact built by make\n")
     (project / "foundry.toml").write_text('[profile.default]\nsolc="0.8.28"\n')
     artifact = {
-        "bytecode": {"object": "0x6000"},
+        "bytecode": {"object": initcode},
         "abi": [{"type": "function", "name": "only", "inputs": [], "outputs": []}],
     }
-    if size is not None:
-        artifact["deployedBytecode"] = {"object": "0x" + "00" * size}
+    if runtime is not None:
+        artifact["deployedBytecode"] = {"object": runtime}
     (project / "artifact.json").write_text(json.dumps(artifact))
     (project / "Makefile").write_text('out/Only.evm/Only.json:\n\tmkdir -p $(@D)\n\tcp artifact.json $@\n')
     monkeypatch.chdir(project)
-    result = _check(tmp_path, [_entry(["src/Only.evm"])])
+    return _check(tmp_path, [_entry(["src/Only.evm"])])
+
+
+@pytest.mark.skipif(shutil.which("make") is None, reason="requires make")
+@pytest.mark.parametrize("size", [24576, 24577])
+def test_evm_runtime_limit(tmp_path, monkeypatch, size):
+    result = _evm_project(tmp_path, monkeypatch, "0x6000", "0x" + "00" * size)
     assert result.exit_code == (1 if size == 24577 else 0), result.output
-    if size is None:
-        assert "runtime code size not checked" in result.output
-    elif size == 24577:
+    if size == 24577:
         assert "exceeds 24576 bytes" in result.output
     else:
         assert "WARNING" not in result.output
+
+
+@pytest.mark.skipif(shutil.which("make") is None or shutil.which("evm") is None, reason="requires make and evm")
+@pytest.mark.parametrize("size", [24576, 24577])
+def test_evm_runtime_limit_from_constructor(tmp_path, monkeypatch, size):
+    # PUSH2 size PUSH1 0 RETURN: a constructor returning `size` zero bytes
+    result = _evm_project(tmp_path, monkeypatch, f"0x61{size:04x}6000f3")
+    assert result.exit_code == (1 if size == 24577 else 0), result.output
+    if size == 24577:
+        assert "exceeds 24576 bytes" in result.output
+    else:
+        assert "WARNING" not in result.output
+
+
+@pytest.mark.skipif(shutil.which("make") is None or shutil.which("evm") is None, reason="requires make and evm")
+def test_evm_reverting_constructor_warns(tmp_path, monkeypatch):
+    result = _evm_project(tmp_path, monkeypatch, "0x60006000fd")  # REVERT(0, 0)
+    assert result.exit_code == 0, result.output
+    assert "runtime code size not checked; its constructor reverted when run offline" in result.output
 
 
 @pytest.mark.parametrize("amount", [-1, 1])

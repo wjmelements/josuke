@@ -36,6 +36,19 @@ def execute(initcode_hex: str, sender: str | None = None) -> str:
     ).stdout.strip()
 
 
+def create_offline(initcode_hex: str) -> str | None:
+    """Run `evm -xs`: execute creation bytecode against empty state, without an
+    RPC, and return the deployed runtime hex, or None when the constructor reverted.
+
+    The environment is evm's default rather than the deployment's (#11), so the
+    runtime is good for its size but not for comparing with code on chain.
+    Unlike `execute`, this tells a revert from an empty runtime."""
+    result = json.loads(run(["evm", "-xs"], stdin=json.dumps({"data": "0x" + initcode_hex.removeprefix("0x")})))
+    if int(result["status"], 16) == 0:
+        return None
+    return result["returnData"].removeprefix("0x")
+
+
 class EvmRelay:
     """A running ``evm -nx``. Feed it eth_call-shaped requests with :meth:`call`;
     the JSON-RPC state fetches it emits on stdout are forwarded to ``ETH_RPC_URL``

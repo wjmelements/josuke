@@ -41,7 +41,7 @@ from .deploy import (
     resolve_facets,
 )
 from .erc8167 import SELECTORS_SELECTOR, generated_selectors, selectors_method
-from .evm import evm_artifact
+from .evm import create_offline, evm_artifact
 from .forge import get_forge_config
 from .layout import storage_layouts
 from .selectors import SelectorCollision, canonical_type
@@ -122,12 +122,20 @@ def _resolve(entry: dict, root: pathlib.Path, findings: Findings) -> tuple[dict,
     for facet in facets:
         try:
             selectors[facet.source_id] = facet_selectors(facet, root)
-            runtime = (
-                facet_artifact(facet, root)["deployedBytecode"]["object"]
-                if facet.kind == "sol" else evm_artifact(root / facet.path, root).get("runtime")
-            )
+            if facet.kind == "sol":
+                runtime = facet_artifact(facet, root)["deployedBytecode"]["object"]
+            else:
+                artifact = evm_artifact(root / facet.path, root)
+                runtime = artifact.get("runtime")
+                # `.evm` constructor sources only build initcode; run it to get the runtime.
+                if runtime is None:
+                    try:
+                        runtime = create_offline(artifact["initcode"])
+                        missing = "its constructor reverted when run offline"
+                    except click.ClickException as e:
+                        missing = f"cannot run its constructor offline: {e.message}"
             if runtime is None:
-                findings.warn(f"{proxy} {facet.source_id}: runtime code size not checked; artifact has no deployedBytecode")
+                findings.warn(f"{proxy} {facet.source_id}: runtime code size not checked; {missing}")
             else:
                 _check_code_size(f"{proxy} {facet.source_id}", runtime, findings)
         except SelectorCollision as e:
