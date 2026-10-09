@@ -3,6 +3,7 @@ import os
 import pathlib
 import selectors
 import subprocess
+import sys
 from dataclasses import dataclass
 
 import click
@@ -69,13 +70,17 @@ class EvmRelay:
         # Spans the process's lifetime; each call inside it has a span of its own.
         self._lifetime = span(f"run {' '.join(args[:4])}")
         self._lifetime.__enter__()
-        self._proc = subprocess.Popen(
-            args,
-            stdin=subprocess.PIPE,
-            stdout=subprocess.PIPE,
-            bufsize=0,
-            pass_fds=() if trace_write is None else (trace_write,),
-        )
+        try:
+            self._proc = subprocess.Popen(
+                args,
+                stdin=subprocess.PIPE,
+                stdout=subprocess.PIPE,
+                bufsize=0,
+                pass_fds=() if trace_write is None else (trace_write,),
+            )
+        except BaseException:
+            self._lifetime.__exit__(*sys.exc_info())
+            raise
         if trace_write is not None:
             os.close(trace_write)  # evm holds the only write end, so the trace ends when it exits
         self._stdout = self._proc.stdout.fileno()
