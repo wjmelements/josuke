@@ -1,5 +1,10 @@
-"""`josuke check` against the storage of a recorded deployment: a real git
-repository whose Foundry project sits in a subdirectory, as in filecoin-services."""
+"""`josuke check` against the storage of a recorded deployment.
+
+Storage layouts come from real solc. `deployed` stubs what they don't need: the
+recorded commit is a plain directory instead of a git worktree, and `forge build`
+and its artifacts are skipped. `deployed_in_git` runs the whole pipeline against a
+real git repository whose Foundry project sits in a subdirectory, as in
+filecoin-services."""
 
 import json
 import shutil
@@ -7,14 +12,15 @@ import shutil
 import pytest
 from click.testing import CliRunner
 
-from josuke.check import _fit
+from josuke import check as check_module, deploy
+from josuke.check import _declarations, _fit
 from josuke.cli import main
 from josuke.deploy import facet_from_source_id, facet_initcode, keccak_hex
+from josuke.layout import storage_layouts
 from josuke.proc import run
 
-pytestmark = pytest.mark.skipif(
-    shutil.which("forge") is None or shutil.which("git") is None, reason="requires `forge` and `git`"
-)
+pytestmark = pytest.mark.skipif(shutil.which("forge") is None, reason="requires `forge`")
+requires_git = pytest.mark.skipif(shutil.which("git") is None, reason="requires `git`")
 
 PROXY = "0x2222222222222222222222222222222222222222"
 FOUNDRY_TOML = """[profile.default]
@@ -50,22 +56,46 @@ def _write(project, layout, facets):
         (project / "src" / f"{name}.sol").write_text(FACET.format(name=name, body=body))
 
 
-@pytest.fixture
-def deployed(tmp_path, monkeypatch):
-    """Commit and "deploy" a project; returns a function that rewrites its
-    sources (uncommitted) and runs `josuke check` against that deployment."""
-    repo = tmp_path / "repo"
-    project = repo / "contracts"
-    (project / "src").mkdir(parents=True)
-    (project / "foundry.toml").write_text(FOUNDRY_TOML)
-    monkeypatch.chdir(project)
+def _project(path):
+    (path / "src").mkdir(parents=True)
+    (path / "foundry.toml").write_text(FOUNDRY_TOML)
+    return path
 
-    def deploy(layout, facets):
-        _write(project, layout, facets)
-        _git(repo, "init", "-q")
-        _git(repo, "add", "-A")
-        _git(repo, "-c", "user.email=t@t.t", "-c", "user.name=t", "commit", "-qm", "deployed")
-        run(["forge", "build"], project)
+
+def _stub_artifact(facet, root):
+    """Creation code unique to each source, so a recorded facet reads as unchanged."""
+    return {"abi": [], "bytecode": {"object": keccak_hex(facet.source_id.encode().hex())}, "deployedBytecode": {"object": "0x"}}
+
+
+def _deployment(tmp_path, monkeypatch, in_git: bool):
+    """Returns a function that "deploys" a project, which returns a function that
+    rewrites its sources and runs `josuke check` against that deployment."""
+    repo = tmp_path / "repo"
+    project = _project(repo / "contracts")
+    monkeypatch.chdir(project)
+    if not in_git:
+        baseline = _project(tmp_path / "deployed")
+
+        def declarations(self, commit, source_ids):
+            layouts, namespaces = storage_layouts(baseline, [facet_from_source_id(s) for s in sorted(source_ids)])
+            return _declarations(layouts | namespaces)
+
+        monkeypatch.setattr(check_module.Baselines, "declarations", declarations)
+        monkeypatch.setattr(check_module, "run", lambda *a, **k: "")  # `forge build` and `_head`'s git
+        monkeypatch.setattr(check_module, "facet_artifact", _stub_artifact)
+        monkeypatch.setattr(deploy, "facet_artifact", _stub_artifact)
+
+    def deploy_(layout, facets):
+        if in_git:
+            _write(project, layout, facets)
+            _git(repo, "init", "-q")
+            _git(repo, "add", "-A")
+            _git(repo, "-c", "user.email=t@t.t", "-c", "user.name=t", "commit", "-qm", "deployed")
+            run(["forge", "build"], project)
+            commit = _git(repo, "rev-parse", "HEAD")
+        else:
+            _write(baseline, layout, facets)
+            commit = "d" * 40
         records = {}
         for name in facets:
             source_id = f"src/{name}.sol:{name}"
@@ -75,7 +105,6 @@ def deployed(tmp_path, monkeypatch):
                 "codeHash": "0x" + "00" * 32,
                 "initcodeHash": keccak_hex(initcode),
             }
-        commit = _git(repo, "rev-parse", "HEAD")
 
         def check(layout, facets, recorded=None):
             """`recorded(commit, records)`: the chain's deployments; default all `current`."""
@@ -94,10 +123,47 @@ def deployed(tmp_path, monkeypatch):
 
         return check
 
-    return deploy
+    return deploy_
+
+
+@pytest.fixture
+def deployed(tmp_path, monkeypatch):
+    return _deployment(tmp_path, monkeypatch, in_git=False)
+
+
+@pytest.fixture
+def deployed_in_git(tmp_path, monkeypatch):
+    return _deployment(tmp_path, monkeypatch, in_git=True)
 
 
 READ_COUNT = "function count() external view returns (uint256) { return uint256(count_); }"
+
+
+@requires_git
+def test_unchanged_storage_passes_in_git(deployed_in_git):
+    check = deployed_in_git("address internal owner_;\nuint256 internal count_;", {"A": READ_COUNT})
+    result = check("address internal owner_;\nuint256 internal count_;", {"A": READ_COUNT})
+    assert result.exit_code == 0, result.output
+    assert "layout       vs current" in result.output
+    assert "2 variables checked" in result.output
+    assert "UNCHANGED" in result.output
+
+
+@requires_git
+def test_changing_a_type_fails_in_git(deployed_in_git):
+    check = deployed_in_git("address internal owner_;", {"Mono": "uint256 internal legacy_;", "A": "uint256 internal a_;"})
+
+    def recorded(commit, records):
+        return {
+            "legacy": {"source": "src/Mono.sol:Mono", "gitCommit": commit},
+            "current": {"gitCommit": commit, "facets": {"src/A.sol:A": records["src/A.sol:A"]}},
+        }
+
+    result = check("address internal owner_;", {"A": "int256 internal a_;"}, recorded)
+    assert result.exit_code == 1, result.output
+    assert "over uint256 legacy_ (src/Mono.sol:Mono at legacy" in result.output
+    assert "over uint256 a_ (src/A.sol:A at current" in result.output
+    assert "CHANGED" in result.output
 
 
 def test_unchanged_storage_passes(deployed):
