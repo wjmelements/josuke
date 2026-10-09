@@ -20,7 +20,6 @@ the ledger stages (`proposed`, else `current`).
 
 import pathlib
 import re
-import subprocess
 from collections import Counter, namedtuple
 from os import environ
 
@@ -133,8 +132,8 @@ def _resolve(entry: dict, root: pathlib.Path, findings: Findings) -> tuple[dict,
                     try:
                         runtime = create_offline(artifact["initcode"])
                         missing = "its constructor reverted when run offline"
-                    except (OSError, subprocess.CalledProcessError) as e:
-                        missing = f"cannot run its constructor offline: {e}"
+                    except click.ClickException as e:
+                        missing = f"cannot run its constructor offline: {e.message}"
             if runtime is None:
                 findings.warn(f"{proxy} {facet.source_id}: runtime code size not checked; {missing}")
             else:
