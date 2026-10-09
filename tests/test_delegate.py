@@ -9,7 +9,6 @@ either binary is missing.
 
 import pathlib
 import shutil
-import subprocess
 from unittest.mock import patch
 
 import pytest
@@ -22,7 +21,9 @@ from josuke.delegate import (
     UnconfiguredParameter,
     source_map,
 )
+from josuke.deploy import facet_artifact, facet_from_source_id
 from josuke.evm import execute
+from josuke.proc import run
 
 FIXTURE_ROOT = pathlib.Path(__file__).parent / "fixtures" / "forge-project"
 
@@ -35,20 +36,19 @@ pytestmark = pytest.mark.skipif(
 ADDRESS = "0x1A4E1a4e1A4E1a4e1a4E1a4e1A4e1A4E1a4E1A4e"
 
 
-def _forge_inspect(contract: str, field: str, *extra: str) -> str:
-    out = subprocess.run(
-        ["forge", "inspect", contract, field, *extra],
-        cwd=FIXTURE_ROOT,
-        text=True,
-        capture_output=True,
-        check=True,
-    ).stdout
-    return out.strip()
+@pytest.fixture(scope="module", autouse=True)
+def _built():
+    run(["forge", "build"], FIXTURE_ROOT)  # a no-op once built
+
+
+def _bytecode(contract: str, field: str) -> str:
+    """`field` ("bytecode" or "deployedBytecode") of `contract`, read from the build."""
+    return facet_artifact(facet_from_source_id(contract), FIXTURE_ROOT)[field]["object"]
 
 
 def _deployed_code(contract: str, arg_types=(), arg_values=(), sender=None) -> str:
     """The runtime bytecode a real deployment of `contract` would leave on chain."""
-    initcode = _forge_inspect(contract, "bytecode").removeprefix("0x")
+    initcode = _bytecode(contract, "bytecode").removeprefix("0x")
     if arg_types:
         initcode += abi_encode(list(arg_types), list(arg_values)).hex()
     return execute(initcode, sender)
@@ -101,7 +101,7 @@ def test_matches_source_true_without_constructor(eth_rpc):
     delegate = Delegate(ADDRESS, source)
     # A contract with no immutables: the on-chain runtime code is exactly
     # forge's deployedBytecode.
-    eth_rpc.set_code(ADDRESS, _forge_inspect("src/NoArgs.sol:NoArgs", "deployedBytecode"))
+    eth_rpc.set_code(ADDRESS, _bytecode("src/NoArgs.sol:NoArgs", "deployedBytecode"))
     delegate.fetch()
 
     assert delegate.matches_source() is True
@@ -110,7 +110,7 @@ def test_matches_source_true_without_constructor(eth_rpc):
 def test_matches_source_false_on_mutated_onchain_code(eth_rpc):
     source = ContractSource("src/NoArgs.sol", "NoArgs", root=str(FIXTURE_ROOT))
     delegate = Delegate(ADDRESS, source)
-    good = _forge_inspect("src/NoArgs.sol:NoArgs", "deployedBytecode").removeprefix("0x")
+    good = _bytecode("src/NoArgs.sol:NoArgs", "deployedBytecode").removeprefix("0x")
     mutated = ("ff" if good[:2] != "ff" else "00") + good[2:]
     eth_rpc.set_code(ADDRESS, mutated)
     delegate.fetch()

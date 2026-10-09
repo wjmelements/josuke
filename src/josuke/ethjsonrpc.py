@@ -1,11 +1,11 @@
 """Ethereum JSON-RPC access: the raw `rpc` call plus thin `eth_*` wrappers."""
 
-import subprocess
 from os import environ
 
 import click
 from requests import post
 
+from .proc import run
 from .trace import brief, span
 
 
@@ -158,9 +158,6 @@ def eth_get_logs(address: str, topics: list, from_block: int, to_block: int) -> 
 def chain_id() -> str:
     """Decimal chain id string, from `cast` when available, else `eth_chainId`."""
     try:
-        out = subprocess.run(
-            ["cast", "chain-id"], capture_output=True, text=True, check=True
-        ).stdout.strip()
-        return str(int(out))
-    except (FileNotFoundError, subprocess.CalledProcessError):
+        return str(int(run(["cast", "chain-id"]).strip()))
+    except click.ClickException:  # no `cast`, or it failed
         return str(int(rpc("eth_chainId", []), 16))

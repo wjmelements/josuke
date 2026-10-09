@@ -1,9 +1,9 @@
 from eth_abi import encode as abi_encode
 from json import loads
-from subprocess import run
 
 from .ethjsonrpc import eth_get_code
 from .evm import execute
+from .proc import run
 
 class ContractSource:
     def __init__(self, path: str, name: str, config={}, root: str = ".", sender: str | None = None):
@@ -48,21 +48,9 @@ class Delegate:
         source = str(self.source)
         root = self.source.root
 
-        initcode = run(
-            ["forge", "inspect", source, "bytecode"],
-            cwd=root,
-            text=True,
-            capture_output=True,
-            check=True,
-        ).stdout.strip().removeprefix("0x")
+        initcode = run(["forge", "inspect", source, "bytecode"], root).strip().removeprefix("0x")
 
-        abi = loads(run(
-            ["forge", "inspect", source, "abi", "--json"],
-            cwd=root,
-            text=True,
-            capture_output=True,
-            check=True,
-        ).stdout)
+        abi = loads(run(["forge", "inspect", source, "abi", "--json"], root))
         constructor = [method for method in abi if method["type"] == "constructor"]
         if constructor:
             abi_inputs = constructor[0]["inputs"]

@@ -3,6 +3,7 @@ import os
 import pathlib
 import selectors
 import subprocess
+import sys
 from dataclasses import dataclass
 
 import click
@@ -27,13 +28,7 @@ def execute(initcode_hex: str, sender: str | None = None) -> str:
         stdin = initcode_hex
     else:
         stdin = json.dumps({"from": sender, "data": initcode_hex})
-    return subprocess.run(
-        ["evm", "-x"],
-        input=stdin,
-        text=True,
-        capture_output=True,
-        check=True,
-    ).stdout.strip()
+    return run(["evm", "-x"], stdin=stdin).strip()
 
 
 def create_offline(initcode_hex: str) -> str | None:
@@ -85,13 +80,20 @@ class EvmRelay:
             os.set_blocking(self._trace, False)
             self._selector.register(self._trace, selectors.EVENT_READ)
             self._trace_buf = b""
-        self._proc = subprocess.Popen(
-            args,
-            stdin=subprocess.PIPE,
-            stdout=subprocess.PIPE,
-            bufsize=0,
-            pass_fds=() if trace_write is None else (trace_write,),
-        )
+        # Spans the process's lifetime; each call inside it has a span of its own.
+        self._lifetime = span(f"run {' '.join(args[:4])}")
+        self._lifetime.__enter__()
+        try:
+            self._proc = subprocess.Popen(
+                args,
+                stdin=subprocess.PIPE,
+                stdout=subprocess.PIPE,
+                bufsize=0,
+                pass_fds=() if trace_write is None else (trace_write,),
+            )
+        except BaseException:
+            self._lifetime.__exit__(*sys.exc_info())
+            raise
         if trace_write is not None:
             os.close(trace_write)  # evm holds the only write end, so the trace ends when it exits
         self._stdout = self._proc.stdout.fileno()
@@ -204,6 +206,7 @@ class EvmRelay:
             self._proc.wait()
         self._proc.stdout.close()
         self._selector.close()
+        self._lifetime.__exit__(None, None, None)
 
     def __enter__(self):
         return self

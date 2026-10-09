@@ -9,11 +9,13 @@ import pytest
 from click.testing import CliRunner
 
 from josuke.cli import main
-from josuke.deploy import facet_from_source_id, facet_initcode, keccak_hex
+from josuke.deploy import facet_artifact, facet_from_source_id, facet_initcode, keccak_hex
+from josuke.forge import get_forge_config
+from josuke.proc import run
 
 pytestmark = pytest.mark.skipif(shutil.which("forge") is None, reason="requires the `forge` binary")
 
-ROOT = pathlib.Path(__file__).parent / "fixtures" / "check-project"
+ROOT = (pathlib.Path(__file__).parent / "fixtures" / "check-project").resolve()
 PROXY = "0x2222222222222222222222222222222222222222"
 OTHER = "0x3333333333333333333333333333333333333333"
 COMMIT = "c" * 40
@@ -23,11 +25,30 @@ CONFIGURED = "src/Configured.sol:Configured"
 ARGS = {"limits": {"admin": "0x" + "ad" * 20, "level": 3}}
 
 
+@pytest.fixture(scope="module")
+def _fixture_config():
+    """Build the fixture once and read its config; its sources never change."""
+    run(["forge", "build"], ROOT)
+    return json.loads(run(["forge", "config", "--json"], ROOT))
+
+
 @pytest.fixture(autouse=True)
-def _in_fixture(monkeypatch):
+def _in_fixture(monkeypatch, _fixture_config):
     monkeypatch.chdir(ROOT)
     # COMMIT isn't in git; test_check_history.py covers recorded storage.
     monkeypatch.setattr("josuke.check.Baselines.declarations", lambda self, commit, source_ids: [])
+
+    # For the fixture, skip check's `forge build` and `_head`'s git, and reuse its
+    # config; tests that write a project of their own still build it.
+    def check_run(cmd, root=None, **kwargs):
+        return "" if root is not None and pathlib.Path(root).resolve() == ROOT else run(cmd, root, **kwargs)
+
+    def forge_config(root):
+        return _fixture_config if pathlib.Path(root).resolve() == ROOT else get_forge_config(root)
+
+    monkeypatch.setattr("josuke.check.run", check_run)
+    for module in ("josuke.check", "josuke.deploy", "josuke.layout"):
+        monkeypatch.setattr(f"{module}.get_forge_config", forge_config)
 
 
 def _record(source_id, address, args=None):
@@ -210,9 +231,8 @@ def test_markdown_wraps_the_report(tmp_path):
 
 def test_struct_selectors_match_solc():
     from josuke.deploy import facet_selectors
-    from josuke.proc import run
 
-    identifiers = json.loads(run(["forge", "inspect", CONFIGURED, "methodIdentifiers", "--json"], ROOT))
+    identifiers = facet_artifact(facet_from_source_id(CONFIGURED), ROOT)["methodIdentifiers"]
     assert {s.selector for s in facet_selectors(facet_from_source_id(CONFIGURED), ROOT)} == {
         "0x" + selector for selector in identifiers.values()
     }
