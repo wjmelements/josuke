@@ -1,9 +1,9 @@
 """Tests for josuke.evm's .evm-facet artifact build and the `evm -nx` relay."""
 
+import functools
 import json
 import pathlib
 import shutil
-import subprocess
 import textwrap
 from unittest.mock import patch
 
@@ -13,17 +13,22 @@ import pytest
 from ethrpc_mock import MockEthRpc
 from josuke import evm
 from josuke.broadcast import create_address
+from josuke.deploy import facet_artifact, facet_from_source_id
 from josuke.evm import EvmRelay, _governing_makefile, evm_artifact, replay_create
+from josuke.proc import run
 
 FIXTURE_ROOT = pathlib.Path(__file__).parent / "fixtures" / "forge-project"
 
 
+@functools.cache
+def _build() -> None:
+    run(["forge", "build"], FIXTURE_ROOT)  # a no-op once built
+
+
 def _initcode(contract: str) -> str:
-    out = subprocess.run(
-        ["forge", "inspect", f"src/{contract}.sol:{contract}", "bytecode"],
-        cwd=FIXTURE_ROOT, text=True, capture_output=True, check=True,
-    ).stdout.strip()
-    return out.removeprefix("0x")
+    _build()
+    facet = facet_from_source_id(f"src/{contract}.sol:{contract}")
+    return facet_artifact(facet, FIXTURE_ROOT)["bytecode"]["object"].removeprefix("0x")
 
 ARTIFACT = {
     "bytecode": {"object": "0xdeadbeef"},

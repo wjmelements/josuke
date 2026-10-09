@@ -1,5 +1,4 @@
 import pathlib
-import subprocess
 from collections import defaultdict
 from unittest.mock import patch
 
@@ -15,6 +14,7 @@ from josuke.opcodes import (
     RETURNDATASIZE,
     REVERT, SHA3, SHR, SLOAD, STOP, SWAP1, XOR,
 )
+from josuke.proc import run
 from josuke.selectors import Selector
 from josuke.storage import ProxyStorage
 
@@ -488,7 +488,7 @@ def test_finds_the_route_behind_a_guard_loop_the_stub_runs_out_of_gas(monkeypatc
     # Pointed at the stub, guards.length is about 2**160, so that test runs out of
     # gas; the walk takes it for no route, fetches the length, and goes on.
     monkeypatch.setenv("ETH_RPC_URL", "http://mock.rpc/test")
-    code = subprocess.run(["evm", str(GUARDED_EVM)], capture_output=True, text=True, check=True).stdout.strip()
+    code = run(["evm", str(GUARDED_EVM)]).strip()
     guard = f"0x{GUARDS_END + 1:064x}"
     rpc = MockEthRpc(block_number=BLOCK_NUMBER)
     rpc.set_code(PROXY_ADDRESS, code)
