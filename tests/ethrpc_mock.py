@@ -11,6 +11,13 @@ Patch it over ``josuke.ethjsonrpc.post``, which sends every request, e.g.::
 import json
 
 
+class RpcFault(Exception):
+    """Raised by a handler to answer with a JSON-RPC `error` object instead of a result."""
+
+    def __init__(self, error: dict):
+        self.error = error
+
+
 def norm_addr(a: str) -> str:
     return a.lower()
 
@@ -39,6 +46,9 @@ class MockEthRpc:
         self.nonce = {}
         self.balance = {}
         self.logs = []  # list of raw eth_getLogs-shaped dicts, address already lowercased
+        # (from_block, to_block, matching logs) -> a JSON-RPC error object to answer
+        # eth_getLogs with, or None to answer normally: a node's query limits.
+        self.get_logs_limit = None
 
     # -- request plumbing ----------------------------------------------------
 
@@ -71,7 +81,10 @@ class MockEthRpc:
         handler = getattr(self, f"_rpc_{method}", None)
         if handler is None:
             raise AssertionError(f"unexpected JSON-RPC method: {method}")
-        return {"jsonrpc": "2.0", "id": req.get("id"), "result": handler(params)}
+        try:
+            return {"jsonrpc": "2.0", "id": req.get("id"), "result": handler(params)}
+        except RpcFault as fault:
+            return {"jsonrpc": "2.0", "id": req.get("id"), "error": fault.error}
 
     def _rpc_eth_blockNumber(self, params):
         return hex(self.block_number)
@@ -120,6 +133,8 @@ class MockEthRpc:
                 continue
             if self._topics_match(log["topics"], topic_filters):
                 out.append(log)
+        if self.get_logs_limit and (error := self.get_logs_limit(from_block, to_block, out)):
+            raise RpcFault(error)
         return out
 
     @staticmethod
