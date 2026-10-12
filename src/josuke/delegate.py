@@ -1,9 +1,9 @@
 from eth_abi import encode as abi_encode
-from json import loads
+from pathlib import Path
 
 from .ethjsonrpc import eth_get_code
 from .evm import execute
-from .proc import run
+from .facet import facet_artifact, facet_from_source_id
 
 class ContractSource:
     def __init__(self, path: str, name: str, config={}, root: str = ".", sender: str | None = None):
@@ -43,14 +43,14 @@ class Delegate:
         self.deployed_bytecode = eth_get_code(self.address).removeprefix("0x")
 
     def matches_source(self) -> bool:
+        """Read from the source's completed `forge build`."""
         assert self.deployed_bytecode is not None
 
         source = str(self.source)
-        root = self.source.root
+        artifact = facet_artifact(facet_from_source_id(source), Path(self.source.root))
+        initcode = artifact["bytecode"]["object"].removeprefix("0x")
 
-        initcode = run(["forge", "inspect", source, "bytecode"], root).strip().removeprefix("0x")
-
-        abi = loads(run(["forge", "inspect", source, "abi", "--json"], root))
+        abi = artifact["abi"]
         constructor = [method for method in abi if method["type"] == "constructor"]
         if constructor:
             abi_inputs = constructor[0]["inputs"]

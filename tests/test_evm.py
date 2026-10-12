@@ -13,8 +13,8 @@ import pytest
 from ethrpc_mock import MockEthRpc
 from josuke import evm
 from josuke.broadcast import create_address
-from josuke.deploy import facet_artifact, facet_from_source_id
 from josuke.evm import EvmRelay, _governing_makefile, evm_artifact, replay_create
+from josuke.facet import facet_artifact, facet_from_source_id
 from josuke.proc import run
 
 FIXTURE_ROOT = pathlib.Path(__file__).parent / "fixtures" / "forge-project"

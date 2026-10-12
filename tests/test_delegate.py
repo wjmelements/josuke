@@ -1,10 +1,10 @@
 """Verification tests for josuke.delegate.
 
 `Delegate.fetch()` is exercised against the shared JSON-RPC mock.
-`Delegate.matches_source()` is almost entirely a pipeline of real `forge inspect`
-and real `evm -x` invocations, so it is exercised end-to-end against a committed
-Foundry fixture project (tests/fixtures/forge-project). The tests are skipped when
-either binary is missing.
+`Delegate.matches_source()` is almost entirely a pipeline of real `forge build`
+artifacts and real `evm -x` invocations, so it is exercised end-to-end against a
+committed Foundry fixture project (tests/fixtures/forge-project). The tests are
+skipped when either binary is missing.
 """
 
 import pathlib
@@ -21,8 +21,8 @@ from josuke.delegate import (
     UnconfiguredParameter,
     source_map,
 )
-from josuke.deploy import facet_artifact, facet_from_source_id
 from josuke.evm import execute
+from josuke.facet import facet_artifact, facet_from_source_id
 from josuke.proc import run
 
 FIXTURE_ROOT = pathlib.Path(__file__).parent / "fixtures" / "forge-project"

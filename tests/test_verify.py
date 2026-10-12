@@ -14,6 +14,7 @@ from eth_utils import to_checksum_address
 from josuke import deploy, verify
 from josuke.broadcast import create_address
 from josuke.evm import Replay
+from josuke.facet import facet_from_source_id
 from josuke.migration import Migration
 
 PROXY = "0x2222222222222222222222222222222222222222"
@@ -207,7 +208,7 @@ def test_verify_facets_rebuilds_runtime_from_source(monkeypatch):
     source_id = "src/FromDeployer.sol:FromDeployer"  # bakes msg.sender into an immutable
     deployer = to_checksum_address("0x" + "ab" * 20)
 
-    facet = deploy.facet_from_source_id(source_id)
+    facet = facet_from_source_id(source_id)
     initcode, _ = deploy.facet_initcode(facet, root, None, prompt=False)
     with patch("josuke.ethjsonrpc.post", MockEthRpc()):
         true_codehash = verify.keccak_hex(verify._replay_runtime(initcode, {"from": deployer}, {}).runtime)
@@ -244,7 +245,7 @@ def test_verify_facets_replays_own_address_at_recorded_nonce(monkeypatch):
     deployer = to_checksum_address("0x" + "ab" * 20)
     address = create_address(deployer, 5)
 
-    facet = deploy.facet_from_source_id(source_id)
+    facet = facet_from_source_id(source_id)
     initcode, _ = deploy.facet_initcode(facet, root, None, prompt=False)
     rpc = MockEthRpc()
     with patch("josuke.ethjsonrpc.post", rpc):
@@ -271,8 +272,8 @@ def test_verify_facets_replays_own_address_at_recorded_nonce(monkeypatch):
 
 def test_verify_proposed_set_reports_missing_and_extra(monkeypatch):
     monkeypatch.setattr(
-        verify, "resolve_facets", lambda src, tree: [deploy.facet_from_source_id("a.sol:A"),
-                                                     deploy.facet_from_source_id("b.sol:B")]
+        verify, "resolve_facets", lambda src, tree: [facet_from_source_id("a.sol:A"),
+                                                     facet_from_source_id("b.sol:B")]
     )
     proposed = _state({"a.sol:A": {}, "c.sol:C": {}})
     report = _report()
@@ -379,7 +380,7 @@ def test_verify_migration_passes_for_recomputed_bytecode(monkeypatch):
     proposed = _state({"a.sol:A": {"address": A1}})
     storage = _fetched_storage(["0x11111111"])
     expected = deploy.build_migration(
-        PROXY, [deploy.facet_from_source_id("a.sol:A")], proposed["facets"], {}, ".", ".", storage=storage
+        PROXY, [facet_from_source_id("a.sol:A")], proposed["facets"], {}, ".", ".", storage=storage
     )
     monkeypatch.setattr(verify, "eth_get_code", lambda address: "0x" + expected.encode().hex())
 
@@ -398,7 +399,7 @@ def test_verify_migration_passes_multi_facet_multi_selector(monkeypatch):
     })
     proposed = _state({"a.sol:A": {"address": A1}, "b.sol:B": {"address": B2}})
     storage = _fetched_storage(["0x11111111", "0x33333333", "0x22222222"])
-    facets = [deploy.facet_from_source_id("a.sol:A"), deploy.facet_from_source_id("b.sol:B")]
+    facets = [facet_from_source_id("a.sol:A"), facet_from_source_id("b.sol:B")]
     expected = deploy.build_migration(PROXY, facets, proposed["facets"], {}, ".", ".", storage=storage)
     assert len({sd.delegate.address for sd in expected.setdelegates}) == 2  # two groups
     monkeypatch.setattr(verify, "eth_get_code", lambda address: "0x" + expected.encode().hex())
@@ -423,7 +424,7 @@ def test_verify_migration_flags_missing_install(monkeypatch):
     _migration_setup(monkeypatch, {"a.sol:A": [_sel("0x11111111")], "b.sol:B": [_sel("0x22222222")]})
     proposed = _state({"a.sol:A": {"address": A1}, "b.sol:B": {"address": B2}})
     storage = _fetched_storage(["0x11111111", "0x22222222"])
-    facets = [deploy.facet_from_source_id("a.sol:A"), deploy.facet_from_source_id("b.sol:B")]
+    facets = [facet_from_source_id("a.sol:A"), facet_from_source_id("b.sol:B")]
     expected = deploy.build_migration(PROXY, facets, proposed["facets"], {}, ".", ".", storage=storage)
     # on-chain migration only carries the route for 0x11111111
     partial = Migration([sd for sd in expected.setdelegates if sd.selector == "0x11111111"])
@@ -444,7 +445,7 @@ def test_verify_migration_flags_unzeroed_removal(monkeypatch):
     current = _state({"keep.sol:Keep": {}, "old.sol:Old": {}})
     # 0x99999999 currently routes somewhere non-zero, so it must be zeroed
     storage = _fetched_storage(["0x11111111", "0x99999999"], {"0x99999999": _word(OLD)})
-    facets = [deploy.facet_from_source_id("keep.sol:Keep")]
+    facets = [facet_from_source_id("keep.sol:Keep")]
     expected = deploy.build_migration(PROXY, facets, proposed["facets"], current, ".", ".", storage=storage)
     # drop the zeroing fragment (the one whose delegate is the zero address)
     kept = [sd for sd in expected.setdelegates if sd.delegate.address != verify.ZERO_ADDRESS]

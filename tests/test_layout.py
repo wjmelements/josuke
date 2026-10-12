@@ -5,7 +5,7 @@ import shutil
 import click
 import pytest
 
-from josuke.deploy import facet_from_source_id
+from josuke.facet import facet_from_source_id
 from josuke.layout import storage_layouts
 from josuke.proc import run
 

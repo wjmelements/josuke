@@ -12,8 +12,9 @@ import pathlib
 import click
 from eth_utils import to_checksum_address
 
-from .deploy import facet_from_source_id, facet_selectors
+from .deploy import facet_selectors
 from .erc8167 import SELECTORS_SELECTOR, selectors_selector
+from .facet import facet_from_source_id
 from .proc import run
 from .storage import slot_address
 
