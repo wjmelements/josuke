@@ -131,9 +131,38 @@ def post_batch(batch: list[dict], label: str = "rpc") -> dict:
     return answers
 
 
+# Code at `latest` by lowercase address, kept for the run: deployed code doesn't
+# change, but an address may get code later, so empty code isn't kept.
+_codes: dict[str, str] = {}
+
+
+def _keep_code(address: str, code: str) -> None:
+    if code not in ("0x", "0x0"):
+        _codes[address.lower()] = code
+
+
 def eth_get_code(address: str, block: str = "latest") -> str:
     """The 0x-prefixed runtime bytecode at `address`."""
-    return rpc("eth_getCode", [address, block])
+    if block != "latest":
+        return rpc("eth_getCode", [address, block])
+    if (code := _codes.get(address.lower())) is None:
+        code = rpc("eth_getCode", [address, block])
+        _keep_code(address, code)
+    return code
+
+
+def prefetch_code(addresses) -> None:
+    """Read the code at `addresses` for `eth_get_code` in as few round trips as the
+    node allows. Best effort: a failure is left for the read that needs the code."""
+    wanted = list(dict.fromkeys(a.lower() for a in addresses if a and a.lower() not in _codes))
+    if not wanted:
+        return
+    try:
+        codes = rpc_batch([("eth_getCode", [address, "latest"]) for address in wanted])
+    except RpcError:
+        return
+    for address, code in zip(wanted, codes):
+        _keep_code(address, code)
 
 
 def eth_block_number() -> int:

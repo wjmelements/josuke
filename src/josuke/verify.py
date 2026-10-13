@@ -15,7 +15,7 @@ from .deploy import (
     selector_owners,
     selectors_runtime,
 )
-from .ethjsonrpc import chain_id, eth_get_code
+from .ethjsonrpc import chain_id, eth_get_code, prefetch_code
 from .broadcast import create_address
 from .evm import Replay, replay_create
 from .ledger import load_ledger
@@ -36,6 +36,14 @@ class Report:
 
     def fail(self, message: str) -> None:
         self.failures.append(f"{self.proxy} {message}")
+
+
+def code_addresses(state: dict | None) -> list[str]:
+    """Where checking `state` reads code: its facets, `selectors()` and migration."""
+    if not state:
+        return []
+    records = [*state.get("facets", {}).values(), state.get("selectors") or {}, state.get("migration") or {}]
+    return [record["address"] for record in records if record.get("address")]
 
 
 def _onchain_codehash(address: str) -> str:
@@ -238,6 +246,14 @@ def run_verify(ledger_path):
     report = Report()
     verified: list[str] = []
     rpc_cache: dict = {}  # shared by every relay in the run: one snapshot of the chain
+
+    recorded = [entry.get("deployments", {}).get(chain) or {} for entry in ledger]
+    prefetch_code(
+        address
+        for entry, history in zip(ledger, recorded)
+        if history
+        for address in [entry["address"], *code_addresses(history.get("current")), *code_addresses(history.get("proposed"))]
+    )
 
     with SourceTrees(root) as trees:
         for entry in ledger:

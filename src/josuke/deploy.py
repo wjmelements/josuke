@@ -11,7 +11,7 @@ from eth_utils import keccak, to_checksum_address
 from .broadcast import broadcast_session, create
 from .delegate import ContractSource, Delegate
 from .erc8167 import SELECTORS_SELECTOR, generated_selectors, selectors_method
-from .ethjsonrpc import chain_id, eth_get_code
+from .ethjsonrpc import chain_id, eth_get_code, prefetch_code
 from .evm import Replay, evm_artifact, replay_create
 from .forge import get_forge_config
 from .ledger import load_ledger, write_ledger
@@ -553,6 +553,20 @@ def run_deploy(ledger_path, redeploy_all: bool = False):
     # keystore_session: prompt for a keystore password at most once, on the first deploy
     # broadcast_session: plan every deployment, then send them back to back and wait for them together
     with keystore_session(), broadcast_session(chain) as broadcast, SourceTrees(root) as trees:
+        # The code planning compares against: each proxy's (for its rehearsal) and its
+        # prior selectors() and migration.
+        recorded = [entry.get("deployments", {}).get(chain) or {} for entry in ledger]
+        prefetch_code(
+            address
+            for entry, history in zip(ledger, recorded)
+            for address in [
+                entry["address"],
+                ((history.get("current") or {}).get("selectors") or {}).get("address"),
+                ((history.get("proposed") or {}).get("selectors") or {}).get("address"),
+                ((history.get("proposed") or {}).get("migration") or {}).get("address"),
+            ]
+            if address
+        )
         for entry in ledger:
             proxy = to_checksum_address(entry["address"])
             deployments = entry.setdefault("deployments", {})
@@ -635,6 +649,8 @@ def run_deploy(ledger_path, redeploy_all: bool = False):
 
         broadcast.send_all(root)
         broadcast.wait(root)
+        if unmined:
+            prefetch_code(facet_entry["address"] for _, facet_entry, _, _ in unmined)
         unreproduced = []
         for facet, facet_entry, initcode, sender in unmined:
             address = facet_entry["address"]

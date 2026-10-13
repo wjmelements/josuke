@@ -54,3 +54,13 @@ def _fresh_selector_signatures():
     _signatures.clear()
     yield
     _signatures.clear()
+
+
+@pytest.fixture(autouse=True)
+def _fresh_code_cache():
+    """Code read at `latest` is kept for the run; tests stub different code."""
+    from josuke import ethjsonrpc
+
+    ethjsonrpc._codes.clear()
+    yield
+    ethjsonrpc._codes.clear()

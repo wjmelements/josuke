@@ -208,3 +208,60 @@ def test_a_batch_answered_with_no_json_fails(post, status):
     post["response"] = FakeResponse(status, "<html>Service Unavailable</html>")
     with pytest.raises(ethjsonrpc.RpcError, match=f"HTTP {status}, not JSON: <html>Service Unavailable"):
         ethjsonrpc.rpc_batch([("eth_chainId", []), ("eth_blockNumber", [])])
+
+
+# -- eth_getCode cache ---------------------------------------------------------
+
+CONTRACT = "0x" + "c1" * 20
+OTHER = "0x" + "c2" * 20
+NOTHING = "0x" + "c3" * 20  # no code
+
+
+@pytest.fixture
+def chain(monkeypatch):
+    monkeypatch.setenv("ETH_RPC_URL", "http://node")
+    monkeypatch.setattr(ethjsonrpc, "_batch_limits", {})
+    rpc = MockEthRpc()
+    rpc.set_code(CONTRACT, "0x60")
+    rpc.set_code(OTHER, "0x61")
+    monkeypatch.setattr(ethjsonrpc, "post", rpc)
+    return rpc
+
+
+def _code_requests(rpc):
+    return [r["params"] for r in rpc.requests_for("eth_getCode")]
+
+
+def test_prefetched_code_is_read_without_another_request(chain):
+    ethjsonrpc.prefetch_code([CONTRACT, OTHER, CONTRACT.upper().replace("0X", "0x"), None])
+    assert len(chain.calls) == 1  # one batch, each address once
+    assert sorted(p[0].lower() for p in _code_requests(chain)) == [CONTRACT, OTHER]
+    assert ethjsonrpc.eth_get_code(CONTRACT) == "0x60"
+    assert ethjsonrpc.eth_get_code(OTHER) == "0x61"
+    assert len(chain.calls) == 1
+
+
+def test_code_is_read_once_per_address(chain):
+    assert ethjsonrpc.eth_get_code(CONTRACT) == ethjsonrpc.eth_get_code(CONTRACT) == "0x60"
+    assert len(_code_requests(chain)) == 1
+
+
+def test_prefetch_skips_code_already_read(chain):
+    ethjsonrpc.eth_get_code(CONTRACT)
+    ethjsonrpc.prefetch_code([CONTRACT])
+    assert len(chain.calls) == 1
+
+
+def test_empty_code_is_read_again(chain):
+    # A contract may be deployed there later in the run.
+    ethjsonrpc.prefetch_code([NOTHING])
+    assert ethjsonrpc.eth_get_code(NOTHING) == "0x"
+    chain.set_code(NOTHING, "0x62")
+    assert ethjsonrpc.eth_get_code(NOTHING) == "0x62"
+    assert len(_code_requests(chain)) == 3
+
+
+def test_code_at_a_block_is_not_cached(chain):
+    ethjsonrpc.eth_get_code(CONTRACT, "0x5")
+    ethjsonrpc.eth_get_code(CONTRACT, "0x5")
+    assert _code_requests(chain) == [[CONTRACT, "0x5"], [CONTRACT, "0x5"]]
