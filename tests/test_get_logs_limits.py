@@ -12,6 +12,9 @@ fit, then sends the remaining windows in batches: a batch costs one round trip
 however many windows it holds, so their width hardly matters. A window rejected
 for its results splits, in halves or as reth names, into the next batch.
 
+A node may also lack the history asked for, which no narrower query fixes; see
+"missing history" below.
+
 Messages and codes are each client's, as of its default branch on 2026-10-12.
 """
 
@@ -47,12 +50,20 @@ def _range(request):
     return int(query["fromBlock"], 16), int(query["toBlock"], 16)
 
 
-def _scan(node, lo, hi):
-    """The blocks of the logs `get_logs` returns, and what it sent: a single query
-    as its (fromBlock, toBlock), a batch as a list of them."""
-    logs = audit.get_logs(PROXY, lo, hi)
+def _scan_history(node, lo, hi):
+    """The blocks of the logs `get_logs` returns, the ranges it reports missing
+    from the node's history, and what it sent: a single query as its
+    (fromBlock, toBlock), a batch as a list of them."""
+    logs, missing = audit.get_logs(PROXY, lo, hi)
     sent = [[_range(r) for r in payload] if isinstance(payload, list) else _range(payload) for payload in node.calls]
-    return [int(log["blockNumber"], 16) for log in logs], sent
+    return [int(log["blockNumber"], 16) for log in logs], missing, sent
+
+
+def _scan(node, lo, hi):
+    """`_scan_history` for a node that holds all the history asked for."""
+    blocks, missing, sent = _scan_history(node, lo, hi)
+    assert missing == []
+    return blocks, sent
 
 
 def _windows(lo, hi, span):
@@ -274,5 +285,123 @@ def test_single_block_failure_propagates(node):
 def test_sorts_by_block_then_index(node):
     for block, index in [(2, 0), (1, 1), (1, 0)]:
         node.add_log(PROXY, [audit.SELECTOR_DELEGATED_TOPIC, TOPIC, TOPIC], block=block, log_index=index)
-    logs = audit.get_logs(PROXY, 0, 10)
+    logs, missing = audit.get_logs(PROXY, 0, 10)
     assert [(int(log["blockNumber"], 16), int(log["logIndex"], 16)) for log in logs] == [(1, 0), (1, 1), (2, 0)]
+    assert missing == []
+
+
+# -- missing history -----------------------------------------------------------
+#
+# A node that pruned its oldest blocks, or never indexed their events, can't
+# serve them at any width, so narrowing doesn't help. History is missing from
+# the start, so `get_logs` finds the first block the node holds, reports the
+# blocks before it missing, and scans the rest. Single-block probes find it:
+# they fit any range or result cap.
+
+CUTOFF = 600  # the node holds blocks from here on
+
+
+def _history_from(code, message, cutoff=CUTOFF):
+    """A node without blocks before `cutoff`: a query reaching below it fails,
+    as geth's `fromBlock < HistoryPruningCutoff` does."""
+
+    def check(lo, hi, logs):
+        if lo < cutoff:
+            return {"code": code, "message": message.format(lo=lo, cutoff=cutoff)}
+
+    return check
+
+
+# Bisecting 0-999 with single blocks for the first that the node holds, 600:
+# 999 is held, so history isn't missing throughout; then halve the gap.
+BISECT_TO_CUTOFF = [(b, b) for b in (999, 499, 749, 624, 561, 592, 608, 600, 596, 598, 599)]
+
+
+def _reports_missing_history(node, code, message):
+    _log_at(node, 100, 700, 999)
+    node.get_logs_limit = _history_from(code, message)
+    blocks, missing, sent = _scan_history(node, 0, 999)
+    assert missing == [(0, CUTOFF - 1)]
+    assert blocks == [700, 999]
+    assert sent == [(0, 999), *BISECT_TO_CUTOFF, (CUTOFF, 999)]
+
+
+def test_geth_pruned_history(node):
+    # Also op-geth, bor, bsc: the EIP-4444 code.
+    _reports_missing_history(node, 4444, "pruned history unavailable")
+
+
+def test_reth_pruned_history(node):
+    _reports_missing_history(node, 4444, "pruned history unavailable")
+
+
+def test_nethermind_pruned_history(node):
+    _reports_missing_history(node, 4444, "Pruned history unavailable")
+
+
+def test_besu_pruned_history(node):
+    _reports_missing_history(node, 4444, "Pruned history unavailable")
+
+
+def test_lotus_events_not_indexed(node):
+    _reports_missing_history(
+        node, 1, "failed to get events for filter: failed to get events for filter from chain indexer: not found in index"
+    )
+
+
+def test_lotus_index_requires_backfill(node):
+    _reports_missing_history(
+        node, 1, "failed to get events for filter: failed to get events for filter from chain indexer: chain index requires backfill"
+    )
+
+
+def test_erigon_pruned_history_names_its_first_block(node):
+    # Erigon says where its history starts, so there is nothing to bisect.
+    _log_at(node, 100, 700, 999)
+    node.get_logs_limit = _history_from(
+        -32000, "old data not available due to pruning: requested block {lo}, blocks are available from block {cutoff}"
+    )
+    blocks, missing, sent = _scan_history(node, 0, 999)
+    assert missing == [(0, CUTOFF - 1)]
+    assert blocks == [700, 999]
+    assert sent == [(0, 999), (CUTOFF, 999)]
+
+
+def test_history_missing_throughout(node):
+    _log_at(node, 100)
+    node.get_logs_limit = _history_from(4444, "pruned history unavailable", cutoff=1000)
+    blocks, missing, sent = _scan_history(node, 0, 999)
+    assert (blocks, missing) == ([], [(0, 999)])
+    assert sent == [(0, 999), (999, 999)]
+
+
+def test_missing_history_under_a_range_limit(node):
+    """Glif's Lotus: a 360-block range cap, and events indexed from 4144279."""
+    lo, hi, cutoff = 4119460, 4150774, 4144279
+    _log_at(node, 4119464, 4150000)
+    range_limit = _range_limit(-32005, "block range exceeds maximum of {limit} (got {given})", 360)
+    history = _history_from(1, "failed to get events for filter: not found in index", cutoff)
+    node.get_logs_limit = lambda a, b, logs: range_limit(a, b, logs) or history(a, b, logs)
+    blocks, missing, sent = _scan_history(node, lo, hi)
+    assert missing == [(lo, cutoff - 1)]
+    assert blocks == [4150000]
+    # The stated cap batches every window at once; those from the start up to
+    # 4144008-4144368 fail for their history. Single blocks bisect only that
+    # last one, and the part of it the node holds goes in the next batch.
+    assert sent[:2] == [(lo, hi), _windows(lo, hi, 361)]
+    probes = sent[2:-1]
+    assert all(isinstance(p, tuple) and p[0] == p[1] and 4144008 <= p[0] <= 4144368 for p in probes)
+    assert len(probes) <= 10
+    assert sent[-1] == [(cutoff, 4144368)]
+
+
+def test_missing_history_in_a_batched_window_is_reported_whole(node):
+    # A gap in the middle: the window that hits it is reported, the rest scanned.
+    _log_at(node, 0, 450, 999)
+    gap = lambda lo, hi, logs: {"code": 4444, "message": "pruned history unavailable"} if lo <= 450 <= hi else None
+    range_limit = _range_limit(-32602, "exceed maximum block range {limit}")
+    node.get_logs_limit = lambda a, b, logs: range_limit(a, b, logs) or gap(a, b, logs)
+    blocks, missing, sent = _scan_history(node, 0, 999)
+    assert missing == [(400, 499)]
+    assert blocks == [0, 999]
+    assert sent == [(0, 999), _windows(0, 999, 100)]
