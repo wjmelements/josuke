@@ -19,8 +19,9 @@ from unittest.mock import patch
 
 import pytest
 
-from ethrpc_mock import MockEthRpc
+from ethrpc_mock import FakeResponse, MockEthRpc
 from josuke import audit, ethjsonrpc
+from josuke.ethjsonrpc import RpcError
 
 PROXY = "0x2222222222222222222222222222222222222222"
 LIMIT = 99  # the range cap a node is configured with, or its result cap in logs
@@ -232,3 +233,46 @@ def test_forest_result_limit(node):
 
 def test_venus_result_limit(node):
     _splits_windows_over_result_limit(node, 1, "too many events")
+
+
+# -- without limits, and other errors -----------------------------------------
+
+
+def test_one_query_when_nothing_is_rejected(node):
+    _log_at(node, 0, 100)
+    assert _scan(node, 0, 100) == ([0, 100], [(0, 100)])
+
+
+def test_unrecognised_error_halves(node):
+    _log_at(node, 0, 30, 99)
+    node.get_logs_limit = lambda lo, hi, logs: {"code": -32000, "message": "too many results"} if hi - lo >= 25 else None
+    assert _scan(node, 0, 99) == ([0, 30, 99], [(0, 99), (0, 49), (0, 24), _windows(25, 99, 25)])
+
+
+def test_http_failure_halves(node):
+    # A gateway timing out on a wide query answers with an HTTP error, not JSON-RPC.
+    _log_at(node, 0, 30)
+    answer = node.__call__
+
+    def gateway(url, *args, **kwargs):
+        query = kwargs["json"]
+        if isinstance(query, dict) and _range(query)[1] - _range(query)[0] >= 25:
+            node.calls.append(query)
+            return FakeResponse(504, "Gateway Timeout")
+        return answer(url, *args, **kwargs)
+
+    with patch("josuke.ethjsonrpc.post", gateway):
+        assert _scan(node, 0, 49) == ([0, 30], [(0, 49), (0, 24), [(25, 49)]])
+
+
+def test_single_block_failure_propagates(node):
+    node.get_logs_limit = lambda lo, hi, logs: {"code": -32000, "message": "node error"}
+    with pytest.raises(RpcError, match="block 5"):
+        audit.get_logs(PROXY, 5, 5)
+
+
+def test_sorts_by_block_then_index(node):
+    for block, index in [(2, 0), (1, 1), (1, 0)]:
+        node.add_log(PROXY, [audit.SELECTOR_DELEGATED_TOPIC, TOPIC, TOPIC], block=block, log_index=index)
+    logs = audit.get_logs(PROXY, 0, 10)
+    assert [(int(log["blockNumber"], 16), int(log["logIndex"], 16)) for log in logs] == [(1, 0), (1, 1), (2, 0)]

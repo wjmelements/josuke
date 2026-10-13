@@ -14,6 +14,7 @@ the live routing.
 """
 
 import pathlib
+import re
 from dataclasses import dataclass
 from os import environ
 
@@ -22,7 +23,15 @@ from eth_abi import decode as abi_decode
 from eth_abi.exceptions import DecodingError
 from eth_utils import keccak, to_checksum_address
 
-from .ethjsonrpc import RpcError, chain_id, eth_block_number, eth_get_code, eth_get_logs
+from .ethjsonrpc import (
+    RpcError,
+    chain_id,
+    eth_block_number,
+    eth_get_code,
+    eth_get_logs_request,
+    post_batch,
+    post_request,
+)
 from .ledger import load_ledger
 from .migration import SELECTOR_DELEGATED_SIG
 from .verify import Report, SourceTrees, verify_facets, verify_selectors
@@ -86,28 +95,86 @@ def find_deploy_block(proxy: str, latest: int) -> int:
     return lo
 
 
+# eth_getLogs range caps that state their N, in each client's words. Each rejects
+# `toBlock - fromBlock > N`, so windows of N + 1 blocks fit.
+_STATED_RANGE_LIMITS = [
+    re.compile(r"exceed maximum block range:? (\d+)"),  # geth, op-geth, bsc
+    re.compile(r"query block range exceeds server limit, narrow your filter: (\d+)"),  # erigon
+    re.compile(r"query exceeds max block range (\d+)"),  # reth
+    re.compile(r"maximum \[from, to\] blocks distance: (\d+)"),  # ethermint
+    re.compile(r"block range exceeds maximum of (\d+)"),  # lotus, forest
+    re.compile(r"invalid epoch range: .* \(maximum: (\d+)\)"),  # venus
+]
+# Reth's result cap names the most that fits from `fromBlock`.
+_RETRY_RANGE = re.compile(r"query exceeds max results \d+, retry with the range (\d+)-(\d+)")
+
+
+def _windows(lo: int, hi: int, span: int) -> list[tuple[int, int]]:
+    return [(start, min(start + span - 1, hi)) for start in range(lo, hi + 1, span)]
+
+
+def _narrow(error, lo: int, hi: int) -> tuple[list[tuple[int, int]], bool]:
+    """Windows covering `lo`..`hi` after the node rejected it with `error`, and
+    whether the first is known to fit: a stated range cap or reth's named range.
+    Anything else halves: bor's and besu's range caps, which state no N, every
+    other result cap, whose number counts logs, not blocks, and errors not
+    recognised as either. A single block that fails can't narrow, and propagates.
+    """
+    message = str(error.get("message", "")) if isinstance(error, dict) else str(error)
+    for pattern in _STATED_RANGE_LIMITS:
+        if (match := pattern.search(message)) and int(match[1]) < hi - lo:
+            return _windows(lo, hi, int(match[1]) + 1), True
+    if (match := _RETRY_RANGE.search(message)) and int(match[1]) == lo and lo <= int(match[2]) < hi:
+        retry_to = int(match[2])
+        return [(lo, retry_to), *_windows(retry_to + 1, hi, retry_to - lo + 1)], True
+    if lo == hi:
+        raise RpcError(f"eth_getLogs block {lo}: {error}")
+    half = (hi - lo + 1) // 2
+    return [(lo, lo + half - 1), (lo + half, hi)], False
+
+
 def get_logs(proxy: str, from_block: int, to_block: int) -> list[dict]:
     """Every SelectorDelegated / DiamondDelegateCall log `proxy` emitted in the
     inclusive range, oldest first.
 
-    Nodes cap the block span (or result count) of one `eth_getLogs`, and the cap
-    isn't discoverable, so an errored span is halved and retried. The span never
-    grows back, so once the cap is found the rest of the scan runs at it. A
-    single-block failure is real and propagates.
+    Nodes cap the block range or the result count of one `eth_getLogs`, each in
+    its own words. One query at a time narrows the range until a query succeeds
+    or a window is known to fit (see `_narrow`); the rest is sent as windows of
+    that width in batches, one round trip each. A window rejected in a batch
+    narrows the same way into the next batch, so a stretch dense with logs
+    doesn't shrink the windows elsewhere.
     """
     topics = [[SELECTOR_DELEGATED_TOPIC, DIAMOND_DELEGATE_CALL_TOPIC]]
     logs: list[dict] = []
+    queue: list[tuple[int, int]] = []
     lo, span = from_block, to_block - from_block + 1
     while lo <= to_block:
         hi = min(lo + span - 1, to_block)
         try:
-            logs.extend(eth_get_logs(proxy, topics, lo, hi))
-        except RpcError:
-            if span == 1:
-                raise
-            span //= 2
-            continue
-        lo = hi + 1
+            answer = post_request(eth_get_logs_request(proxy, topics, lo, hi))
+            error = answer.get("error")
+        except RpcError as e:  # an HTTP failure, which a narrower query may avoid
+            error = e.message
+        if not error:
+            logs.extend(answer.get("result") or [])
+            queue = _windows(hi + 1, to_block, span)
+            break
+        windows, fits = _narrow(error, lo, hi)
+        span = windows[0][1] - windows[0][0] + 1
+        if fits:
+            queue = windows + _windows(hi + 1, to_block, span)
+            break
+
+    while queue:
+        requests = [eth_get_logs_request(proxy, topics, a, b, i) for i, (a, b) in enumerate(queue)]
+        answers = post_batch(requests)
+        retry = []
+        for i, (a, b) in enumerate(queue):
+            if error := answers[i].get("error"):
+                retry.extend(_narrow(error, a, b)[0])
+            else:
+                logs.extend(answers[i].get("result") or [])
+        queue = retry
     return sorted(logs, key=lambda log: (int(log["blockNumber"], 16), int(log["logIndex"], 16)))
 
 

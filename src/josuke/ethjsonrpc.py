@@ -140,19 +140,11 @@ def eth_block_number() -> int:
     return int(rpc("eth_blockNumber", []), 16)
 
 
-def eth_get_logs(address: str, topics: list, from_block: int, to_block: int) -> list:
-    """Logs emitted by `address` over the inclusive block range, matching `topics`."""
-    return rpc(
-        "eth_getLogs",
-        [
-            {
-                "address": address,
-                "topics": topics,
-                "fromBlock": hex(from_block),
-                "toBlock": hex(to_block),
-            }
-        ],
-    )
+def eth_get_logs_request(address: str, topics: list, from_block: int, to_block: int, request_id: int = 1) -> dict:
+    """An eth_getLogs request for the logs `address` emitted over the inclusive block
+    range, matching `topics`, to send with `post_request` or `post_batch`."""
+    params = {"address": address, "topics": topics, "fromBlock": hex(from_block), "toBlock": hex(to_block)}
+    return {"id": request_id, "jsonrpc": "2.0", "method": "eth_getLogs", "params": [params]}
 
 
 def chain_id() -> str:

@@ -89,59 +89,6 @@ def test_find_deploy_block_wraps_rpc_error(monkeypatch):
         audit.find_deploy_block(PROXY, 10)
 
 
-# -- get_logs ----------------------------------------------------------------
-
-
-def test_get_logs_single_span(monkeypatch):
-    seen = []
-
-    def fake_get_logs(address, topics, lo, hi):
-        seen.append((lo, hi))
-        return [_delegated_log("0x11111111", A1, block=lo)]
-
-    monkeypatch.setattr(audit, "eth_get_logs", fake_get_logs)
-    logs = audit.get_logs(PROXY, 0, 100)
-    assert seen == [(0, 100)]
-    assert len(logs) == 1
-
-
-def test_get_logs_halves_span_on_error_and_recovers(monkeypatch):
-    calls = []
-
-    def fake_get_logs(address, topics, lo, hi):
-        calls.append((lo, hi))
-        if hi - lo + 1 > 25:
-            raise RpcError("too many results")
-        return [_delegated_log("0x11111111", A1, block=lo)]
-
-    monkeypatch.setattr(audit, "eth_get_logs", fake_get_logs)
-    logs = audit.get_logs(PROXY, 0, 99)
-    # 100 halves to 50, halves to 25 (both from lo=0, retried in place); once a
-    # span succeeds it is reused, unshrunk, for the rest of the scan.
-    assert calls == [(0, 99), (0, 49), (0, 24), (25, 49), (50, 74), (75, 99)]
-    assert len(logs) == 4
-
-
-def test_get_logs_propagates_single_block_failure(monkeypatch):
-    def boom(address, topics, lo, hi):
-        raise RpcError("node error")
-
-    monkeypatch.setattr(audit, "eth_get_logs", boom)
-    with pytest.raises(RpcError):
-        audit.get_logs(PROXY, 5, 5)
-
-
-def test_get_logs_sorts_by_block_then_index(monkeypatch):
-    unordered = [
-        _delegated_log("0x22222222", A1, block=2, log_index=0),
-        _delegated_log("0x11111111", A1, block=1, log_index=1),
-        _delegated_log("0x33333333", A1, block=1, log_index=0),
-    ]
-    monkeypatch.setattr(audit, "eth_get_logs", lambda *a: unordered)
-    logs = audit.get_logs(PROXY, 0, 10)
-    assert [log["topics"][1][:10] for log in logs] == ["0x33333333", "0x11111111", "0x22222222"]
-
-
 # -- parse_logs ---------------------------------------------------------------
 
 
