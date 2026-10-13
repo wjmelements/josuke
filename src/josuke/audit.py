@@ -107,6 +107,24 @@ _STATED_RANGE_LIMITS = [
 ]
 # Reth's result cap names the most that fits from `fromBlock`.
 _RETRY_RANGE = re.compile(r"query exceeds max results \d+, retry with the range (\d+)-(\d+)")
+# Missing history: EIP-4444's code (geth and forks, reth, nethermind, besu), or
+# lotus's and erigon's words; erigon's names its first block.
+_PRUNED_HISTORY_CODE = 4444
+_MISSING_HISTORY = re.compile(
+    r"pruned history unavailable|not found in index|chain index requires backfill|old data not available due to pruning",
+    re.IGNORECASE,
+)
+_HISTORY_FROM = re.compile(r"blocks are available from block (\d+)")
+
+
+def _message(error) -> str:
+    return str(error.get("message", "")) if isinstance(error, dict) else str(error)
+
+
+def _missing_history(error) -> bool:
+    return isinstance(error, dict) and error.get("code") == _PRUNED_HISTORY_CODE or bool(
+        _MISSING_HISTORY.search(_message(error))
+    )
 
 
 def _windows(lo: int, hi: int, span: int) -> list[tuple[int, int]]:
@@ -120,7 +138,7 @@ def _narrow(error, lo: int, hi: int) -> tuple[list[tuple[int, int]], bool]:
     other result cap, whose number counts logs, not blocks, and errors not
     recognised as either. A single block that fails can't narrow, and propagates.
     """
-    message = str(error.get("message", "")) if isinstance(error, dict) else str(error)
+    message = _message(error)
     for pattern in _STATED_RANGE_LIMITS:
         if (match := pattern.search(message)) and int(match[1]) < hi - lo:
             return _windows(lo, hi, int(match[1]) + 1), True
@@ -133,9 +151,38 @@ def _narrow(error, lo: int, hi: int) -> tuple[list[tuple[int, int]], bool]:
     return [(lo, lo + half - 1), (lo + half, hi)], False
 
 
-def get_logs(proxy: str, from_block: int, to_block: int) -> list[dict]:
+def _history_start(holds, error, lo: int, hi: int) -> int:
+    """The first block of `lo`..`hi` the node holds (`hi + 1` if none), given it
+    lacks `lo`. Assumes history is missing from the start; single-block probes fit
+    any range or result cap."""
+    if match := _HISTORY_FROM.search(_message(error)):
+        return min(max(int(match[1]), lo + 1), hi + 1)
+    if not holds(hi):
+        return hi + 1
+    missing, held = lo, hi
+    while held - missing > 1:
+        mid = (missing + held) // 2
+        if holds(mid):
+            held = mid
+        else:
+            missing = mid
+    return held
+
+
+def _merged(ranges: list[tuple[int, int]]) -> list[tuple[int, int]]:
+    merged: list[tuple[int, int]] = []
+    for lo, hi in sorted(ranges):
+        if merged and lo <= merged[-1][1] + 1:
+            merged[-1] = (merged[-1][0], max(merged[-1][1], hi))
+        else:
+            merged.append((lo, hi))
+    return merged
+
+
+def get_logs(proxy: str, from_block: int, to_block: int) -> tuple[list[dict], list[tuple[int, int]]]:
     """Every SelectorDelegated / DiamondDelegateCall log `proxy` emitted in the
-    inclusive range, oldest first.
+    inclusive range that the node holds, oldest first, and the block ranges whose
+    history it lacks.
 
     Nodes cap the block range or the result count of one `eth_getLogs`, each in
     its own words. One query at a time narrows the range until a query succeeds
@@ -143,10 +190,24 @@ def get_logs(proxy: str, from_block: int, to_block: int) -> list[dict]:
     that width in batches, one round trip each. A window rejected in a batch
     narrows the same way into the next batch, so a stretch dense with logs
     doesn't shrink the windows elsewhere.
+
+    Missing history (pruned, or events never indexed) is assumed missing from the
+    start: blocks before the first one held are reported, and the rest scanned. A
+    missing window above a held one is a gap, reported whole.
     """
     topics = [[SELECTOR_DELEGATED_TOPIC, DIAMOND_DELEGATE_CALL_TOPIC]]
+
+    def holds(block: int) -> bool:
+        try:
+            error = post_request(eth_get_logs_request(proxy, topics, block, block)).get("error")
+        except RpcError:
+            return True  # not an answer about history
+        return not (error and _missing_history(error))
+
     logs: list[dict] = []
+    missing: list[tuple[int, int]] = []
     queue: list[tuple[int, int]] = []
+    first_held: int | None = None  # lowest block known held
     lo, span = from_block, to_block - from_block + 1
     while lo <= to_block:
         hi = min(lo + span - 1, to_block)
@@ -157,8 +218,14 @@ def get_logs(proxy: str, from_block: int, to_block: int) -> list[dict]:
             error = e.message
         if not error:
             logs.extend(answer.get("result") or [])
+            first_held = lo
             queue = _windows(hi + 1, to_block, span)
             break
+        if _missing_history(error):
+            start = _history_start(holds, error, lo, to_block)
+            missing.append((lo, start - 1))
+            first_held = lo = start
+            continue
         windows, fits = _narrow(error, lo, hi)
         span = windows[0][1] - windows[0][0] + 1
         if fits:
@@ -168,14 +235,29 @@ def get_logs(proxy: str, from_block: int, to_block: int) -> list[dict]:
     while queue:
         requests = [eth_get_logs_request(proxy, topics, a, b, i) for i, (a, b) in enumerate(queue)]
         answers = post_batch(requests)
-        retry = []
+        retry, lacking = [], []
         for i, (a, b) in enumerate(queue):
-            if error := answers[i].get("error"):
-                retry.extend(_narrow(error, a, b)[0])
-            else:
+            if not (error := answers[i].get("error")):
                 logs.extend(answers[i].get("result") or [])
+                first_held = a if first_held is None else min(first_held, a)
+            elif _missing_history(error):
+                lacking.append((a, b, error))
+            else:
+                retry.extend(_narrow(error, a, b)[0])
+        # Below first_held is the missing start, where only the highest window can be
+        # partly held; above it, gaps.
+        start_windows = [(a, b, e) for a, b, e in lacking if first_held is None or b < first_held]
+        missing.extend((a, b) for a, b, _ in lacking if first_held is not None and b >= first_held)
+        if start_windows:
+            a, b, error = max(start_windows)
+            start = _history_start(holds, error, a, b)
+            missing.append((min(w[0] for w in start_windows), start - 1))
+            if start <= b:
+                retry.append((start, b))
+                first_held = start
         queue = retry
-    return sorted(logs, key=lambda log: (int(log["blockNumber"], 16), int(log["logIndex"], 16)))
+    logs.sort(key=lambda log: (int(log["blockNumber"], 16), int(log["logIndex"], 16)))
+    return logs, _merged(missing)
 
 
 def parse_logs(logs: list[dict], report: Report) -> tuple[list[Delegation], list[MigrationCall]]:
@@ -270,7 +352,12 @@ def audit_proxy(
         origin = f"from block {from_block} (--from-block)"
     click.echo(f"{proxy} chain {chain}: {origin}, scanning through block {latest}")
 
-    delegations, calls = parse_logs(get_logs(proxy, from_block, latest), report)
+    logs, missing = get_logs(proxy, from_block, latest)
+    for lo, hi in missing:
+        message = f"audit: blocks {lo}-{hi} are missing from ETH_RPC_URL's history; their delegations are unaudited"
+        click.secho(f"error: {proxy} {message}", fg="red", err=True)
+        report.fail(message)
+    delegations, calls = parse_logs(logs, report)
 
     for call in calls:
         detail = f", calldata 0x{call.calldata.hex()}" if call.calldata else ""
