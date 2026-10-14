@@ -267,6 +267,57 @@ def test_verify_facets_replays_own_address_at_recorded_nonce(monkeypatch):
     assert any("rebuilt from source" in f for f in failures(rec))
 
 
+WITH_ARGS = "src/WithArgs.sol:WithArgs"
+WITH_ARGS_ARGS = {"_a": 123, "_b": "0x00000000000000000000000000000000000000ff"}
+
+
+@pytest.mark.skipif(
+    shutil.which("evm") is None or shutil.which("forge") is None,
+    reason="requires the `evm` and `forge` binaries",
+)
+def test_verify_facets_rebuilds_immutables_from_recorded_constructor_args(monkeypatch):
+    """End-to-end: constructor args are baked into immutables, so a recorded arg
+    that differs from the deployed one rebuilds different runtime code, even when
+    the recorded initcodeHash agrees with it."""
+    from unittest.mock import patch
+
+    from ethrpc_mock import MockEthRpc
+
+    monkeypatch.setenv("ETH_RPC_URL", "http://mock.rpc/test")
+    root = pathlib.Path(__file__).parent / "fixtures" / "forge-project"
+    facet = facet_from_source_id(WITH_ARGS)
+
+    def runtime_hash(initcode):
+        with patch("josuke.ethjsonrpc.post", MockEthRpc()):
+            return verify.keccak_hex(verify._replay_runtime(initcode, {}, {}).runtime)
+
+    initcode, _ = deploy.facet_initcode(facet, root, WITH_ARGS_ARGS, prompt=False)
+    onchain = runtime_hash(initcode)
+    monkeypatch.setattr(verify, "_onchain_codehash", lambda addr: onchain)
+
+    def failures(args):
+        initcode, _ = deploy.facet_initcode(facet, root, args, prompt=False)
+        rec = {"address": A1, "initcodeHash": verify.keccak_hex(initcode), "codeHash": onchain,
+               "constructorArgs": args}
+        report = _report()
+        with patch("josuke.ethjsonrpc.post", MockEthRpc()):
+            verify.verify_facets(_state({WITH_ARGS: rec}), "current", root, report)
+        return report.failures
+
+    assert failures(WITH_ARGS_ARGS) == []
+    assert any("rebuilt from source" in f for f in failures({**WITH_ARGS_ARGS, "_a": 999}))
+
+
+@pytest.mark.skipif(shutil.which("forge") is None, reason="requires the `forge` binary")
+def test_verify_facets_raises_on_missing_constructor_arg():
+    import click
+
+    root = pathlib.Path(__file__).parent / "fixtures" / "forge-project"
+    rec = {"address": A1, "initcodeHash": "0x00", "codeHash": "0x00", "constructorArgs": {"_a": 123}}
+    with pytest.raises(click.ClickException, match="no recorded value for constructor arg _b"):
+        verify.verify_facets(_state({WITH_ARGS: rec}), "current", root, _report())
+
+
 # -- verify_proposed_set ----------------------------------------------------
 
 
