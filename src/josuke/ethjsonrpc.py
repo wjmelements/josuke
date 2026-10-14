@@ -3,14 +3,33 @@
 from os import environ
 
 import click
-from requests import post
+from requests import RequestException, post
 
 from .proc import run
 from .trace import brief, span
 
 
 class RpcError(click.ClickException):
-    """The node answered with an HTTP failure or a JSON-RPC error."""
+    """The node answered with an HTTP failure or a JSON-RPC error, or couldn't be reached."""
+
+
+def _post(url: str, body):
+    """POST `body` to `url`; failing to reach the node is an `RpcError`, which names
+    ETH_RPC_URL rather than the url, as it may hold an API key."""
+    try:
+        return post(url, json=body)
+    except ValueError:  # requests' InvalidSchema, MissingSchema and InvalidURL, or urllib's
+        raise RpcError("ETH_RPC_URL: not an http(s) URL") from None
+    except RequestException as e:
+        # The socket's error, e.g. "[Errno 61] Connection refused", is the first OSError
+        # in the chain below requests' and urllib3's, whose messages show the url.
+        reason, cause = type(e).__name__, e.__cause__ or e.__context__
+        while cause is not None:
+            if isinstance(cause, OSError) and not isinstance(cause, RequestException):
+                reason = str(cause)
+                break
+            cause = cause.__cause__ or cause.__context__
+        raise RpcError(f"ETH_RPC_URL: cannot reach the node: {reason}") from None
 
 
 def rpc(method: str, params: list):
@@ -35,7 +54,7 @@ def rpc_batch(calls: list[tuple[str, list]]) -> list:
 def post_request(request: dict, label: str = "rpc") -> dict:
     """The node's answer to one JSON-RPC request, which may be an error; `label` heads its trace span."""
     with span(f"{label} {request['method']} {brief(request.get('params', []))}"):
-        response = post(environ["ETH_RPC_URL"], json=request)
+        response = _post(environ["ETH_RPC_URL"], request)
     if response.status_code != 200:
         raise RpcError(f"{request['method']}: HTTP {response.status_code}")
     try:
@@ -82,7 +101,7 @@ def _post_chunk(url: str, chunk: list[dict], label: str):
     503, which nodes also send when a batch is too large, and a 413 may not be JSON."""
     calls = ", ".join(f"{req['method']} {brief(req.get('params', []))}" for req in chunk)
     with span(f"{label} [{len(chunk)}] {calls}"):
-        response = post(url, json=chunk)
+        response = _post(url, chunk)
     if response.status_code not in (200, 413, 503):
         raise RpcError(f"ETH_RPC_URL: HTTP {response.status_code}")
     try:
