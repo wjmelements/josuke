@@ -7,17 +7,16 @@ from eth_utils import to_checksum_address
 from .deploy import (
     block_overrides,
     build_migration,
-    facet_from_source_id,
     facet_initcode,
     keccak_hex,
     rehearse,
-    resolve_facets,
     selector_owners,
     selectors_runtime,
 )
 from .ethjsonrpc import chain_id, eth_get_code, prefetch_code
 from .broadcast import create_address
 from .evm import Replay, replay_create
+from .facet import facet_from_source_id, resolve_facets
 from .ledger import load_ledger
 from .migration import InvalidMigration, Migration
 from .storage import ProxyStorage, slot_address as _slot_address

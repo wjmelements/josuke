@@ -18,26 +18,13 @@ from .trace import brief, log, span
 _built: set[str] = set()
 
 
-def execute(initcode_hex: str, sender: str | None = None) -> str:
-    """Run `evm -x`: execute creation bytecode, return the deployed runtime hex.
-
-    `sender` sets `msg.sender` for the constructor, so an immutable derived from
-    the deployer is reproduced.
-    """
-    if sender is None:
-        stdin = initcode_hex
-    else:
-        stdin = json.dumps({"from": sender, "data": initcode_hex})
-    return run(["evm", "-x"], stdin=stdin).strip()
-
-
 def create_offline(initcode_hex: str) -> str | None:
     """Run `evm -xs`: execute creation bytecode against empty state, without an
     RPC, and return the deployed runtime hex, or None when the constructor reverted.
 
     The environment is evm's default rather than the deployment's (#11), so the
-    runtime is good for its size but not for comparing with code on chain.
-    Unlike `execute`, this tells a revert from an empty runtime."""
+    runtime is good for its size but not for comparing with code on chain. It
+    tells a revert from an empty runtime."""
     result = json.loads(run(["evm", "-xs"], stdin=json.dumps({"data": "0x" + initcode_hex.removeprefix("0x")})))
     if int(result["status"], 16) == 0:
         return None

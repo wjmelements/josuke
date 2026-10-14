@@ -292,10 +292,6 @@ PAUSABLE_CODE = (
 )
 
 
-def paused_slot(selector: str) -> str:
-    return "0x" + keccak(bytes.fromhex(selector[2:].ljust(64, "0")) + (5).to_bytes(32, "big")).hex()
-
-
 @pytest.mark.timeout(5)
 def test_ignores_a_facets_own_read_keyed_by_selector(monkeypatch):
     # (1.) The facet's pausedSelectors[msg.sig] is keyed by the selector, the proxy's

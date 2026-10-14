@@ -9,7 +9,8 @@ import pytest
 from click.testing import CliRunner
 
 from josuke.cli import main
-from josuke.deploy import facet_artifact, facet_from_source_id, facet_initcode, keccak_hex
+from josuke.deploy import facet_initcode, keccak_hex
+from josuke.facet import facet_artifact, facet_from_source_id
 from josuke.forge import get_forge_config
 from josuke.proc import run
 
@@ -47,7 +48,7 @@ def _in_fixture(monkeypatch, _fixture_config):
         return _fixture_config if pathlib.Path(root).resolve() == ROOT else get_forge_config(root)
 
     monkeypatch.setattr("josuke.check.run", check_run)
-    for module in ("josuke.check", "josuke.deploy", "josuke.layout"):
+    for module in ("josuke.check", "josuke.deploy", "josuke.facet", "josuke.layout"):
         monkeypatch.setattr(f"{module}.get_forge_config", forge_config)
 
 

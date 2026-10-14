@@ -32,16 +32,14 @@ from .deploy import (
     constructor_inputs,
     coerce_input,
     existing_deployment,
-    facet_artifact,
-    facet_from_source_id,
     facet_initcode,
     facet_selectors,
     keccak_hex,
     recorded_facet,
-    resolve_facets,
 )
 from .erc8167 import SELECTORS_SELECTOR, generated_selectors, selectors_method
 from .evm import create_offline, evm_artifact
+from .facet import facet_artifact, facet_from_source_id, resolve_facets
 from .forge import get_forge_config
 from .layout import storage_layouts
 from .selectors import SelectorCollision, canonical_type
