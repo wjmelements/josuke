@@ -148,6 +148,11 @@ def stub_chain(monkeypatch, tmp_path, stub_source_trees):
     # "rehearsal" is the failures the stubbed rehearsal reports; by default the migration routes as proposed
     log["rehearsal"] = []
     monkeypatch.setattr(deploy, "rehearse", lambda *a: log["rehearsal"])
+    # each prefetch: (the addresses, how many deployments were planned by then)
+    log["prefetched"] = []
+    monkeypatch.setattr(
+        deploy, "prefetch_code", lambda addresses: log["prefetched"].append((set(addresses), len(log["deployed"])))
+    )
     counter = [0]
 
     def fake_initcode(facet, root, recorded_args):
@@ -237,6 +242,23 @@ def test_run_deploy_records_create_tx_hash(stub_chain, monkeypatch, tmp_path):
     deploy.run_deploy(path)  # unchanged: reused, not redeployed, so it keeps its hash
     assert recorded() == first
     assert len(stub_chain["deployed"]) == 1
+
+
+def test_run_deploy_prefetches_recorded_code_then_the_new_facets(stub_chain, monkeypatch, tmp_path):
+    _resolve_to(monkeypatch, ["a.evm", "b.evm"])
+    selectors, migration = "0x" + "51" * 20, "0x" + "4d" * 20
+    history = {
+        "current": {"gitCommit": "e" * 40, "facets": {}, "selectors": {"address": selectors}},
+        "proposed": {"gitCommit": "e" * 40, "facets": {}, "migration": {"address": migration}},
+    }
+    path = _write(tmp_path, [{"address": PROXY, "facetSrc": ["*.evm"], "deployments": {"314": history}}])
+
+    deploy.run_deploy(path)
+
+    # The code planning compares against, before anything is planned; then the new
+    # facets' code, once mined, for their codeHash.
+    new = {"0x" + f"{1:040x}", "0x" + f"{2:040x}"}
+    assert stub_chain["prefetched"] == [({PROXY, selectors, migration}, 0), (new, 2)]
 
 
 def test_run_deploy_carries_unchanged_and_redeploys_changed(stub_chain, monkeypatch, tmp_path):

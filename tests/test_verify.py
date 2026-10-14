@@ -527,6 +527,7 @@ def stub_trees(monkeypatch, stub_source_trees):
     monkeypatch.setattr(verify, "ProxyStorage", FakeStorage)
     monkeypatch.setattr(verify, "_replay_runtime", lambda initcode, rec, cache: Replay("", False, False, {}))
     monkeypatch.setattr(verify, "rehearse", lambda *a: [])
+    monkeypatch.setattr(verify, "prefetch_code", lambda addresses: None)
 
 
 def test_run_verify_requires_rpc_url(monkeypatch, tmp_path):
@@ -567,6 +568,38 @@ def test_run_verify_reports_failures(monkeypatch, tmp_path, stub_trees):
     }
     with pytest.raises(Exception, match="initcodeHash"):
         verify.run_verify(_ledger(tmp_path, [entry]))
+
+
+def test_run_verify_prefetches_every_recorded_address_first(monkeypatch, tmp_path, stub_trees):
+    monkeypatch.setenv("ETH_RPC_URL", "http://mock.rpc")
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr(deploy, "facet_selectors", lambda facet, tree: [_sel("0x11111111")])
+    events = []
+    monkeypatch.setattr(verify, "prefetch_code", lambda addresses: events.append(set(addresses)))
+    for check in (
+        "verify_facets", "verify_dispatch", "verify_selectors", "verify_proposed_set",
+        "verify_migration", "verify_rehearsal", "summarize_upgrade",
+    ):
+        monkeypatch.setattr(verify, check, lambda *a, check=check, **k: events.append(check))
+    current_selectors, proposed_selectors = "0x" + "51" * 20, "0x" + "52" * 20
+    entry = {
+        "address": PROXY,
+        "facetSrc": ["keep.sol"],
+        "deployments": {
+            "314": {
+                "current": {**_state({"keep.sol:Keep": {"address": OLD}}, "c0"), "selectors": {"address": current_selectors}},
+                "proposed": {
+                    **_state({"keep.sol:Keep": {"address": A1}, "old.sol:Old": {"address": OLD}}, "c1"),
+                    "selectors": {"address": proposed_selectors},
+                    "migration": {"address": B2},
+                },
+            }
+        },
+    }
+    verify.run_verify(_ledger(tmp_path, [entry]))
+    # One prefetch, before any check, of every address the ledger records here.
+    assert events[0] == {PROXY, OLD, A1, current_selectors, proposed_selectors, B2}
+    assert all(isinstance(event, str) for event in events[1:])
 
 
 def test_run_verify_flags_function_removed_from_kept_facet(monkeypatch, tmp_path, stub_trees):
