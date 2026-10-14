@@ -1,8 +1,11 @@
 """Tests for josuke.ethjsonrpc's batches, with the HTTP layer faked."""
 
 import json as json_module
+import socket
 
+import click
 import pytest
+import requests
 
 from ethrpc_mock import FakeResponse, MockEthRpc
 from josuke import ethjsonrpc
@@ -24,8 +27,10 @@ def post(monkeypatch):
     monkeypatch.setenv("ETH_RPC_URL", "http://mock.rpc")
     sent = {}
 
-    def fake_post(url, json):
-        sent["payload"] = json
+    def fake_post(url, json, timeout):
+        sent["payload"], sent["timeout"] = json, timeout
+        if isinstance(sent["response"], Exception):
+            raise sent["response"]
         return sent["response"]
 
     monkeypatch.setattr(ethjsonrpc, "_batch_limits", {})
@@ -113,7 +118,7 @@ def node(monkeypatch):
         rpc.set_storage(ACCOUNT, f"0x{i:064x}", f"0x{i + 1:064x}")
     node = type("Node", (), {"limit": None, "reject": None, "cutoff": None, "posts": []})()
 
-    def post(url, json):
+    def post(url, json, timeout):
         node.posts.append(len(json))
         if node.limit is None or len(json) <= node.limit:
             return rpc(url, json=json)
@@ -208,6 +213,69 @@ def test_a_batch_answered_with_no_json_fails(post, status):
     post["response"] = FakeResponse(status, "<html>Service Unavailable</html>")
     with pytest.raises(ethjsonrpc.RpcError, match=f"HTTP {status}, not JSON: <html>Service Unavailable"):
         ethjsonrpc.rpc_batch([("eth_chainId", []), ("eth_blockNumber", [])])
+
+
+# -- reaching the node ---------------------------------------------------------
+
+
+def test_requests_wait_foundrys_default_timeout(post):
+    post["response"] = Response({"id": 1, "result": "0x1"})
+    ethjsonrpc.rpc("eth_chainId", [])
+    assert post["timeout"] == 45
+
+
+def test_eth_rpc_timeout_sets_the_wait(post, monkeypatch):
+    monkeypatch.setenv("ETH_RPC_TIMEOUT", "2.5")
+    post["response"] = Response([{"id": 0, "result": "0x1"}])
+    ethjsonrpc.rpc_batch([("eth_chainId", [])])
+    assert post["timeout"] == 2.5
+
+
+@pytest.mark.parametrize("value", ["soon", "0", "-1", "inf", "nan"])
+def test_eth_rpc_timeout_must_be_a_number_of_seconds(post, monkeypatch, value):
+    monkeypatch.setenv("ETH_RPC_TIMEOUT", value)
+    with pytest.raises(click.ClickException, match=f"ETH_RPC_TIMEOUT: not a number of seconds: {value}"):
+        ethjsonrpc.rpc("eth_chainId", [])
+
+
+@pytest.fixture
+def listener(monkeypatch):
+    """A local socket that takes connections and never answers; its url is ETH_RPC_URL,
+    with a path standing in for an API key."""
+    monkeypatch.setenv("ETH_RPC_TIMEOUT", "0.05")
+    with socket.socket() as sock:
+        sock.bind(("127.0.0.1", 0))
+        sock.listen()
+        monkeypatch.setenv("ETH_RPC_URL", f"http://127.0.0.1:{sock.getsockname()[1]}/v2/SECRET")
+        yield sock
+
+
+CALLS = {"rpc": lambda: ethjsonrpc.rpc("eth_chainId", []), "batch": lambda: ethjsonrpc.rpc_batch([("eth_chainId", [])])}
+
+
+@pytest.mark.timeout(2)
+@pytest.mark.parametrize("call", CALLS.values(), ids=CALLS.keys())
+def test_a_node_too_slow_to_answer_fails(listener, call):
+    with pytest.raises(ethjsonrpc.RpcError) as failure:
+        call()
+    assert failure.value.message == "ETH_RPC_URL: no answer within 0.05s (ETH_RPC_TIMEOUT)"
+
+
+@pytest.mark.timeout(2)
+@pytest.mark.parametrize("call", CALLS.values(), ids=CALLS.keys())
+def test_an_unreachable_node_fails_with_the_socket_error_and_not_the_url(listener, call):
+    listener.close()  # nothing listens there now
+    with pytest.raises(ethjsonrpc.RpcError) as failure:
+        call()
+    assert failure.value.message.startswith("ETH_RPC_URL: cannot reach the node: [Errno ")
+    assert "Connection refused" in failure.value.message and "SECRET" not in failure.value.message
+
+
+def test_a_url_requests_cannot_post_to_fails(post):
+    post["response"] = requests.exceptions.InvalidSchema("No connection adapters were found for 'ws://node/SECRET'")
+    with pytest.raises(ethjsonrpc.RpcError) as failure:
+        ethjsonrpc.rpc("eth_chainId", [])
+    assert failure.value.message == "ETH_RPC_URL: not an http(s) URL"
 
 
 # -- eth_getCode cache ---------------------------------------------------------

@@ -1,9 +1,10 @@
 """Ethereum JSON-RPC access: the raw `rpc` call plus thin `eth_*` wrappers."""
 
+from math import isfinite
 from os import environ
 
 import click
-from requests import RequestException, post
+from requests import RequestException, Timeout, post
 
 from .proc import run
 from .trace import brief, span
@@ -13,13 +14,35 @@ class RpcError(click.ClickException):
     """The node answered with an HTTP failure or a JSON-RPC error, or couldn't be reached."""
 
 
+# Foundry's default for ETH_RPC_TIMEOUT (REQUEST_TIMEOUT in foundry-common).
+_DEFAULT_TIMEOUT = 45.0
+
+
+def rpc_timeout() -> float:
+    """Seconds to wait for the node to connect, and then for each part of its answer:
+    ETH_RPC_TIMEOUT, Foundry's own, which may be fractional here, else Foundry's default."""
+    value = environ.get("ETH_RPC_TIMEOUT")
+    if not value:
+        return _DEFAULT_TIMEOUT
+    try:
+        seconds = float(value)
+    except ValueError:
+        seconds = 0.0
+    if not (seconds > 0 and isfinite(seconds)):
+        raise click.ClickException(f"ETH_RPC_TIMEOUT: not a number of seconds: {value}")
+    return seconds
+
+
 def _post(url: str, body):
     """POST `body` to `url`; failing to reach the node is an `RpcError`, which names
     ETH_RPC_URL rather than the url, as it may hold an API key."""
+    seconds = rpc_timeout()
     try:
-        return post(url, json=body)
+        return post(url, json=body, timeout=seconds)
     except ValueError:  # requests' InvalidSchema, MissingSchema and InvalidURL, or urllib's
         raise RpcError("ETH_RPC_URL: not an http(s) URL") from None
+    except Timeout:
+        raise RpcError(f"ETH_RPC_URL: no answer within {seconds:g}s (ETH_RPC_TIMEOUT)") from None
     except RequestException as e:
         # The socket's error, e.g. "[Errno 61] Connection refused", is the first OSError
         # in the chain below requests' and urllib3's, whose messages show the url.

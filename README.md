@@ -174,6 +174,7 @@ environment:
 | Variable | Purpose |
 | --- | --- |
 | `ETH_RPC_URL` | Target chain endpoint. Required; also fixes the chain id. |
+| `ETH_RPC_TIMEOUT` | Seconds to wait for the endpoint to connect and to answer. Default 45. |
 | `ETH_KEYSTORE_ACCOUNT` | Keystore account name under `~/.foundry/keystores`. |
 | `ETH_PASSWORD` | Path to that keystore's password file. Optional; see below. |
 | `ETH_KEYSTORE` | Path to a keystore file or directory (alternative to the above). |
