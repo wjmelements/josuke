@@ -6,8 +6,9 @@ import pathlib
 import click
 from eth_utils import to_checksum_address
 
-from .deploy import facet_abi, resolve_facets
+from .deploy import facet_abi
 from .erc8167 import SELECTORS_SELECTOR
+from .facet import resolve_facets
 from .ledger import load_ledger
 from .proc import run
 from .selectors import Selector, canonical_type

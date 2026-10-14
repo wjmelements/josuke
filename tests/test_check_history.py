@@ -15,7 +15,8 @@ from click.testing import CliRunner
 from josuke import check as check_module, deploy
 from josuke.check import _declarations, _fit
 from josuke.cli import main
-from josuke.deploy import facet_from_source_id, facet_initcode, keccak_hex
+from josuke.deploy import facet_initcode, keccak_hex
+from josuke.facet import facet_from_source_id
 from josuke.layout import storage_layouts
 from josuke.proc import run
 

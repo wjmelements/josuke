@@ -15,10 +15,11 @@ import click
 import pytest
 from eth_utils import keccak, to_checksum_address
 
-from josuke import broadcast, deploy
+from josuke import broadcast, deploy, facet as facet_module
 from josuke.ledger import validate_ledger
-from josuke.deploy import Facet, coerce_arg, coerce_input, keccak_hex, resolve_facets
+from josuke.deploy import coerce_arg, coerce_input, keccak_hex
 from josuke.evm import Replay
+from josuke.facet import Facet, resolve_facets
 
 A1 = to_checksum_address("0x" + "a1" * 20)  # deploy_initcode always returns checksummed
 B2 = to_checksum_address("0x" + "b2" * 20)
@@ -682,7 +683,7 @@ def _isolate_maps():
 
 
 def _facet(source_id):
-    return deploy.facet_from_source_id(source_id)
+    return facet_module.facet_from_source_id(source_id)
 
 
 def test_build_migration_installs_every_proposed_selector(monkeypatch):
@@ -995,7 +996,7 @@ def test_facet_artifact_is_read_once_per_facet_and_root(tmp_path, monkeypatch):
         {"type": "constructor", "inputs": [{"name": "x", "type": "uint256"}]},
         {"type": "function", "name": "f", "inputs": [], "outputs": [], "stateMutability": "view"},
     ]
-    monkeypatch.setattr(deploy, "get_forge_config", lambda root: {"out": "out"})
+    monkeypatch.setattr(facet_module, "get_forge_config", lambda root: {"out": "out"})
     facet = _facet("a.sol:A")
     c0, c1 = tmp_path / "c0", tmp_path / "c1"
     path = _artifact(c0, "a.sol", "A", abi)
@@ -1009,9 +1010,9 @@ def test_facet_artifact_is_read_once_per_facet_and_root(tmp_path, monkeypatch):
 
 
 def test_facet_artifact_matches_its_source_when_file_names_clash(tmp_path, monkeypatch):
-    monkeypatch.setattr(deploy, "get_forge_config", lambda root: {"out": "out"})
+    monkeypatch.setattr(facet_module, "get_forge_config", lambda root: {"out": "out"})
     _artifact(tmp_path, "src/a/Errors.sol", "Errors", [])
     _artifact(tmp_path, "src/b/Errors.sol", "Errors", [{"type": "function", "name": "g", "inputs": []}], nested="b")
     assert deploy.facet_abi(_facet("src/b/Errors.sol:Errors"), tmp_path)[0]["name"] == "g"
     with pytest.raises(click.ClickException, match="no build artifact"):
-        deploy.facet_artifact(_facet("src/c/Errors.sol:Errors"), tmp_path)
+        facet_module.facet_artifact(_facet("src/c/Errors.sol:Errors"), tmp_path)

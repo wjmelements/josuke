@@ -52,7 +52,7 @@ def verify_migrated(
             )
 
 
-def accepted_state(current: dict, proposed: dict) -> dict:
+def accepted_state(proposed: dict) -> dict:
     """The deployment state that replaces `current` once `proposed`'s migration is confirmed.
 
     `proposed.facets` is already the complete resolved facet set — `deploy`
@@ -142,7 +142,7 @@ def run_accept(ledger_path):
             if len(report.failures) > before:
                 continue  # leave this proxy's proposed state untouched
 
-            pending.append((proxy, history, current or {}, accepted_state(current or {}, proposed)))
+            pending.append((proxy, history, current or {}, accepted_state(proposed)))
 
     if report.failures:
         raise click.ClickException(
