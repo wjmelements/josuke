@@ -135,13 +135,12 @@ def test_verify_migrated_flags_missing_address(monkeypatch):
 
 
 def test_accepted_state_is_a_wholesale_swap():
-    current = _state({"gone.sol:Gone": {"address": OLD}}, commit="old")
     proposed = {
         "gitCommit": "new",
         "facets": {"a.sol:A": {"address": A1}},
         "migration": {"address": OLD},
     }
-    assert accept.accepted_state(current, proposed) == {
+    assert accept.accepted_state(proposed) == {
         "gitCommit": "new",
         "facets": {"a.sol:A": {"address": A1}},
         "migration": {"address": OLD},
@@ -149,7 +148,7 @@ def test_accepted_state_is_a_wholesale_swap():
 
 
 def test_accepted_state_without_migration():
-    got = accept.accepted_state({}, {"gitCommit": "n", "facets": {"a.sol:A": {}}})
+    got = accept.accepted_state({"gitCommit": "n", "facets": {"a.sol:A": {}}})
     assert "migration" not in got
 
 
@@ -159,7 +158,7 @@ def test_accepted_state_carries_selectors():
         "facets": {"a.sol:A": {"address": A1}},
         "selectors": {"address": B2},
     }
-    assert accept.accepted_state({}, proposed)["selectors"] == {"address": B2}
+    assert accept.accepted_state(proposed)["selectors"] == {"address": B2}
 
 
 def test_verify_migrated_checks_generated_selectors_routing(monkeypatch):

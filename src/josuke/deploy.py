@@ -1,7 +1,6 @@
 import functools
 import json
 import pathlib
-from collections import namedtuple
 from os import environ
 
 import click
@@ -11,8 +10,9 @@ from eth_utils import keccak, to_checksum_address
 from .broadcast import broadcast_session, create
 from .delegate import ContractSource, Delegate
 from .erc8167 import SELECTORS_SELECTOR, generated_selectors, selectors_method
-from .ethjsonrpc import chain_id, eth_get_code
+from .ethjsonrpc import chain_id, eth_get_code, prefetch_code
 from .evm import Replay, evm_artifact, replay_create
+from .facet import Facet, facet_artifact, facet_from_source_id, resolve_facets
 from .forge import get_forge_config
 from .ledger import load_ledger, write_ledger
 from .migration import Migration, SetDelegate
@@ -24,13 +24,6 @@ from .storage import ProxyStorage, slot_address
 from .worktree import SourceTrees
 
 ZERO_ADDRESS = "0x" + "00" * 20
-
-# A concrete, deployable facet resolved from a `facetSrc` pattern.
-#   kind      "sol" | "evm"
-#   path      repo-relative source path
-#   contract  contract name (sol only; None for evm)
-#   source_id the josuke.json key: "<path>:<Contract>" or "<path>.evm"
-Facet = namedtuple("Facet", "kind path contract source_id")
 
 
 def git_commit(root: pathlib.Path) -> str:
@@ -59,68 +52,6 @@ def warn_metadata_hash_at(root: pathlib.Path) -> None:
 def universal_constructor() -> str:
     """`evm -C` with no code: the length-agnostic constructor prefix it prepends."""
     return run(["evm", "-C"], stdin="").strip().removeprefix("0x")
-
-
-# -- facet resolution -------------------------------------------------------
-
-
-def resolve_facets(facet_src: list, root: pathlib.Path) -> list:
-    """Expand `facetSrc` patterns into concrete Facets. Requires a prior build."""
-    out_dir = root / get_forge_config(root).get("out", "out")
-
-    facets = []
-    seen = set()
-    for pattern in facet_src:
-        if pattern.endswith(".evm"):
-            found = [Facet("evm", pattern, None, pattern)]
-        elif ":" in pattern:
-            path, contract = pattern.split(":", 1)
-            found = [Facet("sol", path, contract, pattern)]
-        else:
-            found = []
-            for sol in sorted(root.glob(pattern)):
-                rel = sol.relative_to(root).as_posix()
-                for artifact in sorted((out_dir / sol.name).glob("*.json")):
-                    obj = json.loads(artifact.read_text()).get("bytecode", {}).get("object", "")
-                    if obj in ("", "0x"):
-                        continue  # interface / abstract contract
-                    facet = Facet("sol", rel, artifact.stem, f"{rel}:{artifact.stem}")
-                    found.append(facet)
-            if not found:
-                raise click.ClickException(f"{pattern} matched no deployable contracts")
-
-        for facet in found:
-            if facet.source_id not in seen:
-                seen.add(facet.source_id)
-                facets.append(facet)
-    return facets
-
-
-def facet_from_source_id(source_id: str) -> Facet:
-    if source_id.endswith(".evm"):
-        return Facet("evm", source_id, None, source_id)
-    path, contract = source_id.split(":", 1)
-    return Facet("sol", path, contract, source_id)
-
-
-# Memoised for the process: `deploy`, `verify` and `check` read each facet's ABI and
-# bytecode from several checks. A key can't go stale within a run, since each commit is
-# checked out at its own worktree and built before it is read.
-@functools.cache
-def facet_artifact(facet: Facet, root: pathlib.Path) -> dict:
-    """Forge's build artifact for a Solidity facet, read from `out/` instead of a
-    `forge inspect` per field. Forge nests an artifact whose file name another
-    source shares, so the match is by the compilation target it records."""
-    out_dir = root / get_forge_config(root).get("out", "out")
-    name = pathlib.PurePosixPath(facet.path).name
-    candidates = [out_dir / name / f"{facet.contract}.json", *sorted(out_dir.glob(f"**/{name}/{facet.contract}*.json"))]
-    for path in dict.fromkeys(candidates):
-        if not path.exists():
-            continue
-        artifact = json.loads(path.read_text())
-        if artifact.get("metadata", {}).get("settings", {}).get("compilationTarget") == {facet.path: facet.contract}:
-            return artifact
-    raise click.ClickException(f"{facet.source_id}: no build artifact in {out_dir}")
 
 
 @functools.cache
@@ -553,6 +484,20 @@ def run_deploy(ledger_path, redeploy_all: bool = False):
     # keystore_session: prompt for a keystore password at most once, on the first deploy
     # broadcast_session: plan every deployment, then send them back to back and wait for them together
     with keystore_session(), broadcast_session(chain) as broadcast, SourceTrees(root) as trees:
+        # The code planning compares against: each proxy's (for its rehearsal) and its
+        # prior selectors() and migration.
+        recorded = [entry.get("deployments", {}).get(chain) or {} for entry in ledger]
+        prefetch_code(
+            address
+            for entry, history in zip(ledger, recorded)
+            for address in [
+                entry["address"],
+                ((history.get("current") or {}).get("selectors") or {}).get("address"),
+                ((history.get("proposed") or {}).get("selectors") or {}).get("address"),
+                ((history.get("proposed") or {}).get("migration") or {}).get("address"),
+            ]
+            if address
+        )
         for entry in ledger:
             proxy = to_checksum_address(entry["address"])
             deployments = entry.setdefault("deployments", {})
@@ -635,6 +580,8 @@ def run_deploy(ledger_path, redeploy_all: bool = False):
 
         broadcast.send_all(root)
         broadcast.wait(root)
+        if unmined:
+            prefetch_code(facet_entry["address"] for _, facet_entry, _, _ in unmined)
         unreproduced = []
         for facet, facet_entry, initcode, sender in unmined:
             address = facet_entry["address"]

@@ -31,10 +31,11 @@ from .ethjsonrpc import (
     eth_get_logs_request,
     post_batch,
     post_request,
+    prefetch_code,
 )
 from .ledger import load_ledger
 from .migration import SELECTOR_DELEGATED_SIG
-from .verify import Report, SourceTrees, verify_facets, verify_selectors
+from .verify import Report, SourceTrees, code_addresses, verify_facets, verify_selectors
 
 # event SelectorDelegated(bytes4 indexed selector, address indexed delegate)
 SELECTOR_DELEGATED_TOPIC = "0x" + SELECTOR_DELEGATED_SIG.hex()
@@ -420,6 +421,13 @@ def run_audit(ledger_path, from_block: int | None = None):
     rpc_cache: dict = {}
     audited = 0
     unaccepted = 0
+
+    recorded = [entry.get("deployments", {}).get(chain) or {} for entry in ledger]
+    prefetch_code(
+        address
+        for history in recorded
+        for address in [*code_addresses(history.get("current")), *history.get("history", {})]
+    )
 
     with SourceTrees(root) as trees:
         for entry in ledger:

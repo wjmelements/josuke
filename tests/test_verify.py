@@ -14,6 +14,7 @@ from eth_utils import to_checksum_address
 from josuke import deploy, verify
 from josuke.broadcast import create_address
 from josuke.evm import Replay
+from josuke.facet import facet_from_source_id
 from josuke.migration import Migration
 
 PROXY = "0x2222222222222222222222222222222222222222"
@@ -207,7 +208,7 @@ def test_verify_facets_rebuilds_runtime_from_source(monkeypatch):
     source_id = "src/FromDeployer.sol:FromDeployer"  # bakes msg.sender into an immutable
     deployer = to_checksum_address("0x" + "ab" * 20)
 
-    facet = deploy.facet_from_source_id(source_id)
+    facet = facet_from_source_id(source_id)
     initcode, _ = deploy.facet_initcode(facet, root, None, prompt=False)
     with patch("josuke.ethjsonrpc.post", MockEthRpc()):
         true_codehash = verify.keccak_hex(verify._replay_runtime(initcode, {"from": deployer}, {}).runtime)
@@ -244,7 +245,7 @@ def test_verify_facets_replays_own_address_at_recorded_nonce(monkeypatch):
     deployer = to_checksum_address("0x" + "ab" * 20)
     address = create_address(deployer, 5)
 
-    facet = deploy.facet_from_source_id(source_id)
+    facet = facet_from_source_id(source_id)
     initcode, _ = deploy.facet_initcode(facet, root, None, prompt=False)
     rpc = MockEthRpc()
     with patch("josuke.ethjsonrpc.post", rpc):
@@ -266,13 +267,64 @@ def test_verify_facets_replays_own_address_at_recorded_nonce(monkeypatch):
     assert any("rebuilt from source" in f for f in failures(rec))
 
 
+WITH_ARGS = "src/WithArgs.sol:WithArgs"
+WITH_ARGS_ARGS = {"_a": 123, "_b": "0x00000000000000000000000000000000000000ff"}
+
+
+@pytest.mark.skipif(
+    shutil.which("evm") is None or shutil.which("forge") is None,
+    reason="requires the `evm` and `forge` binaries",
+)
+def test_verify_facets_rebuilds_immutables_from_recorded_constructor_args(monkeypatch):
+    """End-to-end: constructor args are baked into immutables, so a recorded arg
+    that differs from the deployed one rebuilds different runtime code, even when
+    the recorded initcodeHash agrees with it."""
+    from unittest.mock import patch
+
+    from ethrpc_mock import MockEthRpc
+
+    monkeypatch.setenv("ETH_RPC_URL", "http://mock.rpc/test")
+    root = pathlib.Path(__file__).parent / "fixtures" / "forge-project"
+    facet = facet_from_source_id(WITH_ARGS)
+
+    def runtime_hash(initcode):
+        with patch("josuke.ethjsonrpc.post", MockEthRpc()):
+            return verify.keccak_hex(verify._replay_runtime(initcode, {}, {}).runtime)
+
+    initcode, _ = deploy.facet_initcode(facet, root, WITH_ARGS_ARGS, prompt=False)
+    onchain = runtime_hash(initcode)
+    monkeypatch.setattr(verify, "_onchain_codehash", lambda addr: onchain)
+
+    def failures(args):
+        initcode, _ = deploy.facet_initcode(facet, root, args, prompt=False)
+        rec = {"address": A1, "initcodeHash": verify.keccak_hex(initcode), "codeHash": onchain,
+               "constructorArgs": args}
+        report = _report()
+        with patch("josuke.ethjsonrpc.post", MockEthRpc()):
+            verify.verify_facets(_state({WITH_ARGS: rec}), "current", root, report)
+        return report.failures
+
+    assert failures(WITH_ARGS_ARGS) == []
+    assert any("rebuilt from source" in f for f in failures({**WITH_ARGS_ARGS, "_a": 999}))
+
+
+@pytest.mark.skipif(shutil.which("forge") is None, reason="requires the `forge` binary")
+def test_verify_facets_raises_on_missing_constructor_arg():
+    import click
+
+    root = pathlib.Path(__file__).parent / "fixtures" / "forge-project"
+    rec = {"address": A1, "initcodeHash": "0x00", "codeHash": "0x00", "constructorArgs": {"_a": 123}}
+    with pytest.raises(click.ClickException, match="no recorded value for constructor arg _b"):
+        verify.verify_facets(_state({WITH_ARGS: rec}), "current", root, _report())
+
+
 # -- verify_proposed_set ----------------------------------------------------
 
 
 def test_verify_proposed_set_reports_missing_and_extra(monkeypatch):
     monkeypatch.setattr(
-        verify, "resolve_facets", lambda src, tree: [deploy.facet_from_source_id("a.sol:A"),
-                                                     deploy.facet_from_source_id("b.sol:B")]
+        verify, "resolve_facets", lambda src, tree: [facet_from_source_id("a.sol:A"),
+                                                     facet_from_source_id("b.sol:B")]
     )
     proposed = _state({"a.sol:A": {}, "c.sol:C": {}})
     report = _report()
@@ -379,7 +431,7 @@ def test_verify_migration_passes_for_recomputed_bytecode(monkeypatch):
     proposed = _state({"a.sol:A": {"address": A1}})
     storage = _fetched_storage(["0x11111111"])
     expected = deploy.build_migration(
-        PROXY, [deploy.facet_from_source_id("a.sol:A")], proposed["facets"], {}, ".", ".", storage=storage
+        PROXY, [facet_from_source_id("a.sol:A")], proposed["facets"], {}, ".", ".", storage=storage
     )
     monkeypatch.setattr(verify, "eth_get_code", lambda address: "0x" + expected.encode().hex())
 
@@ -398,7 +450,7 @@ def test_verify_migration_passes_multi_facet_multi_selector(monkeypatch):
     })
     proposed = _state({"a.sol:A": {"address": A1}, "b.sol:B": {"address": B2}})
     storage = _fetched_storage(["0x11111111", "0x33333333", "0x22222222"])
-    facets = [deploy.facet_from_source_id("a.sol:A"), deploy.facet_from_source_id("b.sol:B")]
+    facets = [facet_from_source_id("a.sol:A"), facet_from_source_id("b.sol:B")]
     expected = deploy.build_migration(PROXY, facets, proposed["facets"], {}, ".", ".", storage=storage)
     assert len({sd.delegate.address for sd in expected.setdelegates}) == 2  # two groups
     monkeypatch.setattr(verify, "eth_get_code", lambda address: "0x" + expected.encode().hex())
@@ -423,7 +475,7 @@ def test_verify_migration_flags_missing_install(monkeypatch):
     _migration_setup(monkeypatch, {"a.sol:A": [_sel("0x11111111")], "b.sol:B": [_sel("0x22222222")]})
     proposed = _state({"a.sol:A": {"address": A1}, "b.sol:B": {"address": B2}})
     storage = _fetched_storage(["0x11111111", "0x22222222"])
-    facets = [deploy.facet_from_source_id("a.sol:A"), deploy.facet_from_source_id("b.sol:B")]
+    facets = [facet_from_source_id("a.sol:A"), facet_from_source_id("b.sol:B")]
     expected = deploy.build_migration(PROXY, facets, proposed["facets"], {}, ".", ".", storage=storage)
     # on-chain migration only carries the route for 0x11111111
     partial = Migration([sd for sd in expected.setdelegates if sd.selector == "0x11111111"])
@@ -444,7 +496,7 @@ def test_verify_migration_flags_unzeroed_removal(monkeypatch):
     current = _state({"keep.sol:Keep": {}, "old.sol:Old": {}})
     # 0x99999999 currently routes somewhere non-zero, so it must be zeroed
     storage = _fetched_storage(["0x11111111", "0x99999999"], {"0x99999999": _word(OLD)})
-    facets = [deploy.facet_from_source_id("keep.sol:Keep")]
+    facets = [facet_from_source_id("keep.sol:Keep")]
     expected = deploy.build_migration(PROXY, facets, proposed["facets"], current, ".", ".", storage=storage)
     # drop the zeroing fragment (the one whose delegate is the zero address)
     kept = [sd for sd in expected.setdelegates if sd.delegate.address != verify.ZERO_ADDRESS]
@@ -475,6 +527,7 @@ def stub_trees(monkeypatch, stub_source_trees):
     monkeypatch.setattr(verify, "ProxyStorage", FakeStorage)
     monkeypatch.setattr(verify, "_replay_runtime", lambda initcode, rec, cache: Replay("", False, False, {}))
     monkeypatch.setattr(verify, "rehearse", lambda *a: [])
+    monkeypatch.setattr(verify, "prefetch_code", lambda addresses: None)
 
 
 def test_run_verify_requires_rpc_url(monkeypatch, tmp_path):
@@ -515,6 +568,38 @@ def test_run_verify_reports_failures(monkeypatch, tmp_path, stub_trees):
     }
     with pytest.raises(Exception, match="initcodeHash"):
         verify.run_verify(_ledger(tmp_path, [entry]))
+
+
+def test_run_verify_prefetches_every_recorded_address_first(monkeypatch, tmp_path, stub_trees):
+    monkeypatch.setenv("ETH_RPC_URL", "http://mock.rpc")
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr(deploy, "facet_selectors", lambda facet, tree: [_sel("0x11111111")])
+    events = []
+    monkeypatch.setattr(verify, "prefetch_code", lambda addresses: events.append(set(addresses)))
+    for check in (
+        "verify_facets", "verify_dispatch", "verify_selectors", "verify_proposed_set",
+        "verify_migration", "verify_rehearsal", "summarize_upgrade",
+    ):
+        monkeypatch.setattr(verify, check, lambda *a, check=check, **k: events.append(check))
+    current_selectors, proposed_selectors = "0x" + "51" * 20, "0x" + "52" * 20
+    entry = {
+        "address": PROXY,
+        "facetSrc": ["keep.sol"],
+        "deployments": {
+            "314": {
+                "current": {**_state({"keep.sol:Keep": {"address": OLD}}, "c0"), "selectors": {"address": current_selectors}},
+                "proposed": {
+                    **_state({"keep.sol:Keep": {"address": A1}, "old.sol:Old": {"address": OLD}}, "c1"),
+                    "selectors": {"address": proposed_selectors},
+                    "migration": {"address": B2},
+                },
+            }
+        },
+    }
+    verify.run_verify(_ledger(tmp_path, [entry]))
+    # One prefetch, before any check, of every address the ledger records here.
+    assert events[0] == {PROXY, OLD, A1, current_selectors, proposed_selectors, B2}
+    assert all(isinstance(event, str) for event in events[1:])
 
 
 def test_run_verify_flags_function_removed_from_kept_facet(monkeypatch, tmp_path, stub_trees):

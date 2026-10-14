@@ -322,6 +322,7 @@ def stub(monkeypatch):
     monkeypatch.setattr(audit, "chain_id", lambda: "314")
     monkeypatch.setattr(audit, "eth_block_number", lambda: 10)
     monkeypatch.setattr(audit, "verify_facets", lambda *a, **k: None)
+    monkeypatch.setattr(audit, "prefetch_code", lambda addresses: None)
     monkeypatch.setattr(audit, "verify_selectors", lambda *a: None)
     monkeypatch.setenv("ETH_RPC_URL", "http://mock.rpc")
 
@@ -395,6 +396,27 @@ def test_run_audit_fails_on_missing_history_after_auditing_the_rest(monkeypatch,
     out = capsys.readouterr().out
     assert f"delegate {A1} current a.sol:A: 1 selector install(s), first at block 7" in out
     assert "every installed delegate is recorded and verified" not in out
+
+
+def test_run_audit_prefetches_recorded_code_first(monkeypatch, tmp_path, stub):
+    monkeypatch.chdir(tmp_path)
+    events = []
+    monkeypatch.setattr(audit, "prefetch_code", lambda addresses: events.append(set(addresses)))
+    monkeypatch.setattr(audit, "get_logs", lambda *a: (events.append("get_logs"), ([], []))[1])
+    selectors = "0x" + "51" * 20
+    entry = {
+        "address": PROXY,
+        "facetSrc": ["*.sol"],
+        "deployments": {
+            "314": {
+                "current": {"gitCommit": "c0", "facets": {"a.sol:A": {"address": A1}}, "selectors": {"address": selectors}},
+                "history": {OLD: {"source": "o.sol:O", "gitCommit": "c0", "initcodeHash": "0x00", "codeHash": "0x00"}},
+            }
+        },
+    }
+    audit.run_audit(_ledger(tmp_path, [entry]), from_block=0)
+    assert events[0] == {A1, selectors, OLD}
+    assert events[1] == "get_logs"
 
 
 def test_run_audit_suggests_accept_once_for_proposed_delegates(monkeypatch, tmp_path, stub, capsys):

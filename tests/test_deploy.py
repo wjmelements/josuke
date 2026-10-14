@@ -15,10 +15,11 @@ import click
 import pytest
 from eth_utils import keccak, to_checksum_address
 
-from josuke import broadcast, deploy
+from josuke import broadcast, deploy, facet as facet_module
 from josuke.ledger import validate_ledger
-from josuke.deploy import Facet, coerce_arg, coerce_input, keccak_hex, resolve_facets
+from josuke.deploy import coerce_arg, coerce_input, keccak_hex
 from josuke.evm import Replay
+from josuke.facet import Facet, resolve_facets
 
 A1 = to_checksum_address("0x" + "a1" * 20)  # deploy_initcode always returns checksummed
 B2 = to_checksum_address("0x" + "b2" * 20)
@@ -147,6 +148,11 @@ def stub_chain(monkeypatch, tmp_path, stub_source_trees):
     # "rehearsal" is the failures the stubbed rehearsal reports; by default the migration routes as proposed
     log["rehearsal"] = []
     monkeypatch.setattr(deploy, "rehearse", lambda *a: log["rehearsal"])
+    # each prefetch: (the addresses, how many deployments were planned by then)
+    log["prefetched"] = []
+    monkeypatch.setattr(
+        deploy, "prefetch_code", lambda addresses: log["prefetched"].append((set(addresses), len(log["deployed"])))
+    )
     counter = [0]
 
     def fake_initcode(facet, root, recorded_args):
@@ -236,6 +242,23 @@ def test_run_deploy_records_create_tx_hash(stub_chain, monkeypatch, tmp_path):
     deploy.run_deploy(path)  # unchanged: reused, not redeployed, so it keeps its hash
     assert recorded() == first
     assert len(stub_chain["deployed"]) == 1
+
+
+def test_run_deploy_prefetches_recorded_code_then_the_new_facets(stub_chain, monkeypatch, tmp_path):
+    _resolve_to(monkeypatch, ["a.evm", "b.evm"])
+    selectors, migration = "0x" + "51" * 20, "0x" + "4d" * 20
+    history = {
+        "current": {"gitCommit": "e" * 40, "facets": {}, "selectors": {"address": selectors}},
+        "proposed": {"gitCommit": "e" * 40, "facets": {}, "migration": {"address": migration}},
+    }
+    path = _write(tmp_path, [{"address": PROXY, "facetSrc": ["*.evm"], "deployments": {"314": history}}])
+
+    deploy.run_deploy(path)
+
+    # The code planning compares against, before anything is planned; then the new
+    # facets' code, once mined, for their codeHash.
+    new = {"0x" + f"{1:040x}", "0x" + f"{2:040x}"}
+    assert stub_chain["prefetched"] == [({PROXY, selectors, migration}, 0), (new, 2)]
 
 
 def test_run_deploy_carries_unchanged_and_redeploys_changed(stub_chain, monkeypatch, tmp_path):
@@ -682,7 +705,7 @@ def _isolate_maps():
 
 
 def _facet(source_id):
-    return deploy.facet_from_source_id(source_id)
+    return facet_module.facet_from_source_id(source_id)
 
 
 def test_build_migration_installs_every_proposed_selector(monkeypatch):
@@ -995,7 +1018,7 @@ def test_facet_artifact_is_read_once_per_facet_and_root(tmp_path, monkeypatch):
         {"type": "constructor", "inputs": [{"name": "x", "type": "uint256"}]},
         {"type": "function", "name": "f", "inputs": [], "outputs": [], "stateMutability": "view"},
     ]
-    monkeypatch.setattr(deploy, "get_forge_config", lambda root: {"out": "out"})
+    monkeypatch.setattr(facet_module, "get_forge_config", lambda root: {"out": "out"})
     facet = _facet("a.sol:A")
     c0, c1 = tmp_path / "c0", tmp_path / "c1"
     path = _artifact(c0, "a.sol", "A", abi)
@@ -1009,9 +1032,9 @@ def test_facet_artifact_is_read_once_per_facet_and_root(tmp_path, monkeypatch):
 
 
 def test_facet_artifact_matches_its_source_when_file_names_clash(tmp_path, monkeypatch):
-    monkeypatch.setattr(deploy, "get_forge_config", lambda root: {"out": "out"})
+    monkeypatch.setattr(facet_module, "get_forge_config", lambda root: {"out": "out"})
     _artifact(tmp_path, "src/a/Errors.sol", "Errors", [])
     _artifact(tmp_path, "src/b/Errors.sol", "Errors", [{"type": "function", "name": "g", "inputs": []}], nested="b")
     assert deploy.facet_abi(_facet("src/b/Errors.sol:Errors"), tmp_path)[0]["name"] == "g"
     with pytest.raises(click.ClickException, match="no build artifact"):
-        deploy.facet_artifact(_facet("src/c/Errors.sol:Errors"), tmp_path)
+        facet_module.facet_artifact(_facet("src/c/Errors.sol:Errors"), tmp_path)

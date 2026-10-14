@@ -34,7 +34,8 @@ def stub_source_trees(monkeypatch):
 def _fresh_memos():
     """Per-checkout reads are memoised per process; tests stub or rewrite what they
     read, so each starts empty."""
-    from josuke.deploy import facet_abi, facet_artifact
+    from josuke.deploy import facet_abi
+    from josuke.facet import facet_artifact
     from josuke.forge import get_forge_config
     from josuke.layout import _resolved_versions
 
@@ -54,3 +55,13 @@ def _fresh_selector_signatures():
     _signatures.clear()
     yield
     _signatures.clear()
+
+
+@pytest.fixture(autouse=True)
+def _fresh_code_cache():
+    """Code read at `latest` is kept for the run; tests stub different code."""
+    from josuke import ethjsonrpc
+
+    ethjsonrpc._codes.clear()
+    yield
+    ethjsonrpc._codes.clear()

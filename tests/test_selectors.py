@@ -6,7 +6,7 @@ import pytest
 from eth_abi import encode as abi_encode
 from eth_utils import keccak
 
-from josuke.evm import execute
+from josuke.evm import create_offline
 from josuke.selectors import Selector, SelectorCollision
 from josuke.erc8167 import selectors_method
 
@@ -28,7 +28,7 @@ def selectors():
 @requires_evm
 def test_selectors_method(selectors):
     method = selectors_method(selectors)
-    result = execute(method.hex())
+    result = create_offline(method.hex())
     assert result == abi_encode(
         ["bytes4[]"],
         [[bytes.fromhex(selector.selector.removeprefix("0x")) for selector in selectors]],
