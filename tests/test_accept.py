@@ -242,45 +242,6 @@ def test_retired_entries_archives_replaced_selectors_under_old_facet_set():
     }
 
 
-def _takes(monkeypatch, takes):
-    """Stub shared_args_taken: each source takes the names `takes` lists, unless its record overrides them."""
-    monkeypatch.setattr(
-        accept, "shared_args_taken",
-        lambda facet, tree, recorded, shared: {
-            n: shared[n] for n in takes.get(facet.source_id, []) if n in (shared or {}) and n not in (recorded or {})
-        },
-    )
-
-
-def test_retired_entries_write_in_the_shared_args_current_was_built_with(monkeypatch):
-    # current's copy holds 60; the declarations (and the accepted copy) since moved to 3600
-    _takes(monkeypatch, {"a.sol:A": ["updateInterval", "owner"]})
-    current = _state(
-        {"a.sol:A": {"address": OLD, "constructorArgs": {"owner": B2}}, "b.sol:B": {"address": A1}}, commit="c0"
-    )
-    current["constructorArgs"] = {"updateInterval": 60, "owner": A1}
-    accepted = _state({"a.sol:A": {"address": B2}, "b.sol:B": {"address": A1}}, commit="c1")
-    accepted["constructorArgs"] = {"updateInterval": 3600, "owner": A1}
-    assert accept.retired_entries(current, accepted, "tree") == {
-        OLD: {"source": "a.sol:A", "gitCommit": "c0", "constructorArgs": {"updateInterval": 60, "owner": B2}},
-    }
-
-
-def test_history_entries_records_no_shared_args_a_constructor_does_not_take(monkeypatch):
-    _takes(monkeypatch, {})
-    state = _state({"a.sol:A": {"address": A1}})
-    state["constructorArgs"] = {"updateInterval": 3600}
-    assert accept.history_entries(state, "tree") == {
-        A1: {"source": "a.sol:A", "gitCommit": "c0"},
-    }
-
-
-def test_accepted_state_keeps_the_shared_args_copy():
-    proposed = _state({"a.sol:A": {"address": A1}}, commit="c1")
-    proposed["constructorArgs"] = {"updateInterval": 3600}
-    assert accept.accepted_state(proposed)["constructorArgs"] == {"updateInterval": 3600}
-
-
 def test_retired_entries_empty_without_current():
     assert accept.retired_entries({}, _state({"a.sol:A": {"address": A1}})) == {}
 

@@ -43,9 +43,8 @@ Pass `--all` to `deploy` to redeploy every facet, even ones whose bytecode is
 unchanged.
 
 For each proxy, `deploy` resolves `facetSrc`, builds each facet's init bytecode
-from `HEAD` (taking each constructor argument from the facet's recorded
-`constructorArgs`, else the chain's, else the proxy's, prompting for any that
-are missing), and deploys only those whose bytecode differs from what `current`
+from `HEAD` (taking `constructorArgs` from the ledger's declarations, else the
+facet's record, prompting for any that are missing), and deploys only those whose bytecode differs from what `current`
 records for that chain. When two proxies resolve to the same init bytecode, it
 is deployed once and both proxies point at that address.
 
@@ -208,12 +207,12 @@ Notes:
   answers "was it built from this commit with these args?" and is what the
   verifier recomputes from source. A facet with no constructor has
   `initcodeHash == keccak256(initcode)` and omits `constructorArgs`.
-- `constructorArgs` on a proxy, or on one of its chains, declares arguments
-  for every facet constructor with a parameter of that name. A facet's own
-  `constructorArgs` override the chain's, which override the proxy's. Facet
-  records omit the shared values they use, so changing one redeploys every
-  facet that takes it. `current` and `proposed` each record the shared values
-  their facets were built with, and a `history` entry records all its arguments.
+- A facet's `constructorArgs` record every argument it was built with. To
+  change one, declare it in `constructorArgs` on the proxy, or on one of its
+  chains, which applies to every facet with a parameter of that name; use
+  `facetConstructorArgs` for one facet. Declarations win over records, the more
+  specific first, so changing one redeploys the facets that take it; removing
+  one keeps what is deployed.
 - `from`, `nonce` and `block` record the environment a constructor read, so
   the verifier can replay it: `from` its sender, `nonce` (with `from`) its own
   address, as for an `address(this)` immutable, and `block` the values of its

@@ -66,12 +66,10 @@ def _replay_runtime(initcode: str, rec: dict, cache: dict | None) -> Replay:
 def verify_facets(
     state: dict, label: str, tree: pathlib.Path, report: Report, rpc_cache: dict | None = None
 ) -> None:
-    """Each recorded facet is built from `state`'s commit, with the shared
-    constructor args `state` records, and live on chain."""
-    shared = state.get("constructorArgs")
+    """Each recorded facet is built from `state`'s commit and live on chain."""
     for source_id, rec in state["facets"].items():
         facet = facet_from_source_id(source_id)
-        initcode, _ = facet_initcode(facet, tree, rec.get("constructorArgs"), prompt=False, shared_args=shared)
+        initcode, _ = facet_initcode(facet, tree, rec.get("constructorArgs"), prompt=False)
         got = keccak_hex(initcode)
         recorded = rec.get("initcodeHash")
         if recorded is None:

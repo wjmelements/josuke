@@ -7,8 +7,7 @@ from eth_utils import to_checksum_address
 from .ethjsonrpc import chain_id
 from .ledger import load_ledger, write_ledger
 from .storage import ProxyStorage, slot_address as _slot_address
-from .deploy import selector_owners, shared_args_taken
-from .facet import facet_from_source_id
+from .deploy import selector_owners
 from .verify import Report
 from .worktree import SourceTrees
 
@@ -62,8 +61,6 @@ def accepted_state(proposed: dict) -> dict:
     `retired_entries` archives the delegates it replaces into `history`.
     """
     accepted = {"gitCommit": proposed["gitCommit"], "facets": proposed["facets"]}
-    if "constructorArgs" in proposed:
-        accepted["constructorArgs"] = proposed["constructorArgs"]
     if "selectors" in proposed:
         accepted["selectors"] = proposed["selectors"]
     if "migration" in proposed:
@@ -71,30 +68,23 @@ def accepted_state(proposed: dict) -> dict:
     return accepted
 
 
-def history_entries(state: dict, tree: pathlib.Path | None = None) -> dict:
+def history_entries(state: dict) -> dict:
     """address -> `history` entry for every delegate `state` installs.
 
     An entry carries what `verify` needs to rebuild the delegate from source: the
-    commit, and the facet's record minus its address (which is the key), with
-    the shared constructor args it took from `state` written in, read from
-    `tree`, the checkout of `state.gitCommit`. The generated `selectors()`
-    delegate has no source of its own, so its entry names the facet set it
-    enumerates instead. Carried-forward facets are stamped with `state`'s
-    commit; that is sound because `deploy` only carries a facet forward when its
-    initcode at that commit is unchanged.
+    commit, and the facet's record minus its address (which is the key). The
+    generated `selectors()` delegate has no source of its own, so its entry names
+    the facet set it enumerates instead. Carried-forward facets are stamped with
+    `state`'s commit; that is sound because `deploy` only carries a facet forward
+    when its initcode at that commit is unchanged.
     """
-    shared = state.get("constructorArgs")
     entries = {}
     for source_id, rec in state["facets"].items():
         if rec.get("address"):
-            entry = {
+            entries[to_checksum_address(rec["address"])] = {
                 "source": source_id,
                 "gitCommit": state["gitCommit"],
             } | {k: v for k, v in rec.items() if k != "address"}
-            taken = shared_args_taken(facet_from_source_id(source_id), tree, rec.get("constructorArgs"), shared)
-            if taken:
-                entry["constructorArgs"] = taken | rec.get("constructorArgs", {})
-            entries[to_checksum_address(rec["address"])] = entry
     if "selectors" in state:
         entries[to_checksum_address(state["selectors"]["address"])] = {
             "gitCommit": state["gitCommit"],
@@ -103,19 +93,15 @@ def history_entries(state: dict, tree: pathlib.Path | None = None) -> dict:
     return entries
 
 
-def retired_entries(current: dict, accepted: dict, current_tree: pathlib.Path | None = None) -> dict:
+def retired_entries(current: dict, accepted: dict) -> dict:
     """`history` entries for the delegates `current` installs that `accepted` does not.
 
     Delegates still installed stay recorded only in `current`; each one moves to
     `history` when a later `accept` replaces it."""
     if not current:
         return {}  # no `current` recorded: nothing to retire
-    kept = {
-        to_checksum_address(rec["address"])
-        for rec in [*accepted["facets"].values(), accepted.get("selectors") or {}]
-        if rec.get("address")
-    }
-    return {a: e for a, e in history_entries(current, current_tree).items() if a not in kept}
+    kept = history_entries(accepted).keys()
+    return {a: e for a, e in history_entries(current).items() if a not in kept}
 
 
 def run_accept(ledger_path):
@@ -156,9 +142,7 @@ def run_accept(ledger_path):
             if len(report.failures) > before:
                 continue  # leave this proxy's proposed state untouched
 
-            accepted = accepted_state(proposed)
-            retired = retired_entries(current or {}, accepted, current_tree)
-            pending.append((proxy, history, retired, accepted))
+            pending.append((proxy, history, current or {}, accepted_state(proposed)))
 
     if report.failures:
         raise click.ClickException(
@@ -170,9 +154,10 @@ def run_accept(ledger_path):
         click.echo("nothing to accept")
         return
 
-    for proxy, history, retired, accepted in pending:
+    for proxy, history, current, accepted in pending:
         history["current"] = accepted
         del history["proposed"]
+        retired = retired_entries(current, accepted)
         if retired:
             history.setdefault("history", {}).update(retired)
         click.echo(f"{proxy} chain {chain}: accepted proposed -> current")

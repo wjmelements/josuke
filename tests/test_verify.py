@@ -86,26 +86,10 @@ _HASHES = {"ic": "0xICHASH", "rt": "0xRTHASH"}
 
 
 def _stub_facet_checks(monkeypatch, runtime="rt"):
-    monkeypatch.setattr(verify, "facet_initcode", lambda f, root, args, prompt, shared_args=None: ("ic", None))
+    monkeypatch.setattr(verify, "facet_initcode", lambda f, root, args, prompt: ("ic", None))
     monkeypatch.setattr(verify, "_replay_runtime", lambda initcode, rec, cache: Replay(runtime, False, False, {}))
     monkeypatch.setattr(verify, "keccak_hex", lambda h: _HASHES.get(h, "0x" + h))
     monkeypatch.setattr(verify, "_onchain_codehash", lambda addr: "0xRTHASH")
-
-
-def test_verify_facets_rebuilds_with_the_states_shared_args(monkeypatch):
-    _stub_facet_checks(monkeypatch)
-    seen = []
-    monkeypatch.setattr(
-        verify, "facet_initcode",
-        lambda f, root, args, prompt, shared_args=None: seen.append((args, shared_args)) or ("ic", None),
-    )
-    state = _state({"a.sol:A": {"address": A1, "initcodeHash": "0xICHASH", "codeHash": "0xRTHASH",
-                                "constructorArgs": {"owner": A1}}})
-    state["constructorArgs"] = {"updateInterval": 60}
-    report = _report()
-    verify.verify_facets(state, "current", ".", report)
-    assert report.failures == []
-    assert seen == [({"owner": A1}, {"updateInterval": 60})]
 
 
 def test_verify_facets_flags_initcode_hash(monkeypatch):
@@ -566,7 +550,7 @@ def test_run_verify_reports_failures(monkeypatch, tmp_path, stub_trees):
     monkeypatch.setenv("ETH_RPC_URL", "http://mock.rpc")
     monkeypatch.chdir(tmp_path)
     monkeypatch.setattr(deploy, "facet_selectors", lambda facet, tree: [_sel("0x11111111")])
-    monkeypatch.setattr(verify, "facet_initcode", lambda f, root, args, prompt, shared_args=None: ("dead", None))
+    monkeypatch.setattr(verify, "facet_initcode", lambda f, root, args, prompt: ("dead", None))
     monkeypatch.setattr(verify, "keccak_hex", lambda h: "0xbad")
     monkeypatch.setattr(verify, "_onchain_codehash", lambda addr: "0xbad")
 

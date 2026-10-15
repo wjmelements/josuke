@@ -163,24 +163,53 @@ def test_struct_constructor_args_encode_and_match(tmp_path):
     assert "HEAD matches current ccccccc" in result.output
 
 
-def test_shared_constructor_args_are_not_asked_for(tmp_path):
-    entry = _entry([CONFIGURED]) | {"constructorArgs": ARGS}
-    result = _check(tmp_path, [entry])
+def test_declared_constructor_args_are_not_asked_for(tmp_path):
+    result = _check(tmp_path, [_entry([CONFIGURED]) | {"constructorArgs": ARGS}])
     assert result.exit_code == 0, result.output
     assert "deploy asks for" not in result.output
     assert "would deploy 1 facet\n" in result.output
 
 
-def test_chain_shared_args_match_a_facet_recorded_without_them(tmp_path):
-    record = _record(CONFIGURED, "0x" + "c0" * 20, ARGS)
-    del record["constructorArgs"]
-    entry = _entry([CONFIGURED], current={CONFIGURED: record}) | {
-        "constructorArgs": {"limits": {**ARGS["limits"], "level": 256}},  # overridden on chain 314
+def test_declaration_wins_over_the_record_and_shows_the_change(tmp_path):
+    entry = _entry([CONFIGURED], current={CONFIGURED: _record(CONFIGURED, "0x" + "c0" * 20, ARGS)})
+    changed = {"limits": {**ARGS["limits"], "level": 4}}
+    entry["deployments"]["314"]["constructorArgs"] = changed
+    result = _check(tmp_path, [entry])
+    assert result.exit_code == 0, result.output
+    assert f"CHANGED    {CONFIGURED}" in result.output
+    assert f"args limits {ARGS['limits']} -> {changed['limits']}" in result.output
+
+
+def test_facet_declaration_wins_over_a_proxy_one(tmp_path):
+    entry = _entry([CONFIGURED], current={CONFIGURED: _record(CONFIGURED, "0x" + "c0" * 20, ARGS)}) | {
+        "constructorArgs": {"limits": {**ARGS["limits"], "level": 256}},  # does not encode
+        "facetConstructorArgs": {CONFIGURED: ARGS},
     }
-    entry["deployments"]["314"]["constructorArgs"] = ARGS
     result = _check(tmp_path, [entry])
     assert result.exit_code == 0, result.output
     assert f"UNCHANGED  {CONFIGURED}" in result.output
+
+
+def test_declared_args_that_do_not_encode_point_at_facet_overrides(tmp_path):
+    entry = _entry([CONFIGURED]) | {"constructorArgs": {"limits": {**ARGS["limits"], "level": 256}}}
+    result = _check(tmp_path, [entry])
+    assert result.exit_code == 1
+    assert f"{CONFIGURED}: declared constructorArgs limits do not encode" in result.output
+    assert "override them for this facet in facetConstructorArgs" in result.output
+
+
+def test_declarations_no_facet_takes_warn(tmp_path):
+    entry = _entry([CONFIGURED, OWNABLE], current={CONFIGURED: _record(CONFIGURED, "0x" + "c0" * 20, ARGS)}) | {
+        "constructorArgs": {"limts": 1},
+        "facetConstructorArgs": {OWNABLE: {"limits": ARGS["limits"]}, COUNTER: {"count": 1}},
+    }
+    entry["deployments"]["314"]["constructorArgs"] = {"level": 3}
+    result = _check(tmp_path, [entry])
+    assert result.exit_code == 0, result.output
+    assert f"{PROXY} constructorArgs limts: no facet takes it" in result.output
+    assert f"{PROXY} chain 314 constructorArgs level: no facet takes it" in result.output
+    assert f"{PROXY} facetConstructorArgs {OWNABLE} limits: its constructor takes no limits" in result.output
+    assert f"{PROXY} facetConstructorArgs {COUNTER}: not a facet of this proxy" in result.output
 
 
 def test_recorded_args_that_do_not_encode_fail(tmp_path):

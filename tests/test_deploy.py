@@ -126,65 +126,31 @@ _INTERVAL_ABI = [
     ]},
 ]
 _OWNER = "0x" + "12" * 20
+_OTHER = "0x" + "34" * 20
 
 
-def _interval_facet(tmp_path, monkeypatch):
+def test_facet_initcode_records_only_the_args_its_constructor_takes(tmp_path, monkeypatch):
     monkeypatch.setattr(facet_module, "get_forge_config", lambda root: {"out": "out"})
     _artifact(tmp_path, "a.sol", "A", _INTERVAL_ABI)
-    return _facet("a.sol:A")
+    given = {"updateInterval": 60, "owner": _OWNER, "unrelated": 1}
+    _, args = deploy.facet_initcode(_facet("a.sol:A"), tmp_path, given, prompt=False)
+    assert args == {"updateInterval": 60, "owner": _OWNER}
 
 
-def test_shared_constructor_args_chain_overrides_proxy():
+def test_declared_constructor_args_most_specific_wins():
     entry = {
         "constructorArgs": {"updateInterval": 60, "owner": _OWNER},
-        "deployments": {"314": {"constructorArgs": {"updateInterval": 3600}}},
+        "facetConstructorArgs": {"a.sol:A": {"updateInterval": 120}},
+        "deployments": {"314": {
+            "constructorArgs": {"updateInterval": 3600, "owner": _OTHER},
+            "facetConstructorArgs": {"b.sol:B": {"owner": _OWNER}},
+        }},
     }
-    assert deploy.shared_constructor_args(entry, "314") == {"updateInterval": 3600, "owner": _OWNER}
-    assert deploy.shared_constructor_args(entry, "1") == {"updateInterval": 60, "owner": _OWNER}
-    assert deploy.shared_constructor_args(entry, None) == {"updateInterval": 60, "owner": _OWNER}
-    assert deploy.shared_constructor_args({}, "314") == {}
-
-
-def test_facet_initcode_takes_shared_args_without_recording_them(tmp_path, monkeypatch):
-    facet = _interval_facet(tmp_path, monkeypatch)
-    shared = {"updateInterval": 3600, "owner": _OWNER, "unrelated": 1}
-    initcode, args = deploy.facet_initcode(facet, tmp_path, None, prompt=False, shared_args=shared)
-    expected, _ = deploy.facet_initcode(facet, tmp_path, {"updateInterval": 3600, "owner": _OWNER}, prompt=False)
-    assert initcode == expected
-    assert args is None
-
-
-def test_facet_initcode_record_overrides_shared_args(tmp_path, monkeypatch):
-    facet = _interval_facet(tmp_path, monkeypatch)
-    shared = {"updateInterval": 3600, "owner": _OWNER}
-    initcode, args = deploy.facet_initcode(facet, tmp_path, {"updateInterval": 60}, prompt=False, shared_args=shared)
-    expected, _ = deploy.facet_initcode(facet, tmp_path, {"updateInterval": 60, "owner": _OWNER}, prompt=False)
-    assert initcode == expected
-    assert args == {"updateInterval": 60}
-
-
-def test_facet_initcode_drops_recorded_args_the_shared_args_repeat(tmp_path, monkeypatch):
-    facet = _interval_facet(tmp_path, monkeypatch)
-    recorded = {"updateInterval": 3600, "owner": _OWNER}
-    _, args = deploy.facet_initcode(facet, tmp_path, recorded, prompt=False, shared_args={"updateInterval": 3600})
-    assert args == {"owner": _OWNER}
-
-
-def test_facet_initcode_prompts_only_for_args_nothing_supplies(tmp_path, monkeypatch):
-    facet = _interval_facet(tmp_path, monkeypatch)
-    asked = []
-    monkeypatch.setattr(deploy.click, "prompt", lambda text: asked.append(text) or _OWNER)
-    _, args = deploy.facet_initcode(facet, tmp_path, None, shared_args={"updateInterval": 3600})
-    assert asked == ["a.sol:A constructor arg owner (address)"]
-    assert args == {"owner": _OWNER}
-
-
-def test_shared_args_taken_are_those_the_constructor_takes_and_the_record_does_not_override(tmp_path, monkeypatch):
-    facet = _interval_facet(tmp_path, monkeypatch)
-    shared = {"updateInterval": 3600, "owner": _OWNER, "unrelated": 1}
-    assert deploy.shared_args_taken(facet, tmp_path, {"updateInterval": 60}, shared) == {"owner": _OWNER}
-    assert deploy.shared_args_taken(facet, tmp_path, None, shared) == {"updateInterval": 3600, "owner": _OWNER}
-    assert deploy.shared_args_taken(facet, tmp_path, None, None) == {}
+    assert deploy.declared_constructor_args(entry, "314", "a.sol:A") == {"updateInterval": 120, "owner": _OTHER}
+    assert deploy.declared_constructor_args(entry, "314", "b.sol:B") == {"updateInterval": 3600, "owner": _OWNER}
+    assert deploy.declared_constructor_args(entry, "1", "b.sol:B") == {"updateInterval": 60, "owner": _OWNER}
+    assert deploy.declared_constructor_args(entry, None, "a.sol:A") == {"updateInterval": 120, "owner": _OWNER}
+    assert deploy.declared_constructor_args({}, "314", "a.sol:A") == {}
 
 
 # -- run_deploy decision logic -----------------------------------------------
@@ -222,7 +188,7 @@ def stub_chain(monkeypatch, tmp_path, stub_source_trees):
     )
     counter = [0]
 
-    def fake_initcode(facet, root, recorded_args, shared_args=None):
+    def fake_initcode(facet, root, recorded_args):
         # source_id doubles as the "bytecode": lets tests force a change.
         return facet.source_id.encode().hex(), (recorded_args or None)
 
@@ -467,34 +433,34 @@ def test_run_deploy_records_constructor_args(stub_chain, monkeypatch, tmp_path):
     assert facet["constructorArgs"] == {"owner": "0x" + "12" * 20}
 
 
-def test_run_deploy_passes_shared_args_chain_over_proxy(stub_chain, monkeypatch, tmp_path):
+def test_run_deploy_declarations_win_over_the_record(stub_chain, monkeypatch, tmp_path):
     _resolve_to(monkeypatch, ["a.evm"])
     seen = []
-    monkeypatch.setattr(
-        deploy, "facet_initcode",
-        lambda facet, root, recorded_args, shared_args=None: seen.append(shared_args) or ("6000", None),
-    )
+    monkeypatch.setattr(deploy, "facet_initcode", lambda facet, root, args: seen.append(args) or ("6000", args))
     path = _write(
         tmp_path,
         [{
             "address": PROXY,
             "facetSrc": ["*.evm"],
-            "constructorArgs": {"updateInterval": 60, "owner": _OWNER},
-            "deployments": {"314": {"constructorArgs": {"updateInterval": 3600}}},
+            "constructorArgs": {"updateInterval": 3600},
+            "deployments": {"314": {"current": {
+                "gitCommit": "e" * 40,
+                "facets": {"a.evm": {
+                    "address": "0x" + "ab" * 20,
+                    "codeHash": "0x" + "11" * 32,
+                    "initcodeHash": "0x" + "00" * 32,
+                    "constructorArgs": {"updateInterval": 60, "owner": _OWNER},
+                }},
+            }}},
         }],
-    )
-
-    # a.evm stands in for a constructor taking only updateInterval
-    monkeypatch.setattr(
-        deploy, "shared_args_taken", lambda facet, root, recorded, shared: {"updateInterval": shared["updateInterval"]}
     )
 
     deploy.run_deploy(path)
 
     assert seen == [{"updateInterval": 3600, "owner": _OWNER}]
-    proposed = json.loads(path.read_text())[0]["deployments"]["314"]["proposed"]
-    assert "constructorArgs" not in proposed["facets"]["a.evm"]
-    assert proposed["constructorArgs"] == {"updateInterval": 3600}
+    facet = json.loads(path.read_text())[0]["deployments"]["314"]["proposed"]["facets"]["a.evm"]
+    assert facet["address"] != "0x" + "ab" * 20
+    assert facet["constructorArgs"] == {"updateInterval": 3600, "owner": _OWNER}
 
 
 def _deployed_facet(stub_chain, monkeypatch, tmp_path, replay=None):
