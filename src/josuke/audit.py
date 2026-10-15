@@ -25,6 +25,7 @@ from eth_utils import keccak, to_checksum_address
 
 from .ethjsonrpc import (
     RpcError,
+    brief,
     chain_id,
     eth_block_number,
     eth_get_code,
@@ -180,6 +181,15 @@ def _merged(ranges: list[tuple[int, int]]) -> list[tuple[int, int]]:
     return merged
 
 
+def _log_list(answer: dict, lo: int, hi: int) -> list[dict]:
+    """The logs of an `eth_getLogs` answer with no error. Anything but a list is a bad
+    response, not an empty scan, and no narrower query fixes it."""
+    result = answer.get("result")
+    if not isinstance(result, list):
+        raise RpcError(f"eth_getLogs blocks {lo}-{hi}: bad response: {brief(answer)}")
+    return result
+
+
 def get_logs(proxy: str, from_block: int, to_block: int) -> tuple[list[dict], list[tuple[int, int]]]:
     """Every SelectorDelegated / DiamondDelegateCall log `proxy` emitted in the
     inclusive range that the node holds, oldest first, and the block ranges whose
@@ -218,7 +228,7 @@ def get_logs(proxy: str, from_block: int, to_block: int) -> tuple[list[dict], li
         except RpcError as e:  # an HTTP failure, which a narrower query may avoid
             error = e.message
         if not error:
-            logs.extend(answer.get("result") or [])
+            logs.extend(_log_list(answer, lo, hi))
             first_held = lo
             queue = _windows(hi + 1, to_block, span)
             break
@@ -239,7 +249,7 @@ def get_logs(proxy: str, from_block: int, to_block: int) -> tuple[list[dict], li
         retry, lacking = [], []
         for i, (a, b) in enumerate(queue):
             if not (error := answers[i].get("error")):
-                logs.extend(answers[i].get("result") or [])
+                logs.extend(_log_list(answers[i], a, b))
                 first_held = a if first_held is None else min(first_held, a)
             elif _missing_history(error):
                 lacking.append((a, b, error))

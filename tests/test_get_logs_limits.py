@@ -282,6 +282,39 @@ def test_single_block_failure_propagates(node):
         audit.get_logs(PROXY, 5, 5)
 
 
+BAD_RESPONSES = [{}, {"result": None}, {"result": {}}, {"result": "0x"}]
+
+
+def _answer_badly(node, monkeypatch, bad, when):
+    """Answer the eth_getLogs queries `when` picks out by range with `bad`, which has
+    no error and no list of logs."""
+    dispatch = node._dispatch
+
+    def bad_dispatch(req):
+        if req["method"] == "eth_getLogs" and when(*_range(req)):
+            return {"jsonrpc": "2.0", "id": req.get("id"), **bad}
+        return dispatch(req)
+
+    monkeypatch.setattr(node, "_dispatch", bad_dispatch)
+
+
+@pytest.mark.parametrize("bad", BAD_RESPONSES)
+def test_bad_response_is_fatal(node, monkeypatch, bad):
+    _answer_badly(node, monkeypatch, bad, lambda lo, hi: True)
+    with pytest.raises(RpcError, match="eth_getLogs blocks 0-99: bad response"):
+        audit.get_logs(PROXY, 0, 99)
+    assert len(node.calls) == 1  # no narrower query fixes it
+
+
+@pytest.mark.parametrize("bad", BAD_RESPONSES)
+def test_bad_response_in_a_batch_is_fatal(node, monkeypatch, bad):
+    node.get_logs_limit = _range_limit(-32602, "exceed maximum block range {limit}")
+    _answer_badly(node, monkeypatch, bad, lambda lo, hi: lo == 200)
+    with pytest.raises(RpcError, match="eth_getLogs blocks 200-299: bad response"):
+        audit.get_logs(PROXY, 0, 999)
+    assert len(node.calls) == 2
+
+
 def test_sorts_by_block_then_index(node):
     for block, index in [(2, 0), (1, 1), (1, 0)]:
         node.add_log(PROXY, [audit.SELECTOR_DELEGATED_TOPIC, TOPIC, TOPIC], block=block, log_index=index)
