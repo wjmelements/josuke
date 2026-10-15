@@ -388,6 +388,25 @@ def test_lotus_index_requires_backfill(node):
     )
 
 
+def test_lotus_gateway_lookback(node):
+    _reports_missing_history(node, 1, "bad tipset height: lookbacks of more than 24h0m0s are disallowed")
+
+
+def test_lotus_gateway_lookback_under_its_range_limit(node):
+    """Lotus-gateway's defaults: a 360-epoch range cap, checked first, and a
+    24-hour lookback, 2880 epochs at 30 seconds each."""
+    lo, hi = 0, 9999
+    cutoff = hi + 1 - 2880
+    _log_at(node, 100, 8000)
+    range_limit = _range_limit(-32005, "block range exceeds maximum of {limit} (got {given})", 360)
+    lookback = _history_from(1, "bad tipset height: lookbacks of more than 24h0m0s are disallowed", cutoff)
+    node.get_logs_limit = lambda a, b, logs: range_limit(a, b, logs) or lookback(a, b, logs)
+    blocks, missing, sent = _scan_history(node, lo, hi)
+    assert missing == [(lo, cutoff - 1)]
+    assert blocks == [8000]
+    assert sent[:2] == [(lo, hi), _windows(lo, hi, 361)]
+
+
 def test_erigon_pruned_history_names_its_first_block(node):
     # Erigon says where its history starts, so there is nothing to bisect.
     _log_at(node, 100, 700, 999)

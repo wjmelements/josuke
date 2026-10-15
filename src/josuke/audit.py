@@ -110,10 +110,12 @@ _STATED_RANGE_LIMITS = [
 # Reth's result cap names the most that fits from `fromBlock`.
 _RETRY_RANGE = re.compile(r"query exceeds max results \d+, retry with the range (\d+)-(\d+)")
 # Missing history: EIP-4444's code (geth and forks, reth, nethermind, besu), or
-# lotus's and erigon's words; erigon's names its first block.
+# lotus's, lotus-gateway's and erigon's words; erigon's names its first block.
+# Lotus-gateway refuses blocks older than its lookback window, 24 hours by default.
 _PRUNED_HISTORY_CODE = 4444
 _MISSING_HISTORY = re.compile(
-    r"pruned history unavailable|not found in index|chain index requires backfill|old data not available due to pruning",
+    r"pruned history unavailable|not found in index|chain index requires backfill|old data not available due to pruning"
+    r"|lookbacks of more than .* are disallowed",
     re.IGNORECASE,
 )
 _HISTORY_FROM = re.compile(r"blocks are available from block (\d+)")
