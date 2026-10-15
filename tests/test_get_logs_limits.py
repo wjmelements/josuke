@@ -168,6 +168,7 @@ def test_forest_range_limit(node):
 
 
 def test_venus_range_limit(node):
+    # Also lotus before v1.36 and forest before v0.33, word for word.
     _uses_stated_range_limit(
         node, 1, "invalid epoch range: range between to and from blocks is too large (maximum: {limit})"
     )

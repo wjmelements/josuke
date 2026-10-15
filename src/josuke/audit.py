@@ -104,8 +104,8 @@ _STATED_RANGE_LIMITS = [
     re.compile(r"query block range exceeds server limit, narrow your filter: (\d+)"),  # erigon
     re.compile(r"query exceeds max block range (\d+)"),  # reth
     re.compile(r"maximum \[from, to\] blocks distance: (\d+)"),  # ethermint
-    re.compile(r"block range exceeds maximum of (\d+)"),  # lotus, forest
-    re.compile(r"invalid epoch range: .* \(maximum: (\d+)\)"),  # venus
+    re.compile(r"block range exceeds maximum of (\d+)"),  # lotus >= v1.36, forest >= v0.33
+    re.compile(r"invalid epoch range: .* \(maximum: (\d+)\)"),  # venus, lotus < v1.36, forest < v0.33
 ]
 # Reth's result cap names the most that fits from `fromBlock`.
 _RETRY_RANGE = re.compile(r"query exceeds max results \d+, retry with the range (\d+)-(\d+)")
