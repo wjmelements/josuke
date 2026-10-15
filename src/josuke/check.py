@@ -36,6 +36,7 @@ from .deploy import (
     facet_selectors,
     keccak_hex,
     recorded_facet,
+    shared_constructor_args,
 )
 from .erc8167 import SELECTORS_SELECTOR, generated_selectors, selectors_method
 from .evm import create_offline, evm_artifact
@@ -421,11 +422,13 @@ def _check_storage_history(proxy, states, head, baselines, findings) -> list[str
     return lines
 
 
-def _initcode_hash(facet, root, recorded: dict, proxy: str, findings: Findings) -> tuple[str | None, list[str]]:
+def _initcode_hash(
+    facet, root, recorded: dict, shared: dict, proxy: str, findings: Findings
+) -> tuple[str | None, list[str]]:
     """(keccak of the creation code `deploy` would send, constructor args it
     would prompt for). The hash is None when args are missing, or on a failure."""
     source_id = facet.source_id
-    args = recorded.get("constructorArgs") or {}
+    args = shared | (recorded.get("constructorArgs") or {})
     try:
         if facet.kind == "sol":
             inputs = constructor_inputs(facet, root)
@@ -487,9 +490,10 @@ def _check_proxy(entry, chain, resolved, head, storage_line, root, run_deployed,
     owners = {}  # selector -> (source_id, deployment address)
     fresh = set()  # initcodeHashes `deploy` would deploy
     prompts = 0  # facets whose constructor args `deploy` would ask for
+    shared = shared_constructor_args(entry, chain)
     for source_id, (facet, selectors, _) in resolved.items():
         initcode_hash, missing = _initcode_hash(
-            facet, root, recorded_facet(source_id, current_facets, proposed_facets), proxy, findings
+            facet, root, recorded_facet(source_id, current_facets, proposed_facets), shared, proxy, findings
         )
         note = ""
         if missing:

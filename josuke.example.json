@@ -6,18 +6,27 @@
             "lib/erc8169/implementation.evm",
             "lib/diamond-std/Admin.sol:Owned"
         ],
+        "constructorArgs": {
+            "threshold": 2
+        },
         "deployments": {
             "314": {
+                "constructorArgs": {
+                    "pendingOwner": "0x4a6f6B9fF1fc974096f9063a45Fd12bD5B928AD1"
+                },
                 "current": {
                     "gitCommit": "e910ce4ca320c7c67e71af36b4a7bd2b2a76666a",
+                    "constructorArgs": {
+                        "threshold": 2,
+                        "pendingOwner": "0x4a6f6B9fF1fc974096f9063a45Fd12bD5B928AD1"
+                    },
                     "facets": {
                         "lib/diamond-std/Admin.sol:Owned": {
                             "address": "0x6666666666666666666666666666666666666666",
                             "codeHash": "0x26ae26ae26ae26ae26ae26ae26ae26ae26ae26ae26ae26ae26ae26ae26ae26ae",
                             "initcodeHash": "0x0de10de10de10de10de10de10de10de10de10de10de10de10de10de10de10de1",
                             "constructorArgs": {
-                                "owner": "0x0000000000000000000000000000000000000000",
-                                "pendingOwner": "0x4a6f6B9fF1fc974096f9063a45Fd12bD5B928AD1"
+                                "owner": "0x0000000000000000000000000000000000000000"
                             }
                         },
                         "lib/erc8169/implementation.evm": {
@@ -35,8 +44,7 @@
                                     "0x3333333333333333333333333333333333333333",
                                     "0x4444444444444444444444444444444444444444",
                                     "0x5555555555555555555555555555555555555555"
-                                ],
-                                "threshold": 2
+                                ]
                             }
                         },
                         "src/facets/Bicameral.sol:BicameralView": {
@@ -47,7 +55,6 @@
                                 "timestamp": "0x66f1c2a0"
                             },
                             "constructorArgs": {
-                                "threshold": 2,
                                 "quorum": 50000000000000000000
                             }
                         },

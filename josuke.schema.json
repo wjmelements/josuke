@@ -49,6 +49,10 @@
           "items": { "type": "string" },
           "description": "Source patterns whose contracts are facets of this proxy. Each entry is a glob over .sol files (\"src/facets/*.sol\"), a single \"<path>:<ContractName>\", or an evm-assembler source file (\"<path>.evm\")."
         },
+        "constructorArgs": {
+          "$ref": "#/$defs/facet/properties/constructorArgs",
+          "description": "Constructor arguments for every facet of this proxy with a parameter of that name, on every chain. Overridden by a chain's constructorArgs and a facet's own."
+        },
         "deployments": {
           "type": "object",
           "minProperties": 1,
@@ -63,6 +67,10 @@
       "type": "object",
       "additionalProperties": false,
       "properties": {
+        "constructorArgs": {
+          "$ref": "#/$defs/facet/properties/constructorArgs",
+          "description": "Constructor arguments for every facet of this proxy with a parameter of that name, on this chain. Overrides the proxy's constructorArgs; overridden by a facet's own."
+        },
         "legacy": {
           "type": "object",
           "additionalProperties": false,
@@ -107,6 +115,10 @@
           "propertyNames": { "$ref": "#/$defs/sourceId" },
           "additionalProperties": { "$ref": "#/$defs/facet" }
         },
+        "constructorArgs": {
+          "$ref": "#/$defs/facet/properties/constructorArgs",
+          "description": "The proxy's and chain's constructorArgs these facets were built with, as they were then."
+        },
         "migration": {
           "type": "object",
           "additionalProperties": false,
@@ -149,7 +161,7 @@
           "type": "object",
           "minProperties": 1,
           "additionalProperties": true,
-          "description": "Constructor arguments keyed by parameter name. Values are JSON encodings of the ABI types: address and bytesN as 0x hex strings, arrays as arrays, integers as JSON number literals. Integer values are fed to eth_abi.encode, which requires a Python int, so they are kept as bare numbers rather than strings; parse this file with an integer-preserving JSON reader (Python's json is fine — JSON.parse and jq lose precision above 2^53)."
+          "description": "Constructor arguments keyed by parameter name, besides those its deployment state's constructorArgs supply. Values are JSON encodings of the ABI types: address and bytesN as 0x hex strings, arrays as arrays, integers as JSON number literals. Integers are bare numbers, not strings, so read this file with an integer-preserving JSON parser: JSON.parse and jq lose precision above 2^53."
         },
         "from": {
           "$ref": "#/$defs/address",
@@ -191,7 +203,10 @@
         "gitCommit": { "$ref": "#/$defs/gitCommit" },
         "codeHash": { "$ref": "#/$defs/hash32" },
         "initcodeHash": { "$ref": "#/$defs/hash32" },
-        "constructorArgs": { "$ref": "#/$defs/facet/properties/constructorArgs" },
+        "constructorArgs": {
+          "$ref": "#/$defs/facet/properties/constructorArgs",
+          "description": "Every constructor argument the facet was built with."
+        },
         "from": { "$ref": "#/$defs/facet/properties/from" },
         "nonce": { "$ref": "#/$defs/facet/properties/nonce" },
         "block": { "$ref": "#/$defs/facet/properties/block" },

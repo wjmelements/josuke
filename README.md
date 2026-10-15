@@ -43,8 +43,9 @@ Pass `--all` to `deploy` to redeploy every facet, even ones whose bytecode is
 unchanged.
 
 For each proxy, `deploy` resolves `facetSrc`, builds each facet's init bytecode
-from `HEAD` (reusing recorded `constructorArgs`, prompting for any that are
-missing), and deploys only those whose bytecode differs from what `current`
+from `HEAD` (taking each constructor argument from the facet's recorded
+`constructorArgs`, else the chain's, else the proxy's, prompting for any that
+are missing), and deploys only those whose bytecode differs from what `current`
 records for that chain. When two proxies resolve to the same init bytecode, it
 is deployed once and both proxies point at that address.
 
@@ -207,6 +208,12 @@ Notes:
   answers "was it built from this commit with these args?" and is what the
   verifier recomputes from source. A facet with no constructor has
   `initcodeHash == keccak256(initcode)` and omits `constructorArgs`.
+- `constructorArgs` on a proxy, or on one of its chains, declares arguments
+  for every facet constructor with a parameter of that name. A facet's own
+  `constructorArgs` override the chain's, which override the proxy's. Facet
+  records omit the shared values they use, so changing one redeploys every
+  facet that takes it. `current` and `proposed` each record the shared values
+  their facets were built with, and a `history` entry records all its arguments.
 - `from`, `nonce` and `block` record the environment a constructor read, so
   the verifier can replay it: `from` its sender, `nonce` (with `from`) its own
   address, as for an `address(this)` immutable, and `block` the values of its

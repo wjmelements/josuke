@@ -110,7 +110,31 @@ def _prompt_arg(source_id: str, name: str, abi_type: str):
         return raw
 
 
-def facet_initcode(facet: Facet, root: pathlib.Path, recorded_args, prompt: bool = True):
+def shared_constructor_args(entry: dict, chain: str | None) -> dict:
+    """Constructor args declared for every facet of a proxy: its own
+    `constructorArgs`, overridden by those of its deployments on `chain`."""
+    chain_args = (entry.get("deployments", {}).get(chain) or {}).get("constructorArgs", {}) if chain else {}
+    return {**entry.get("constructorArgs", {}), **chain_args}
+
+
+def shared_args_taken(facet: Facet, root: pathlib.Path, recorded_args, shared_args) -> dict:
+    """The constructor args `facet` takes from `shared_args`: those its
+    constructor has a parameter for and its record doesn't override."""
+    if facet.kind == "evm" or not shared_args:
+        return {}
+    recorded_args = recorded_args or {}
+    return {
+        arg["name"]: shared_args[arg["name"]]
+        for arg in constructor_inputs(facet, root)
+        if arg["name"] in shared_args and arg["name"] not in recorded_args
+    }
+
+
+def facet_initcode(facet: Facet, root: pathlib.Path, recorded_args, prompt: bool = True, shared_args=None):
+    """(initcode, constructorArgs to record) for `facet`. Each constructor arg comes
+    from the facet's record, else `shared_args`, else a prompt. The returned args
+    leave out those `shared_args` supplies with the same value: they are declared
+    once for the proxy, not repeated in each facet."""
     if facet.kind == "evm":
         return evm_artifact(root / facet.path, root)["initcode"], None
 
@@ -131,10 +155,13 @@ def facet_initcode(facet: Facet, root: pathlib.Path, recorded_args, prompt: bool
         return initcode, None
 
     recorded_args = recorded_args or {}
+    shared_args = shared_args or {}
 
     def resolve(arg):
         if arg["name"] in recorded_args:
             return recorded_args[arg["name"]]
+        if arg["name"] in shared_args:
+            return shared_args[arg["name"]]
         if not prompt:
             raise click.ClickException(
                 f"{facet.source_id}: no recorded value for constructor arg {arg['name']}"
@@ -146,7 +173,8 @@ def facet_initcode(facet: Facet, root: pathlib.Path, recorded_args, prompt: bool
         [canonical_type(arg) for arg in inputs],
         [coerce_input(arg, args[arg["name"]]) for arg in inputs],
     ).hex()
-    return initcode + encoded_args, args
+    own = {name: value for name, value in args.items() if name not in shared_args or shared_args[name] != value}
+    return initcode + encoded_args, own or None
 
 
 def keccak_hex(data_hex: str) -> str:
@@ -513,11 +541,12 @@ def run_deploy(ledger_path, redeploy_all: bool = False):
             if not checked_metadata and any(facet.kind == "sol" for facet in facets):
                 warn_metadata_hash_at(root)
                 checked_metadata = True
+            declared = shared_constructor_args(entry, chain)
             proposed_facets = {}
             deployed = 0
             for facet in facets:
                 recorded = recorded_facet(facet.source_id, current_facets, prior_proposed_facets)
-                initcode, args = facet_initcode(facet, root, recorded.get("constructorArgs"))
+                initcode, args = facet_initcode(facet, root, recorded.get("constructorArgs"), shared_args=declared)
                 initcode_hash = keccak_hex(initcode)
 
                 existing, shared = existing_deployment(
@@ -544,6 +573,14 @@ def run_deploy(ledger_path, redeploy_all: bool = False):
                 deployed += 1
 
             proposed = {"gitCommit": commit, "facets": proposed_facets}
+            # What the declarations supplied, kept with the state they built: editing a
+            # declaration must not change how `current` rebuilds, nor its history entries.
+            taken = {}
+            for facet in facets:
+                rec = proposed_facets[facet.source_id]
+                taken |= shared_args_taken(facet, root, rec.get("constructorArgs"), declared)
+            if taken:
+                proposed["constructorArgs"] = taken
 
             runtime = selectors_runtime(facets, root)
             selectors_impl = None

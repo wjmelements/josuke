@@ -163,6 +163,26 @@ def test_struct_constructor_args_encode_and_match(tmp_path):
     assert "HEAD matches current ccccccc" in result.output
 
 
+def test_shared_constructor_args_are_not_asked_for(tmp_path):
+    entry = _entry([CONFIGURED]) | {"constructorArgs": ARGS}
+    result = _check(tmp_path, [entry])
+    assert result.exit_code == 0, result.output
+    assert "deploy asks for" not in result.output
+    assert "would deploy 1 facet\n" in result.output
+
+
+def test_chain_shared_args_match_a_facet_recorded_without_them(tmp_path):
+    record = _record(CONFIGURED, "0x" + "c0" * 20, ARGS)
+    del record["constructorArgs"]
+    entry = _entry([CONFIGURED], current={CONFIGURED: record}) | {
+        "constructorArgs": {"limits": {**ARGS["limits"], "level": 256}},  # overridden on chain 314
+    }
+    entry["deployments"]["314"]["constructorArgs"] = ARGS
+    result = _check(tmp_path, [entry])
+    assert result.exit_code == 0, result.output
+    assert f"UNCHANGED  {CONFIGURED}" in result.output
+
+
 def test_recorded_args_that_do_not_encode_fail(tmp_path):
     record = _record(CONFIGURED, "0x" + "c0" * 20, ARGS)
     record["constructorArgs"] = {"limits": {**ARGS["limits"], "level": 256}}
