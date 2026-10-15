@@ -17,6 +17,8 @@ class Response:
     def __init__(self, body, status_code=200):
         self._body = body
         self.status_code = status_code
+        self.text = json_module.dumps(body)
+        self.headers = {}
 
     def json(self):
         return self._body
@@ -70,9 +72,10 @@ def test_rpc_batch_fails_when_node_rejects_the_batch(post):
 
 
 def test_rpc_batch_fails_on_http_error(post):
-    post["response"] = Response(None, status_code=502)
-    with pytest.raises(ethjsonrpc.RpcError, match="HTTP 502"):
+    post["response"] = Response(None, status_code=500)
+    with pytest.raises(ethjsonrpc.RpcError, match="HTTP 500") as failure:
         ethjsonrpc.rpc_batch([("eth_chainId", [])])
+    assert failure.value.status == 500
 
 
 def _storage_batch(count: int) -> list[dict]:
@@ -167,24 +170,27 @@ def test_a_rejected_batch_of_one_fails(node):
         ethjsonrpc.post_batch(_storage_batch(1))
 
 
-# -32005 also means a node is overloaded, or rate-limits, rather than that a batch is too large.
+# -32005 also means a node is overloaded, or rate-limits, rather than that a batch is too
+# large; each overload with the number of times the batch is sent before failing.
 OVERLOADS = {
-    "erigon": lambda batch: (503, _error(-32005, "server overloaded, retry later")),
-    "erigon database": lambda batch: (
-        503, [_error(-32005, "server overloaded, retry later", req["id"]) for req in batch]
+    "erigon": (lambda batch: (503, _error(-32005, "server overloaded, retry later")), 5),
+    "erigon database": (
+        lambda batch: (503, [_error(-32005, "server overloaded, retry later", req["id"]) for req in batch]),
+        5,
     ),
-    "rate limit": lambda batch: (429, _error(-32005, "Too many requests")),
-    # As besu rejects too large a batch, but for some other limit.
-    "limit over HTTP 200": lambda batch: (200, _error(-32005, "Too many requests")),
+    "rate limit": (lambda batch: (429, _error(-32005, "Too many requests")), 5),
+    # As besu rejects too large a batch, but for some other limit: not resent.
+    "limit over HTTP 200": (lambda batch: (200, _error(-32005, "Too many requests")), 1),
 }
 
 
-@pytest.mark.parametrize("overload", OVERLOADS.values(), ids=OVERLOADS.keys())
-def test_an_overloaded_node_fails_the_batch_without_shrinking_it(node, overload):
+@pytest.mark.parametrize("overload, tries", OVERLOADS.values(), ids=OVERLOADS.keys())
+def test_an_overloaded_node_fails_the_batch_after_resends_without_shrinking_it(node, overload, tries, sleeps):
     node.limit, node.reject = 30, overload
     with pytest.raises(ethjsonrpc.RpcError, match="ETH_RPC_URL: "):
         ethjsonrpc.post_batch(_storage_batch(70))
-    assert node.posts == [70]
+    assert node.posts == [70] * tries
+    assert len(sleeps) == tries - 1
 
 
 def test_requests_limited_by_other_than_size_are_answered_as_errors(node):
@@ -208,11 +214,17 @@ def test_a_request_answered_with_no_json_rpc_answer_fails(post, text):
         ethjsonrpc.rpc("eth_chainId", [])
 
 
-@pytest.mark.parametrize("status", [200, 503])
-def test_a_batch_answered_with_no_json_fails(post, status):
-    post["response"] = FakeResponse(status, "<html>Service Unavailable</html>")
-    with pytest.raises(ethjsonrpc.RpcError, match=f"HTTP {status}, not JSON: <html>Service Unavailable"):
+def test_a_batch_answered_with_no_json_fails(post):
+    post["response"] = FakeResponse(200, "<html>Service Unavailable</html>")
+    with pytest.raises(ethjsonrpc.RpcError, match="HTTP 200, not JSON: <html>Service Unavailable"):
         ethjsonrpc.rpc_batch([("eth_chainId", []), ("eth_blockNumber", [])])
+
+
+def test_a_batch_answered_with_a_proxy_page_fails_after_resends(post, sleeps):
+    post["response"] = FakeResponse(503, "<html>Service Unavailable</html>")
+    with pytest.raises(ethjsonrpc.RpcError, match="HTTP 503: <html>Service Unavailable"):
+        ethjsonrpc.rpc_batch([("eth_chainId", []), ("eth_blockNumber", [])])
+    assert len(sleeps) == 4
 
 
 # -- reaching the node ---------------------------------------------------------
@@ -256,7 +268,7 @@ CALLS = {"rpc": lambda: ethjsonrpc.rpc("eth_chainId", []), "batch": lambda: ethj
 @pytest.mark.timeout(2)
 @pytest.mark.parametrize("call", CALLS.values(), ids=CALLS.keys())
 def test_a_node_too_slow_to_answer_fails(listener, call):
-    with pytest.raises(ethjsonrpc.RpcError) as failure:
+    with pytest.raises(ethjsonrpc.RpcTimeout) as failure:
         call()
     assert failure.value.message == "ETH_RPC_URL: no answer within 0.05s (ETH_RPC_TIMEOUT)"
 
@@ -333,3 +345,68 @@ def test_code_at_a_block_is_not_cached(chain):
     ethjsonrpc.eth_get_code(CONTRACT, "0x5")
     ethjsonrpc.eth_get_code(CONTRACT, "0x5")
     assert _code_requests(chain) == [[CONTRACT, "0x5"], [CONTRACT, "0x5"]]
+
+
+# -- resending what a node can't serve now ------------------------------------
+
+
+@pytest.fixture
+def answers(monkeypatch):
+    """Answer each POST with the next of the responses appended to the list returned."""
+    monkeypatch.setenv("ETH_RPC_URL", "http://mock.rpc")
+    monkeypatch.setattr(ethjsonrpc, "_batch_limits", {})
+    queued = []
+    monkeypatch.setattr(ethjsonrpc, "post", lambda url, json, timeout: queued.pop(0))
+    return queued
+
+
+def _chain_id(id=1):
+    return FakeResponse(200, json_module.dumps({"jsonrpc": "2.0", "id": id, "result": "0x13a"}))
+
+
+def test_a_rate_limited_request_waits_as_retry_after_asks(answers, sleeps):
+    answers += [FakeResponse(429, "Too Many Requests", {"Retry-After": "3"}), _chain_id()]
+    assert ethjsonrpc.rpc("eth_chainId", []) == "0x13a"
+    assert sleeps == [3.0]
+
+
+def test_retry_after_is_capped(answers, sleeps):
+    answers += [FakeResponse(429, "Too Many Requests", {"Retry-After": "3600"}), _chain_id()]
+    ethjsonrpc.rpc("eth_chainId", [])
+    assert sleeps == [ethjsonrpc._MAX_WAIT]
+
+
+def test_backoff_doubles_with_jitter(answers, sleeps):
+    # Without Retry-After, or with an HTTP date, the wait about doubles each time.
+    unavailable = FakeResponse(503, "Service Unavailable", {"Retry-After": "Wed, 21 Oct 2026 07:28:00 GMT"})
+    answers += [unavailable, FakeResponse(502, "Bad Gateway"), FakeResponse(503, "Service Unavailable"), _chain_id()]
+    assert ethjsonrpc.rpc("eth_chainId", []) == "0x13a"
+    assert [base / 2 <= wait <= base for wait, base in zip(sleeps, [1, 2, 4])] == [True] * 3
+
+
+@pytest.mark.parametrize("status, tries", [(429, 5), (502, 5), (503, 5), (504, 2), (500, 1)])
+def test_a_request_fails_after_its_tries(answers, sleeps, status, tries):
+    # A 504 may mean the request is too heavy to answer in time; the caller may lighten it.
+    answers += [FakeResponse(status, "")] * 6
+    with pytest.raises(ethjsonrpc.RpcError, match=f"eth_chainId: HTTP {status}") as failure:
+        ethjsonrpc.rpc("eth_chainId", [])
+    assert failure.value.status == status
+    assert len(answers) == 6 - tries
+    assert len(sleeps) == tries - 1
+
+
+def test_a_rate_limited_batch_is_resent_whole(answers, sleeps):
+    batch = [FakeResponse(200, json_module.dumps([{"jsonrpc": "2.0", "id": i, "result": hex(i)} for i in range(2)]))]
+    answers += [FakeResponse(429, "Too Many Requests", {"Retry-After": "1"}), FakeResponse(503, ""), *batch]
+    assert ethjsonrpc.rpc_batch([("eth_chainId", []), ("eth_blockNumber", [])]) == ["0x0", "0x1"]
+    assert sleeps[0] == 1.0 and len(sleeps) == 2
+    assert ethjsonrpc._batch_limits == {}  # not taken for too large a batch
+
+
+def test_a_batch_fails_after_its_tries(answers, sleeps):
+    answers += [FakeResponse(504, "Gateway Timeout")] * 3
+    with pytest.raises(ethjsonrpc.RpcError, match="ETH_RPC_URL: HTTP 504: Gateway Timeout") as failure:
+        ethjsonrpc.rpc_batch([("eth_chainId", [])])
+    assert failure.value.status == 504
+    assert len(answers) == 1
+

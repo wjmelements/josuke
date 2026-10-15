@@ -27,9 +27,10 @@ def norm_slot(s: str) -> str:
 
 
 class FakeResponse:
-    def __init__(self, status_code, text):
+    def __init__(self, status_code, text, headers=None):
         self.status_code = status_code
         self.text = text
+        self.headers = headers or {}
 
     def json(self):
         return json.loads(self.text)

@@ -25,6 +25,7 @@ from eth_utils import keccak, to_checksum_address
 
 from .ethjsonrpc import (
     RpcError,
+    RpcTimeout,
     brief,
     chain_id,
     eth_block_number,
@@ -192,6 +193,12 @@ def _log_list(answer: dict, lo: int, hi: int) -> list[dict]:
     return result
 
 
+def _narrowable(e: RpcError) -> bool:
+    """Whether a narrower query may avoid `e`, which outlasted resends: an HTTP failure or
+    timeout, as for a query too heavy to answer in time, but not a rate limit."""
+    return isinstance(e, RpcTimeout) or e.status not in (None, 429)
+
+
 def get_logs(proxy: str, from_block: int, to_block: int) -> tuple[list[dict], list[tuple[int, int]]]:
     """Every SelectorDelegated / DiamondDelegateCall log `proxy` emitted in the
     inclusive range that the node holds, oldest first, and the block ranges whose
@@ -202,7 +209,8 @@ def get_logs(proxy: str, from_block: int, to_block: int) -> tuple[list[dict], li
     or a window is known to fit (see `_narrow`); the rest is sent as windows of
     that width in batches, one round trip each. A window rejected in a batch
     narrows the same way into the next batch, so a stretch dense with logs
-    doesn't shrink the windows elsewhere.
+    doesn't shrink the windows elsewhere. A query or batch that fails over HTTP or
+    times out narrows too (see `_narrowable`).
 
     Missing history (pruned, or events never indexed) is assumed missing from the
     start: blocks before the first one held are reported, and the rest scanned. A
@@ -227,7 +235,9 @@ def get_logs(proxy: str, from_block: int, to_block: int) -> tuple[list[dict], li
         try:
             answer = post_request(eth_get_logs_request(proxy, topics, lo, hi))
             error = answer.get("error")
-        except RpcError as e:  # an HTTP failure, which a narrower query may avoid
+        except RpcError as e:
+            if not _narrowable(e):
+                raise
             error = e.message
         if not error:
             logs.extend(_log_list(answer, lo, hi))
@@ -247,7 +257,13 @@ def get_logs(proxy: str, from_block: int, to_block: int) -> tuple[list[dict], li
 
     while queue:
         requests = [eth_get_logs_request(proxy, topics, a, b, i) for i, (a, b) in enumerate(queue)]
-        answers = post_batch(requests)
+        try:
+            answers = post_batch(requests)
+        except RpcError as e:
+            if not _narrowable(e):
+                raise
+            queue = [window for a, b in queue for window in _narrow(e.message, a, b)[0]]
+            continue
         retry, lacking = [], []
         for i, (a, b) in enumerate(queue):
             if not (error := answers[i].get("error")):

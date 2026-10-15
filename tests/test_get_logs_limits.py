@@ -274,7 +274,44 @@ def test_http_failure_halves(node):
         return answer(url, *args, **kwargs)
 
     with patch("josuke.ethjsonrpc.post", gateway):
-        assert _scan(node, 0, 49) == ([0, 30], [(0, 49), (0, 24), [(25, 49)]])
+        # A 504 is resent once before the query narrows.
+        assert _scan(node, 0, 49) == ([0, 30], [(0, 49), (0, 49), (0, 24), [(25, 49)]])
+
+
+def _failing_over_http(node, status, fails):
+    """`node` behind a gateway answering `status` to any POST `fails` picks out by its
+    queries' (fromBlock, toBlock)s."""
+    answer = node.__call__
+
+    def gateway(url, *args, **kwargs):
+        payload = kwargs["json"]
+        ranges = [_range(r) for r in payload] if isinstance(payload, list) else [_range(payload)]
+        if fails(ranges):
+            node.calls.append(payload)
+            return FakeResponse(status, "")
+        return answer(url, *args, **kwargs)
+
+    return patch("josuke.ethjsonrpc.post", gateway)
+
+
+def test_batch_http_failure_narrows(node):
+    # Windows of the stated cap time out at the gateway as a batch; halves don't.
+    _log_at(node, 0, 450, 999)
+    node.get_logs_limit = _range_limit(-32602, "exceed maximum block range {limit}")
+    with _failing_over_http(node, 504, lambda ranges: len(ranges) > 1 and ranges[0][1] - ranges[0][0] >= 50):
+        blocks, sent = _scan(node, 0, 999)
+    assert blocks == [0, 450, 999]
+    assert sent == [(0, 999), _windows(0, 999, 100), _windows(0, 999, 100), _windows(0, 999, 50)]
+
+
+@pytest.mark.parametrize("batched", [False, True])
+def test_rate_limit_is_not_narrowed(node, batched):
+    # Narrower queries are only more queries.
+    node.get_logs_limit = _range_limit(-32602, "exceed maximum block range {limit}")
+    with _failing_over_http(node, 429, lambda ranges: (len(ranges) > 1) == batched):
+        with pytest.raises(RpcError, match="HTTP 429"):
+            audit.get_logs(PROXY, 0, 999)
+    assert len(node.calls) == 5 + batched
 
 
 def test_single_block_failure_propagates(node):

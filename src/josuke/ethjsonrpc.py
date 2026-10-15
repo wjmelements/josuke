@@ -1,7 +1,10 @@
 """Ethereum JSON-RPC access: the raw `rpc` call plus thin `eth_*` wrappers."""
 
+from itertools import count
 from math import isfinite
 from os import environ
+from random import uniform
+from time import sleep
 
 import click
 from requests import RequestException, Timeout, post
@@ -11,7 +14,16 @@ from .trace import brief, span
 
 
 class RpcError(click.ClickException):
-    """The node answered with an HTTP failure or a JSON-RPC error, or couldn't be reached."""
+    """The node answered with an HTTP failure or a JSON-RPC error, or couldn't be reached.
+    `status` is the HTTP failure's status, if that is what it was."""
+
+    def __init__(self, message: str, status: int | None = None):
+        super().__init__(message)
+        self.status = status
+
+
+class RpcTimeout(RpcError):
+    """No answer within ETH_RPC_TIMEOUT."""
 
 
 # Foundry's default for ETH_RPC_TIMEOUT (REQUEST_TIMEOUT in foundry-common).
@@ -42,7 +54,7 @@ def _post(url: str, body):
     except ValueError:  # requests' InvalidSchema, MissingSchema and InvalidURL, or urllib's
         raise RpcError("ETH_RPC_URL: not an http(s) URL") from None
     except Timeout:
-        raise RpcError(f"ETH_RPC_URL: no answer within {seconds:g}s (ETH_RPC_TIMEOUT)") from None
+        raise RpcTimeout(f"ETH_RPC_URL: no answer within {seconds:g}s (ETH_RPC_TIMEOUT)") from None
     except RequestException as e:
         # The socket's error, e.g. "[Errno 61] Connection refused", is the first OSError
         # in the chain below requests' and urllib3's, whose messages show the url.
@@ -53,6 +65,26 @@ def _post(url: str, body):
                 break
             cause = cause.__cause__ or cause.__context__
         raise RpcError(f"ETH_RPC_URL: cannot reach the node: {reason}") from None
+
+
+# Statuses a node or gateway answers with when it can't serve a request now, and how many
+# times a request answered with one is sent in all. A 504 may instead mean the request is
+# too heavy to answer in time, which only a lighter one avoids, so it is resent less.
+_TRIES = {429: 5, 502: 5, 503: 5, 504: 2}
+_BACKOFF = 1.0  # seconds before the first resend, about doubling for each one after
+_MAX_WAIT = 60.0  # the longest wait before a resend, even if Retry-After asks for longer
+
+
+def _wait(response, attempt: int) -> None:
+    """Sleep before resending a request `response` failed, after `attempt` resends: as
+    long as its Retry-After asks in seconds, else an exponential backoff with jitter."""
+    try:
+        seconds = float(response.headers.get("Retry-After", ""))
+    except ValueError:  # absent, or an HTTP date
+        seconds = float("nan")
+    if not (isfinite(seconds) and seconds >= 0):
+        seconds = _BACKOFF * 2**attempt * uniform(0.5, 1)
+    sleep(min(seconds, _MAX_WAIT))
 
 
 def rpc(method: str, params: list):
@@ -75,11 +107,16 @@ def rpc_batch(calls: list[tuple[str, list]]) -> list:
 
 
 def post_request(request: dict, label: str = "rpc") -> dict:
-    """The node's answer to one JSON-RPC request, which may be an error; `label` heads its trace span."""
-    with span(f"{label} {request['method']} {brief(request.get('params', []))}"):
-        response = _post(environ["ETH_RPC_URL"], request)
-    if response.status_code != 200:
-        raise RpcError(f"{request['method']}: HTTP {response.status_code}")
+    """The node's answer to one JSON-RPC request, which may be an error; `label` heads its
+    trace span. A request the node can't serve now is resent after a backoff (see `_TRIES`)."""
+    for attempt in count():
+        with span(f"{label} {request['method']} {brief(request.get('params', []))}"):
+            response = _post(environ["ETH_RPC_URL"], request)
+        if response.status_code == 200:
+            break
+        if attempt + 1 >= _TRIES.get(response.status_code, 1):
+            raise RpcError(f"{request['method']}: HTTP {response.status_code}", response.status_code)
+        _wait(response, attempt)
     try:
         answer = response.json()
     except ValueError:
@@ -121,17 +158,18 @@ def _too_large(answer, codes: set[int]) -> bool:
 
 def _post_chunk(url: str, chunk: list[dict], label: str):
     """POST one batch; the response and its decoded body. It may come back with 413 or
-    503, which nodes also send when a batch is too large, and a 413 may not be JSON."""
+    503, which nodes also send when a batch is too large, or another status a node can't
+    serve it now with (see `_TRIES`); none of those need be JSON."""
     calls = ", ".join(f"{req['method']} {brief(req.get('params', []))}" for req in chunk)
     with span(f"{label} [{len(chunk)}] {calls}"):
         response = _post(url, chunk)
-    if response.status_code not in (200, 413, 503):
-        raise RpcError(f"ETH_RPC_URL: HTTP {response.status_code}")
+    if response.status_code not in (200, 413, *_TRIES):
+        raise RpcError(f"ETH_RPC_URL: HTTP {response.status_code}", response.status_code)
     try:
         body = response.json()
     except ValueError:
-        if response.status_code != 413:  # a proxy's own page for too large a body
-            raise RpcError(f"ETH_RPC_URL: HTTP {response.status_code}, not JSON: {brief(response.text)}") from None
+        if response.status_code == 200:  # else a proxy's own page
+            raise RpcError(f"ETH_RPC_URL: HTTP 200, not JSON: {brief(response.text)}") from None
         body = None
     return response, body
 
@@ -139,10 +177,12 @@ def _post_chunk(url: str, chunk: list[dict], label: str):
 def post_batch(batch: list[dict], label: str = "rpc") -> dict:
     """The node's answer to each request of `batch`, by id; an answer may be an error.
     It is sent in batches of at most the node's limit, and a batch the node finds too
-    large is halved and resent. `label` heads each batch's trace span."""
+    large is halved and resent, and one it can't serve now is resent after a backoff (see
+    `_TRIES`). `label` heads each batch's trace span."""
     url = environ["ETH_RPC_URL"]
     answers = {}
     pending = list(batch)
+    attempt = 0  # resends of the batch at the head of `pending`
     while pending:
         chunk = pending[: _batch_limits.get(url, _BATCH_LIMIT)]
         response, body = _post_chunk(url, chunk, label)
@@ -156,9 +196,15 @@ def post_batch(batch: list[dict], label: str = "rpc") -> dict:
             _batch_limits[url] = len(chunk) // 2
             continue
         if response.status_code != 200:
-            # Overloaded (erigon and nethermind answer 503), not too large a batch.
+            # Overloaded (erigon and nethermind answer 503) or rate-limited, not too large a batch.
+            if attempt + 1 < _TRIES[response.status_code]:
+                _wait(response, attempt)
+                attempt += 1
+                continue
             errors = [error["message"] for answer in fetched if (error := _error(answer)) and "message" in error]
-            raise RpcError(f"ETH_RPC_URL: HTTP {response.status_code}: {errors[0] if errors else body}")
+            detail = errors[0] if errors else body if body is not None else brief(response.text)
+            raise RpcError(f"ETH_RPC_URL: HTTP {response.status_code}: {detail}", response.status_code)
+        attempt = 0
         if missing:
             methods = ", ".join(req["method"] for req in missing)
             raise RpcError(f"ETH_RPC_URL: no answer to {methods} in a batch: {body}")

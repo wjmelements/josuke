@@ -65,3 +65,13 @@ def _fresh_code_cache():
     ethjsonrpc._codes.clear()
     yield
     ethjsonrpc._codes.clear()
+
+
+@pytest.fixture(autouse=True)
+def sleeps(monkeypatch):
+    """Backoffs before resending a request don't wait; each one's seconds are kept."""
+    from josuke import ethjsonrpc
+
+    waited = []
+    monkeypatch.setattr(ethjsonrpc, "sleep", waited.append)
+    return waited
