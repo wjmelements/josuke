@@ -377,6 +377,16 @@ def test_besu_pruned_history(node):
     _reports_missing_history(node, 4444, "Pruned history unavailable")
 
 
+def test_pruned_history_code_alone(node):
+    # A client may word EIP-4444's error its own way.
+    _reports_missing_history(node, 4444, "history expired")
+
+
+def test_pruned_history_words_alone(node):
+    # A proxy may replace the code and keep only the message.
+    _reports_missing_history(node, -32000, "pruned history unavailable")
+
+
 def test_lotus_events_not_indexed(node):
     _reports_missing_history(
         node, 1, "failed to get events for filter: failed to get events for filter from chain indexer: not found in index"
