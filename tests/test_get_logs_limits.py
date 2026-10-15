@@ -283,6 +283,26 @@ def test_single_block_failure_propagates(node):
         audit.get_logs(PROXY, 5, 5)
 
 
+# Errors that sound like, or come from the same code as, missing history but aren't it.
+NOT_MISSING_HISTORY = [
+    # geth's log filter: a block above the node's head
+    (-32000, "header not found"),
+    # lotus-gateway: checkEpoch's other refusal, for a block above the head
+    (1, "bad tipset height: tipset height in future"),
+    # lotus: the not-indexed error's prefix, failing for some other reason
+    (1, "failed to get events for filter: failed to get events for filter from chain indexer: context deadline exceeded"),
+    # a provider's rate limit
+    (-32005, "Too many requests"),
+]
+
+
+@pytest.mark.parametrize("code, message", NOT_MISSING_HISTORY)
+def test_error_not_missing_history(node, code, message):
+    node.get_logs_limit = lambda lo, hi, logs: {"code": code, "message": message}
+    with pytest.raises(RpcError, match="block 5"):
+        audit.get_logs(PROXY, 5, 5)
+
+
 BAD_RESPONSES = [{}, {"result": None}, {"result": {}}, {"result": "0x"}]
 
 
