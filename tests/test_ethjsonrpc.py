@@ -289,6 +289,19 @@ def test_an_unreachable_node_fails_with_the_socket_error_and_not_the_url(listene
 HEAD = b"HTTP/1.1 200 OK\r\nContent-Length: 100\r\n\r\n"
 
 
+def _read_request(conn):
+    """Read all of a request, so the socket closes cleanly: Linux resets a connection
+    closed with data unread."""
+    data = b""
+    while b"\r\n\r\n" not in data:
+        data += conn.recv(65536)
+    head, body = data.split(b"\r\n\r\n", 1)
+    fields = dict(line.lower().split(b":", 1) for line in head.split(b"\r\n")[1:])
+    length = int(fields[b"content-length"])
+    while len(body) < length:
+        body += conn.recv(65536)
+
+
 def _reset(conn):
     conn.setsockopt(socket.SOL_SOCKET, socket.SO_LINGER, struct.pack("ii", 1, 0))  # close sends RST
 
@@ -314,7 +327,7 @@ def test_a_node_failing_a_request_it_took_fails(listener, call, steps, error, wo
     def node():
         conn, _ = listener.accept()
         with conn:
-            conn.recv(65536)
+            _read_request(conn)
             for step in steps:
                 step(conn)
             threading.Event().wait(linger)
