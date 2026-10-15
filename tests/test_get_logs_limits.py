@@ -21,8 +21,10 @@ Messages and codes are each client's, as of its default branch on 2026-10-12.
 from unittest.mock import patch
 
 import pytest
+import requests
+from urllib3.exceptions import ConnectTimeoutError, MaxRetryError, ProtocolError, ReadTimeoutError
 
-from ethrpc_mock import FakeResponse, MockEthRpc
+from ethrpc_mock import FakeResponse, MockEthRpc, chained
 from josuke import audit, ethjsonrpc
 from josuke.ethjsonrpc import RpcError
 
@@ -276,6 +278,53 @@ def test_http_failure_halves(node):
     with patch("josuke.ethjsonrpc.post", gateway):
         # A 504 is resent once before the query narrows.
         assert _scan(node, 0, 49) == ([0, 30], [(0, 49), (0, 49), (0, 24), [(25, 49)]])
+
+
+# How requests fails a POST the node took but didn't answer in full: a timeout or a reset
+# while reading the body. Each is a ConnectionError, not a Timeout.
+DROPPED = {
+    "body late": lambda: chained(
+        requests.ConnectionError("read timed out"), ReadTimeoutError(None, "", "read timed out"), TimeoutError()
+    ),
+    "reset": lambda: chained(
+        requests.exceptions.ChunkedEncodingError("connection broken"),
+        ProtocolError("Connection broken", ConnectionResetError(54, "Connection reset by peer")),
+        ConnectionResetError(54, "Connection reset by peer"),
+    ),
+}
+
+
+@pytest.mark.parametrize("failure", DROPPED.values(), ids=DROPPED.keys())
+def test_dropped_query_halves(node, failure):
+    _log_at(node, 0, 30)
+    answer = node.__call__
+
+    def gateway(url, *args, **kwargs):
+        query = kwargs["json"]
+        if isinstance(query, dict) and _range(query)[1] - _range(query)[0] >= 25:
+            node.calls.append(query)
+            raise failure()
+        return answer(url, *args, **kwargs)
+
+    with patch("josuke.ethjsonrpc.post", gateway):
+        assert _scan(node, 0, 49) == ([0, 30], [(0, 49), (0, 24), [(25, 49)]])
+
+
+def test_node_too_slow_to_connect_to_is_not_narrowed(node):
+    # requests' ConnectTimeout is a Timeout, but no query was sent, so a narrower one can't help.
+    def gateway(url, *args, **kwargs):
+        node.calls.append(kwargs["json"])
+        raise chained(
+            requests.ConnectTimeout("connect timed out"),
+            MaxRetryError(None, ""),
+            ConnectTimeoutError("connect timed out"),
+            TimeoutError("timed out"),
+        )
+
+    with patch("josuke.ethjsonrpc.post", gateway):
+        with pytest.raises(RpcError, match="cannot reach the node: timed out"):
+            audit.get_logs(PROXY, 0, 999)
+    assert len(node.calls) == 1
 
 
 def _failing_over_http(node, status, fails):

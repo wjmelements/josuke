@@ -7,7 +7,8 @@ from random import uniform
 from time import sleep
 
 import click
-from requests import RequestException, Timeout, post
+from requests import RequestException, post
+from urllib3.exceptions import ProtocolError, ReadTimeoutError
 
 from .proc import run
 from .trace import brief, span
@@ -24,6 +25,10 @@ class RpcError(click.ClickException):
 
 class RpcTimeout(RpcError):
     """No answer within ETH_RPC_TIMEOUT."""
+
+
+class RpcDropped(RpcError):
+    """The node took the request and closed the connection before answering in full."""
 
 
 # Foundry's default for ETH_RPC_TIMEOUT (REQUEST_TIMEOUT in foundry-common).
@@ -53,17 +58,23 @@ def _post(url: str, body):
         return post(url, json=body, timeout=seconds)
     except ValueError:  # requests' InvalidSchema, MissingSchema and InvalidURL, or urllib's
         raise RpcError("ETH_RPC_URL: not an http(s) URL") from None
-    except Timeout:
-        raise RpcTimeout(f"ETH_RPC_URL: no answer within {seconds:g}s (ETH_RPC_TIMEOUT)") from None
     except RequestException as e:
-        # The socket's error, e.g. "[Errno 61] Connection refused", is the first OSError
-        # in the chain below requests' and urllib3's, whose messages show the url.
-        reason, cause = type(e).__name__, e.__cause__ or e.__context__
+        # requests' error names the failure poorly: a timeout reading the body is a
+        # ConnectionError, not a Timeout, and a ConnectTimeout is both. urllib3's error
+        # below it says which, and below that the socket's, e.g. "[Errno 61] Connection
+        # refused", gives the reason; requests' and urllib3's messages show the url.
+        reason, failure, cause = type(e).__name__, None, e.__cause__ or e.__context__
         while cause is not None:
+            if isinstance(cause, ReadTimeoutError):
+                raise RpcTimeout(f"ETH_RPC_URL: no answer within {seconds:g}s (ETH_RPC_TIMEOUT)") from None
+            if isinstance(cause, ProtocolError):
+                failure, reason = RpcDropped, str(cause.args[0])
             if isinstance(cause, OSError) and not isinstance(cause, RequestException):
                 reason = str(cause)
                 break
             cause = cause.__cause__ or cause.__context__
+        if failure:
+            raise RpcDropped(f"ETH_RPC_URL: the node dropped the connection: {reason}") from None
         raise RpcError(f"ETH_RPC_URL: cannot reach the node: {reason}") from None
 
 

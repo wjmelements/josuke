@@ -2,12 +2,15 @@
 
 import json as json_module
 import socket
+import struct
+import threading
 
 import click
 import pytest
 import requests
+from urllib3.exceptions import ConnectTimeoutError, MaxRetryError
 
-from ethrpc_mock import FakeResponse, MockEthRpc
+from ethrpc_mock import FakeResponse, MockEthRpc, chained
 from josuke import ethjsonrpc
 
 ACCOUNT = "0x" + "aa" * 20
@@ -281,6 +284,61 @@ def test_an_unreachable_node_fails_with_the_socket_error_and_not_the_url(listene
         call()
     assert failure.value.message.startswith("ETH_RPC_URL: cannot reach the node: [Errno ")
     assert "Connection refused" in failure.value.message and "SECRET" not in failure.value.message
+
+
+HEAD = b"HTTP/1.1 200 OK\r\nContent-Length: 100\r\n\r\n"
+
+
+def _reset(conn):
+    conn.setsockopt(socket.SOL_SOCKET, socket.SO_LINGER, struct.pack("ii", 1, 0))  # close sends RST
+
+
+# What the node does with a request it took, and how that fails.
+FAILURES = {
+    "headers late": ([lambda conn: None], ethjsonrpc.RpcTimeout, "no answer within 0.05s"),
+    # requests raises a ConnectionError, not a Timeout, for these
+    "body late": ([lambda conn: conn.sendall(HEAD + b'{"re')], ethjsonrpc.RpcTimeout, "no answer within 0.05s"),
+    "reset": ([_reset], ethjsonrpc.RpcDropped, "Connection reset"),
+    "reset in body": ([lambda conn: conn.sendall(HEAD + b'{"re'), _reset], ethjsonrpc.RpcDropped, "Connection reset"),
+    "closed in body": ([lambda conn: conn.sendall(HEAD + b'{"re')], ethjsonrpc.RpcDropped, "IncompleteRead"),
+}
+
+
+@pytest.mark.timeout(2)
+@pytest.mark.parametrize("call", CALLS.values(), ids=CALLS.keys())
+@pytest.mark.parametrize("steps, error, words", FAILURES.values(), ids=FAILURES.keys())
+def test_a_node_failing_a_request_it_took_fails(listener, call, steps, error, words):
+    # Late answers outlast ETH_RPC_TIMEOUT before the connection closes.
+    linger = 0.2 if error is ethjsonrpc.RpcTimeout else 0
+
+    def node():
+        conn, _ = listener.accept()
+        with conn:
+            conn.recv(65536)
+            for step in steps:
+                step(conn)
+            threading.Event().wait(linger)
+
+    thread = threading.Thread(target=node)
+    thread.start()
+    with pytest.raises(error) as failure:
+        call()
+    thread.join()
+    assert type(failure.value) is error
+    assert words in failure.value.message and "SECRET" not in failure.value.message
+
+
+def test_a_node_too_slow_to_connect_to_cannot_be_reached(post):
+    post["response"] = chained(
+        requests.ConnectTimeout("HTTPConnectionPool(host='node', port=80): /SECRET"),
+        MaxRetryError(None, "/SECRET"),
+        ConnectTimeoutError("Connection to node timed out. (connect timeout=0.05)"),
+        TimeoutError("timed out"),
+    )
+    with pytest.raises(ethjsonrpc.RpcError) as failure:
+        ethjsonrpc.rpc("eth_chainId", [])
+    assert type(failure.value) is ethjsonrpc.RpcError
+    assert failure.value.message == "ETH_RPC_URL: cannot reach the node: timed out"
 
 
 def test_a_url_requests_cannot_post_to_fails(post):

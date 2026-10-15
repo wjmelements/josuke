@@ -24,6 +24,7 @@ from eth_abi.exceptions import DecodingError
 from eth_utils import keccak, to_checksum_address
 
 from .ethjsonrpc import (
+    RpcDropped,
     RpcError,
     RpcTimeout,
     brief,
@@ -194,9 +195,10 @@ def _log_list(answer: dict, lo: int, hi: int) -> list[dict]:
 
 
 def _narrowable(e: RpcError) -> bool:
-    """Whether a narrower query may avoid `e`, which outlasted resends: an HTTP failure or
-    timeout, as for a query too heavy to answer in time, but not a rate limit."""
-    return isinstance(e, RpcTimeout) or e.status not in (None, 429)
+    """Whether a narrower query may avoid `e`, which outlasted resends: an HTTP failure, a
+    timeout or a dropped connection, as for a query too heavy to answer in time, but not
+    a rate limit or a node that can't be reached."""
+    return isinstance(e, (RpcTimeout, RpcDropped)) or e.status not in (None, 429)
 
 
 def get_logs(proxy: str, from_block: int, to_block: int) -> tuple[list[dict], list[tuple[int, int]]]:
@@ -209,8 +211,8 @@ def get_logs(proxy: str, from_block: int, to_block: int) -> tuple[list[dict], li
     or a window is known to fit (see `_narrow`); the rest is sent as windows of
     that width in batches, one round trip each. A window rejected in a batch
     narrows the same way into the next batch, so a stretch dense with logs
-    doesn't shrink the windows elsewhere. A query or batch that fails over HTTP or
-    times out narrows too (see `_narrowable`).
+    doesn't shrink the windows elsewhere. A query or batch that fails over HTTP, times
+    out or is dropped narrows too (see `_narrowable`).
 
     Missing history (pruned, or events never indexed) is assumed missing from the
     start: blocks before the first one held are reported, and the rest scanned. A

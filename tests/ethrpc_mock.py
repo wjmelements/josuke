@@ -18,6 +18,14 @@ class RpcFault(Exception):
         self.error = error
 
 
+def chained(*errors: BaseException) -> BaseException:
+    """The first of `errors`, as if raised while handling the second, and so on, as
+    requests raises its errors over urllib3's over the socket's."""
+    for outer, inner in zip(errors, errors[1:]):
+        outer.__context__ = inner
+    return errors[0]
+
+
 def norm_addr(a: str) -> str:
     return a.lower()
 
