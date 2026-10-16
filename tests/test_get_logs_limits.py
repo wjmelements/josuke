@@ -353,6 +353,26 @@ def test_batch_http_failure_narrows(node):
     assert sent == [(0, 999), _windows(0, 999, 100), _windows(0, 999, 100), _windows(0, 999, 50)]
 
 
+def test_batch_http_failure_keeps_single_block_windows(node):
+    # The tail of 0-1000 in windows of 100 is one block, which can't narrow; the
+    # batch's failure isn't its own, so it rides along while the rest halve.
+    _log_at(node, 0, 450, 1000)
+    node.get_logs_limit = _range_limit(-32602, "exceed maximum block range {limit}")
+    with _failing_over_http(node, 504, lambda ranges: len(ranges) > 1 and ranges[0][1] - ranges[0][0] >= 50):
+        blocks, sent = _scan(node, 0, 1000)
+    assert blocks == [0, 450, 1000]
+    tail = [(1000, 1000)]
+    assert sent == [(0, 1000), _windows(0, 999, 100) + tail, _windows(0, 999, 100) + tail, _windows(0, 999, 50) + tail]
+
+
+def test_batch_http_failure_of_single_blocks_propagates(node):
+    node.get_logs_limit = _range_limit(-32602, "exceed maximum block range {limit}", 0)
+    with _failing_over_http(node, 504, lambda ranges: len(ranges) > 1):
+        with pytest.raises(RpcError, match="HTTP 504"):
+            audit.get_logs(PROXY, 0, 9)
+    assert len(node.calls) == 1 + 2  # the probe, then the batch of single blocks and its resend
+
+
 @pytest.mark.parametrize("batched", [False, True])
 def test_rate_limit_is_not_narrowed(node, batched):
     # Narrower queries are only more queries.

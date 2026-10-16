@@ -265,9 +265,11 @@ def get_logs(proxy: str, from_block: int, to_block: int) -> tuple[list[dict], li
         try:
             answers = post_batch(requests)
         except RpcError as e:
-            if not _narrowable(e):
+            # The batch failed, not any one window, so a single block rides along
+            # while the rest narrow; once all are single blocks, nothing narrows.
+            if not _narrowable(e) or all(a == b for a, b in queue):
                 raise
-            queue = [window for a, b in queue for window in _narrow(e.message, a, b)[0]]
+            queue = [window for a, b in queue for window in (_narrow(e.message, a, b)[0] if a < b else [(a, b)])]
             continue
         retry, lacking = [], []
         for i, (a, b) in enumerate(queue):
