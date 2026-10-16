@@ -475,7 +475,10 @@ def _initcode_hash(
 
 
 def _arg_changes(old: dict, new: dict | None) -> str:
-    changes = [f"{name} {old[name]} -> {value}" for name, value in (new or {}).items() if name in old and old[name] != value]
+    new = new or {}
+    changes = [f"{name} {old[name]} -> {value}" for name, value in new.items() if name in old and old[name] != value]
+    changes += [f"+{name} {value}" for name, value in new.items() if name not in old]
+    changes += [f"-{name} {old[name]}" for name in old if name not in new]
     return f"  args {'; '.join(changes)}" if changes else ""
 
 

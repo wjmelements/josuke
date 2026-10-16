@@ -180,6 +180,23 @@ def test_declaration_wins_over_the_record_and_shows_the_change(tmp_path):
     assert f"args limits {ARGS['limits']} -> {changed['limits']}" in result.output
 
 
+def test_changed_facet_shows_an_added_constructor_arg(tmp_path):
+    record = {"address": "0x" + "c0" * 20, "codeHash": "0x" + "00" * 32, "initcodeHash": "0x" + "11" * 32}
+    entry = _entry([CONFIGURED], current={CONFIGURED: record}) | {"constructorArgs": ARGS}
+    result = _check(tmp_path, [entry])
+    assert result.exit_code == 0, result.output
+    assert f"CHANGED    {CONFIGURED}" in result.output
+    assert f"args +limits {ARGS['limits']}" in result.output
+
+
+def test_changed_facet_shows_a_removed_constructor_arg(tmp_path):
+    record = _record(OWNABLE, "0x" + "0a" * 20) | {"initcodeHash": "0x" + "11" * 32, "constructorArgs": {"owner": 1}}
+    result = _check(tmp_path, [_entry([OWNABLE], current={OWNABLE: record})])
+    assert result.exit_code == 0, result.output
+    assert f"CHANGED    {OWNABLE}" in result.output
+    assert "args -owner 1" in result.output
+
+
 def test_facet_declaration_wins_over_a_proxy_one(tmp_path):
     entry = _entry([CONFIGURED], current={CONFIGURED: _record(CONFIGURED, "0x" + "c0" * 20, ARGS)}) | {
         "constructorArgs": {"limits": {**ARGS["limits"], "level": 256}},  # does not encode
