@@ -24,7 +24,6 @@ from eth_abi.exceptions import DecodingError
 from eth_utils import keccak, to_checksum_address
 
 from .ethjsonrpc import (
-    RpcDropped,
     RpcError,
     RpcTimeout,
     brief,
@@ -200,10 +199,10 @@ def _log_list(answer: dict, lo: int, hi: int) -> list[dict]:
 
 
 def _narrowable(e: RpcError) -> bool:
-    """Whether a narrower query may avoid `e`, which outlasted resends: an HTTP failure, a
-    timeout or a dropped connection, as for a query too heavy to answer in time, but not
-    a rate limit or a node that can't be reached."""
-    return isinstance(e, (RpcTimeout, RpcDropped)) or e.status not in (None, 429)
+    """Whether a narrower query may avoid `e`, which outlasted resends: only no answer in
+    time, from the node or a gateway's 504, as for a query too heavy to answer. A node
+    that is down, overloaded or rate-limiting fails the same at any width."""
+    return isinstance(e, RpcTimeout) or e.status == 504
 
 
 def get_logs(proxy: str, from_block: int, to_block: int) -> tuple[list[dict], list[tuple[int, int]]]:
@@ -215,8 +214,9 @@ def get_logs(proxy: str, from_block: int, to_block: int) -> tuple[list[dict], li
     its own words. The whole range is queried first; each window the node rejects
     narrows (see `_narrow`), and the windows go out together in the next batch, one
     round trip each, so a stretch dense with logs doesn't shrink the windows
-    elsewhere. A batch that fails over HTTP, times out or is dropped narrows each of
-    its windows (see `_narrowable`).
+    elsewhere. A batch without an answer in time narrows the windows it sent (see
+    `_narrowable`); those not yet sent wait, so a node that never answers fails
+    before the queue grows by more than one batch a round.
 
     Missing history (pruned, or events never indexed) is assumed missing from the
     start: blocks before the first one held are reported, and the rest scanned. A
@@ -239,19 +239,23 @@ def get_logs(proxy: str, from_block: int, to_block: int) -> tuple[list[dict], li
     first_held: int | None = None  # lowest block a query succeeded from
     while queue:
         requests = [eth_get_logs_request(proxy, topics, a, b, i) for i, (a, b) in enumerate(queue)]
+        unanswered: set[int] = set()  # sent in a batch without an answer in time
         try:
             # One window needs no batch, which some providers refuse.
             answers = post_batch(requests) if len(requests) > 1 else {0: post_request(requests[0])}
         except RpcError as e:
-            # The batch failed, not any one window, so a single block rides along
-            # while the rest narrow; once all are single blocks, nothing narrows.
-            if not _narrowable(e) or all(a == b for a, b in queue):
+            # The batch failed, not any one window, so a single block rides along while the
+            # rest narrow; once all are single blocks, nothing narrows. Windows the node
+            # answered before it are kept, and those not yet sent wait as they are.
+            failed = e.failed or [0]
+            if not _narrowable(e) or all(queue[i][0] == queue[i][1] for i in failed):
                 raise
-            queue = [window for a, b in queue for window in (_narrow(e.message, a, b) if a < b else [(a, b)])]
-            continue
+            answers, unanswered, timeout = e.answers, set(failed), e.message
         retry, lacking = [], []
         for i, (a, b) in enumerate(queue):
-            if not (error := answers[i].get("error")):
+            if i not in answers:
+                retry.extend(_narrow(timeout, a, b) if i in unanswered and a < b else [(a, b)])
+            elif not (error := answers[i].get("error")):
                 logs.extend(_log_list(answers[i], a, b))
                 first_held = a if first_held is None else min(first_held, a)
             elif _missing_history(error):

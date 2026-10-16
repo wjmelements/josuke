@@ -250,22 +250,20 @@ def test_http_failure_halves(node):
         assert _scan(node, 0, 49) == ([0, 30], [(0, 49), (0, 49), [(0, 24), (25, 49)]])
 
 
-# How requests fails a POST the node took but didn't answer in full: a timeout or a reset
-# while reading the body. Each is a ConnectionError, not a Timeout.
-DROPPED = {
-    "body late": lambda: chained(
-        requests.ConnectionError("read timed out"), ReadTimeoutError(None, "", "read timed out"), TimeoutError()
-    ),
-    "reset": lambda reset=ConnectionResetError(54, "Connection reset by peer"): chained(
-        requests.exceptions.ChunkedEncodingError("connection broken"), ProtocolError("Connection broken", reset), reset
-    ),
-}
+def _late_body():
+    """How requests fails a POST whose answer's body comes too late: a ConnectionError,
+    not a Timeout."""
+    return chained(requests.ConnectionError("read timed out"), ReadTimeoutError(None, "", "read timed out"), TimeoutError())
 
 
-@pytest.mark.parametrize("failure", DROPPED.values(), ids=DROPPED.keys())
-def test_dropped_query_halves(node, failure):
+def _reset():
+    reset = ConnectionResetError(54, "Connection reset by peer")
+    return chained(requests.exceptions.ChunkedEncodingError("connection broken"), ProtocolError("Connection broken", reset), reset)
+
+
+def test_late_answer_halves(node):
     _log_at(node, 0, 30)
-    with _failing_over_http(node, failure, lambda ranges: ranges[0][1] - ranges[0][0] >= 25):
+    with _failing_over_http(node, _late_body, lambda ranges: ranges[0][1] - ranges[0][0] >= 25):
         assert _scan(node, 0, 49) == ([0, 30], [(0, 49), [(0, 24), (25, 49)]])
 
 
@@ -317,6 +315,37 @@ def test_batch_http_failure_keeps_single_block_windows(node):
     assert sent == [(0, 1000), _windows(0, 999, 100) + tail, _windows(0, 999, 100) + tail, _windows(0, 999, 50) + tail]
 
 
+def test_batch_http_failure_narrows_only_the_windows_it_sent(node, monkeypatch):
+    # In batches of 4, the second times out at the gateway for the heavy (400, 499):
+    # the first's answers are kept, the second's windows halve, the third's wait.
+    monkeypatch.setattr(ethjsonrpc, "_BATCH_LIMIT", 4)
+    _log_at(node, 0, 450, 999)
+    node.get_logs_limit = _range_limit(-32602, "exceed maximum block range {limit}")
+    heavy = lambda ranges: len(ranges) > 1 and any(a <= 450 <= b and b - a >= 50 for a, b in ranges)
+    with _failing_over_http(node, 504, heavy):
+        blocks, sent = _scan(node, 0, 999)
+    assert blocks == [0, 450, 999]
+    windows = _windows(0, 999, 100)
+    assert sent == [
+        (0, 999),
+        windows[:4],
+        windows[4:8],
+        windows[4:8],  # a 504 is resent once
+        _halved(windows[4:6]),
+        _halved(windows[6:8]),
+        windows[8:],
+    ]
+
+
+def test_node_that_never_answers_fails_without_growing_the_queue(node):
+    # Narrowing only what was sent adds at most one batch of windows a round.
+    with _failing_over_http(node, 504, lambda ranges: True):
+        with pytest.raises(RpcError, match="HTTP 504"):
+            audit.get_logs(PROXY, 0, 999_999)
+    sizes = [len(payload) if isinstance(payload, list) else 1 for payload in node.calls]
+    assert max(sizes) <= ethjsonrpc._BATCH_LIMIT and len(sizes) < 50
+
+
 def test_batch_http_failure_of_single_blocks_propagates(node):
     node.get_logs_limit = _range_limit(-32602, "exceed maximum block range {limit}", 0)
     with _failing_over_http(node, 504, lambda ranges: len(ranges) > 1):
@@ -326,13 +355,30 @@ def test_batch_http_failure_of_single_blocks_propagates(node):
 
 
 @pytest.mark.parametrize("batched", [False, True])
-def test_rate_limit_is_not_narrowed(node, batched):
-    # Narrower queries are only more queries.
+@pytest.mark.parametrize("status", [429, 502, 503])
+def test_unavailable_node_is_not_narrowed(node, status, batched):
+    # A node rate-limiting, down or overloaded fails narrower queries too; they're only more.
     node.get_logs_limit = _range_limit(-32602, "exceed maximum block range {limit}")
-    with _failing_over_http(node, 429, lambda ranges: (len(ranges) > 1) == batched):
-        with pytest.raises(RpcError, match="HTTP 429"):
+    with _failing_over_http(node, status, lambda ranges: (len(ranges) > 1) == batched):
+        with pytest.raises(RpcError, match=f"HTTP {status}"):
             audit.get_logs(PROXY, 0, 999)
     assert len(node.calls) == 5 + batched
+
+
+@pytest.mark.parametrize("batched", [False, True])
+def test_other_http_failure_is_not_narrowed(node, batched):
+    node.get_logs_limit = _range_limit(-32602, "exceed maximum block range {limit}")
+    with _failing_over_http(node, 500, lambda ranges: (len(ranges) > 1) == batched):
+        with pytest.raises(RpcError, match="HTTP 500"):
+            audit.get_logs(PROXY, 0, 999)
+    assert len(node.calls) == 1 + batched
+
+
+def test_reset_connection_is_not_narrowed(node):
+    with _failing_over_http(node, _reset, lambda ranges: True):
+        with pytest.raises(RpcError, match="dropped the connection"):
+            audit.get_logs(PROXY, 0, 999)
+    assert len(node.calls) == 1
 
 
 def test_single_block_failure_propagates(node):

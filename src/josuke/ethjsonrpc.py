@@ -16,11 +16,15 @@ from .trace import brief, span
 
 class RpcError(click.ClickException):
     """The node answered with an HTTP failure or a JSON-RPC error, or couldn't be reached.
-    `status` is the HTTP failure's status, if that is what it was."""
+    `status` is the HTTP failure's status, if that is what it was. From `post_batch`,
+    `answers` holds the answers, by id, to the batches sent before the one that failed,
+    and `failed` the ids of that one's requests; the rest weren't sent."""
 
     def __init__(self, message: str, status: int | None = None):
         super().__init__(message)
         self.status = status
+        self.answers: dict = {}
+        self.failed: list = []
 
 
 class RpcTimeout(RpcError):
@@ -194,39 +198,44 @@ def post_batch(batch: list[dict], label: str = "rpc") -> dict:
     answers = {}
     pending = list(batch)
     attempt = 0  # resends of the batch at the head of `pending`
-    while pending:
-        chunk = pending[: _batch_limits.get(url, _BATCH_LIMIT)]
-        response, body = _post_chunk(url, chunk, label)
-        fetched = body if isinstance(body, list) else [body]
-        by_id = {answer.get("id"): answer for answer in fetched if isinstance(answer, dict)}
-        missing = [req for req in chunk if req.get("id") not in by_id]
-        if response.status_code == 413 or missing and any(_too_large(answer, _BATCH_TOO_LARGE) for answer in fetched):
-            # The node answered the batch with one error rather than each request.
-            if len(chunk) == 1:
-                raise RpcError(f"ETH_RPC_URL: rejected a batch of one request: {body}")
-            _batch_limits[url] = len(chunk) // 2
-            continue
-        if response.status_code != 200:
-            # Overloaded (erigon and nethermind answer 503) or rate-limited, not too large a batch.
-            if attempt + 1 < _TRIES[response.status_code]:
-                _wait(response, attempt)
-                attempt += 1
+    chunk: list[dict] = []
+    try:
+        while pending:
+            chunk = pending[: _batch_limits.get(url, _BATCH_LIMIT)]
+            response, body = _post_chunk(url, chunk, label)
+            fetched = body if isinstance(body, list) else [body]
+            by_id = {answer.get("id"): answer for answer in fetched if isinstance(answer, dict)}
+            missing = [req for req in chunk if req.get("id") not in by_id]
+            if response.status_code == 413 or missing and any(_too_large(answer, _BATCH_TOO_LARGE) for answer in fetched):
+                # The node answered the batch with one error rather than each request.
+                if len(chunk) == 1:
+                    raise RpcError(f"ETH_RPC_URL: rejected a batch of one request: {body}")
+                _batch_limits[url] = len(chunk) // 2
                 continue
-            errors = [error["message"] for answer in fetched if (error := _error(answer)) and "message" in error]
-            detail = errors[0] if errors else body if body is not None else brief(response.text)
-            raise RpcError(f"ETH_RPC_URL: HTTP {response.status_code}: {detail}", response.status_code)
-        attempt = 0
-        if missing:
-            methods = ", ".join(req["method"] for req in missing)
-            raise RpcError(f"ETH_RPC_URL: no answer to {methods} in a batch: {body}")
-        # Requests cut off by too large a response are resent in a smaller batch.
-        cut = [req for req in chunk if _too_large(by_id[req.get("id")], _RESPONSE_TOO_LARGE)]
-        if cut and len(chunk) > 1:
-            _batch_limits[url] = max(1, len(chunk) - len(cut))
-        else:
-            cut = []
-        answers.update((req.get("id"), by_id[req.get("id")]) for req in chunk if req not in cut)
-        pending = cut + pending[len(chunk) :]
+            if response.status_code != 200:
+                # Overloaded (erigon and nethermind answer 503) or rate-limited, not too large a batch.
+                if attempt + 1 < _TRIES[response.status_code]:
+                    _wait(response, attempt)
+                    attempt += 1
+                    continue
+                errors = [error["message"] for answer in fetched if (error := _error(answer)) and "message" in error]
+                detail = errors[0] if errors else body if body is not None else brief(response.text)
+                raise RpcError(f"ETH_RPC_URL: HTTP {response.status_code}: {detail}", response.status_code)
+            attempt = 0
+            if missing:
+                methods = ", ".join(req["method"] for req in missing)
+                raise RpcError(f"ETH_RPC_URL: no answer to {methods} in a batch: {body}")
+            # Requests cut off by too large a response are resent in a smaller batch.
+            cut = [req for req in chunk if _too_large(by_id[req.get("id")], _RESPONSE_TOO_LARGE)]
+            if cut and len(chunk) > 1:
+                _batch_limits[url] = max(1, len(chunk) - len(cut))
+            else:
+                cut = []
+            answers.update((req.get("id"), by_id[req.get("id")]) for req in chunk if req not in cut)
+            pending = cut + pending[len(chunk) :]
+    except RpcError as e:
+        e.answers, e.failed = answers, [req.get("id") for req in chunk]
+        raise
     return answers
 
 
