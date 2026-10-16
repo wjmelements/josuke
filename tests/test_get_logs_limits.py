@@ -574,3 +574,42 @@ def test_missing_history_in_a_batched_window_is_reported_whole(node):
     assert missing == [(400, 499)]
     assert blocks == [0, 999]
     assert sent == [(0, 999), _windows(0, 999, 100)]
+
+
+def test_a_probe_finding_history_too_low_is_sought_past(node):
+    """A Lotus null round has no tipset, so its events count as indexed even where
+    history is missing: probing one finds the history's start too low. The window
+    from there fails for its history again and is bisected again, not reported
+    whole as a gap."""
+    cutoff, null_round = 650, 649
+    _log_at(node, 100, 660, 999)
+    range_limit = _range_limit(-32602, "exceed maximum block range {limit}")
+    history = _history_from(1, "failed to get events for filter: not found in index", cutoff)
+    lotus = lambda a, b, logs: None if a == b == null_round else history(a, b, logs)
+    node.get_logs_limit = lambda a, b, logs: range_limit(a, b, logs) or lotus(a, b, logs)
+    blocks, missing, sent = _scan_history(node, 0, 999)
+    assert missing == [(0, cutoff - 1)]
+    assert blocks == [660, 999]
+    assert sent[-1] == [(cutoff, 699)]
+
+
+@pytest.mark.parametrize(
+    "probe_fails",
+    [
+        lambda node: _failing_over_http(node, 429, lambda ranges: ranges[0][0] == ranges[0][1]),
+        lambda node: patch.object(node, "get_logs_limit", _probes_fail(node.get_logs_limit)),
+    ],
+    ids=["HTTP 429", "JSON-RPC rate limit"],
+)
+def test_a_failed_probe_fails(node, probe_fails):
+    # Taking it for a block held would report too little history missing.
+    _log_at(node, 100, 700, 999)
+    node.get_logs_limit = _history_from(4444, "pruned history unavailable")
+    with probe_fails(node):
+        with pytest.raises(RpcError, match="429|block 999: .*Too many requests"):
+            audit.get_logs(PROXY, 0, 999)
+
+
+def _probes_fail(answer):
+    """`answer`, but a rate limit to any single-block query."""
+    return lambda lo, hi, logs: {"code": -32005, "message": "Too many requests"} if lo == hi else answer(lo, hi, logs)

@@ -216,21 +216,24 @@ def get_logs(proxy: str, from_block: int, to_block: int) -> tuple[list[dict], li
 
     Missing history (pruned, or events never indexed) is assumed missing from the
     start: blocks before the first one held are reported, and the rest scanned. A
-    missing window above a held one is a gap, reported whole.
+    missing window above one a query succeeded from is a gap, reported whole; below
+    it, the first block held is sought again, as a probe may find one too low, e.g.
+    a Lotus null round, which has no events to lack.
     """
     topics = [[SELECTOR_DELEGATED_TOPIC, DIAMOND_DELEGATE_CALL_TOPIC]]
 
     def holds(block: int) -> bool:
-        try:
-            error = post_request(eth_get_logs_request(proxy, topics, block, block)).get("error")
-        except RpcError:
-            return True  # not an answer about history
-        return not (error and _missing_history(error))
+        """Whether the node holds `block`'s history. A single block fits any range or
+        result cap, so another error is real and propagates."""
+        error = post_request(eth_get_logs_request(proxy, topics, block, block)).get("error")
+        if error and not _missing_history(error):
+            raise RpcError(f"eth_getLogs block {block}: {error}")
+        return not error
 
     logs: list[dict] = []
     missing: list[tuple[int, int]] = []
     queue: list[tuple[int, int]] = []
-    first_held: int | None = None  # lowest block known held
+    first_held: int | None = None  # lowest block a query succeeded from
     lo, span = from_block, to_block - from_block + 1
     while lo <= to_block:
         hi = min(lo + span - 1, to_block)
@@ -249,7 +252,7 @@ def get_logs(proxy: str, from_block: int, to_block: int) -> tuple[list[dict], li
         if _missing_history(error):
             start = _history_start(holds, error, lo, to_block)
             missing.append((lo, start - 1))
-            first_held = lo = start
+            lo = start
             continue
         windows, fits = _narrow(error, lo, hi)
         span = windows[0][1] - windows[0][0] + 1
@@ -285,7 +288,6 @@ def get_logs(proxy: str, from_block: int, to_block: int) -> tuple[list[dict], li
             missing.append((min(w[0] for w in start_windows), start - 1))
             if start <= b:
                 retry.append((start, b))
-                first_held = start
         queue = retry
     logs.sort(key=lambda log: (int(log["blockNumber"], 16), int(log["logIndex"], 16)))
     return logs, _merged(missing)
