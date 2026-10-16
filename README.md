@@ -148,17 +148,23 @@ every struct annotated `@custom:storage-location erc7201:<id>` that the facets'
 sources import, placed at its ERC-7201 slot. The annotation is trusted, not the
 slot the code computes. Other fixed-slot access and `.evm` facets are invisible.
 solc produces a layout from analysis alone, so neither HEAD nor a recorded
-commit gets a second build for it. Each recorded commit is
-checked out, so a shallow CI clone needs them fetched (`fetch-depth: 0`). It lists each facet as new, changed, unchanged or removed against
+commit gets a second build for it.
+
+`check` lists each facet as new, changed, unchanged or removed against
 `current`, and the constructor args `deploy` will ask for. It also compares HEAD
 with the staged deployment (`proposed`, else `current`); `--strict` makes a
-difference there fail, for release branches. `--chain` limits it to one chain,
-and `--format markdown` suits `$GITHUB_STEP_SUMMARY`. It trusts the recorded
-hashes; `verify` is what ties them to the chain.
-For ordinary pull requests, run without `--strict`: source changes relative to a
-deployment are expected. CI needs the recorded commits, submodules and their
-Solidity compiler versions: `check` installs a missing compiler with `forge build --use`, so the first run on a fresh machine needs network access. Build scripts and sources are
-executed, so run untrusted pull requests without credentials.
+difference there fail, for release branches. For ordinary pull requests, run
+without `--strict`: source changes relative to a deployment are expected.
+`--chain` limits it to one chain, and `--format markdown` suits
+`$GITHUB_STEP_SUMMARY`. It trusts the recorded hashes; `verify` is what ties
+them to the chain.
+
+In CI, `check` checks out each recorded commit, cloning its submodules from the
+local checkout, so a shallow clone needs the commits and submodules fetched
+(`fetch-depth: 0`, `submodules: recursive`). It installs any Solidity compiler
+those commits need with `forge build --use`, so the first run on a fresh runner
+needs network access. Build scripts and sources are executed, so run untrusted
+pull requests without credentials.
 
 `abi` prints a proxy's ABI, merged from the facets its `facetSrc` resolves to in
 the working tree. Each function appears once per selector; a selector exported by two facets is
