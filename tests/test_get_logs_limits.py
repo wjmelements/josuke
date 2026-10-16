@@ -101,59 +101,31 @@ def _uses_stated_range_limit(node, code, message, limit=LIMIT, lo=0, hi=999):
     assert blocks == [lo, (lo + hi) // 2, hi]
 
 
-def _halves_to_unstated_range_limit(node, code, message):
-    _log_at(node, 0, 500, 999)
-    node.get_logs_limit = _range_limit(code, message)
-    blocks, sent = _scan(node, 0, 999)
-    # 1000 blocks halve to 500, 250, 125, then 62, the first that fits.
-    assert sent == [(0, 999), (0, 499), (0, 249), (0, 124), (0, 61), _windows(62, 999, 62)]
-    assert blocks == [0, 500, 999]
-
-
-def _splits_windows_over_result_limit(node, code, message):
-    """Blocks 200-399 hold a log each, twice the cap; the rest hold none."""
-    _log_at(node, *range(200, 400))
-    node.get_logs_limit = _result_limit(code, message)
-    blocks, sent = _scan(node, 0, 9999)
-    assert blocks == list(range(200, 400))
-    # Halved, never cut to the cap's number, until (0, 155) fits; then windows of
-    # 156 blocks, of which (156, 311) holds 112 logs and splits in two.
-    assert sent == [
-        (0, 9999), (0, 4999), (0, 2499), (0, 1249), (0, 624), (0, 311), (0, 155),
-        _windows(156, 9999, 156),
-        [(156, 233), (234, 311)],
-    ]
-
-
 # -- range caps that state their maximum --------------------------------------
 
+STATED_RANGE_LIMITS = {
+    "geth": (-32602, "exceed maximum block range {limit}"),
+    "op-geth": (-32000, "exceed maximum block range: {limit}"),
+    "erigon": (-32602, "query block range exceeds server limit, narrow your filter: {limit}"),
+    "reth": (-32602, "query exceeds max block range {limit}"),
+    "ethermint": (-32000, "maximum [from, to] blocks distance: {limit}"),
+    # Forest words its EthErrors::BlockRangeExceeded as Lotus does.
+    "lotus, forest": (-32005, "block range exceeds maximum of {limit} (got {given})"),
+    # Also lotus before v1.36 and forest before v0.33, word for word.
+    "venus": (1, "invalid epoch range: range between to and from blocks is too large (maximum: {limit})"),
+    # Worded for queries from or up to `latest`, which josuke doesn't send; still stated caps.
+    "venus from the past": (1, "invalid epoch range: from block is too far in the past (maximum: {limit})"),
+    "venus into the future": (1, "invalid epoch range: to block is too far in the future (maximum: {limit})"),
+}
 
-def test_geth_range_limit(node):
-    _uses_stated_range_limit(node, -32602, "exceed maximum block range {limit}")
 
-
-def test_op_geth_range_limit(node):
-    _uses_stated_range_limit(node, -32000, "exceed maximum block range: {limit}")
+@pytest.mark.parametrize("code, message", STATED_RANGE_LIMITS.values(), ids=STATED_RANGE_LIMITS.keys())
+def test_stated_range_limit(node, code, message):
+    _uses_stated_range_limit(node, code, message)
 
 
 def test_bsc_range_limit_is_fixed_at_5000(node):
     _uses_stated_range_limit(node, -32000, "exceed maximum block range: {limit}", limit=5000, hi=12000)
-
-
-def test_erigon_range_limit(node):
-    _uses_stated_range_limit(node, -32602, "query block range exceeds server limit, narrow your filter: {limit}")
-
-
-def test_reth_range_limit(node):
-    _uses_stated_range_limit(node, -32602, "query exceeds max block range {limit}")
-
-
-def test_ethermint_range_limit(node):
-    _uses_stated_range_limit(node, -32000, "maximum [from, to] blocks distance: {limit}")
-
-
-def test_lotus_range_limit(node):
-    _uses_stated_range_limit(node, -32005, "block range exceeds maximum of {limit} (got {given})")
 
 
 def test_lotus_range_limit_on_glif_calibration(node):
@@ -164,36 +136,22 @@ def test_lotus_range_limit_on_glif_calibration(node):
     )
 
 
-def test_forest_range_limit(node):
-    # Forest words its EthErrors::BlockRangeExceeded as Lotus does.
-    _uses_stated_range_limit(node, -32005, "block range exceeds maximum of {limit} (got {given})")
-
-
-def test_venus_range_limit(node):
-    # Also lotus before v1.36 and forest before v0.33, word for word.
-    _uses_stated_range_limit(
-        node, 1, "invalid epoch range: range between to and from blocks is too large (maximum: {limit})"
-    )
-
-
-def test_venus_range_limit_from_the_past(node):
-    # Worded for a query up to `latest`, which josuke doesn't send; still a stated cap.
-    _uses_stated_range_limit(node, 1, "invalid epoch range: from block is too far in the past (maximum: {limit})")
-
-
-def test_venus_range_limit_into_the_future(node):
-    _uses_stated_range_limit(node, 1, "invalid epoch range: to block is too far in the future (maximum: {limit})")
-
-
 # -- range caps that don't ----------------------------------------------------
 
+UNSTATED_RANGE_LIMITS = {
+    "bor": (-32000, "block range exceeds configured limit"),
+    "besu": (-32005, "Requested range exceeds maximum RPC range limit"),
+}
 
-def test_bor_range_limit_states_no_maximum(node):
-    _halves_to_unstated_range_limit(node, -32000, "block range exceeds configured limit")
 
-
-def test_besu_range_limit_states_no_maximum(node):
-    _halves_to_unstated_range_limit(node, -32005, "Requested range exceeds maximum RPC range limit")
+@pytest.mark.parametrize("code, message", UNSTATED_RANGE_LIMITS.values(), ids=UNSTATED_RANGE_LIMITS.keys())
+def test_unstated_range_limit_halves(node, code, message):
+    _log_at(node, 0, 500, 999)
+    node.get_logs_limit = _range_limit(code, message)
+    blocks, sent = _scan(node, 0, 999)
+    # 1000 blocks halve to 500, 250, 125, then 62, the first that fits.
+    assert sent == [(0, 999), (0, 499), (0, 249), (0, 124), (0, 61), _windows(62, 999, 62)]
+    assert blocks == [0, 500, 999]
 
 
 # -- result caps --------------------------------------------------------------
@@ -221,32 +179,30 @@ def test_reth_result_limit_names_the_range_to_retry(node):
     ]
 
 
-def test_nethermind_result_limit(node):
-    _splits_windows_over_result_limit(node, -32005, "Too many logs requested. Max logs per response is {limit}.")
+RESULT_LIMITS = {
+    "nethermind": (-32005, "Too many logs requested. Max logs per response is {limit}."),
+    "erigon": (-32602, "query returns too many logs, narrow your filter: {limit}"),
+    "ethermint": (-32000, "query returned more than {limit} results"),
+    "lotus": (1, "filter matches too many events, try a more restricted filter"),
+    "forest": (-32603, "filter matches too many events across multiple tipsets (maximum {limit}); narrow the block range"),
+    "venus": (1, "too many events"),
+}
 
 
-def test_erigon_result_limit(node):
-    _splits_windows_over_result_limit(node, -32602, "query returns too many logs, narrow your filter: {limit}")
-
-
-def test_ethermint_result_limit(node):
-    _splits_windows_over_result_limit(node, -32000, "query returned more than {limit} results")
-
-
-def test_lotus_result_limit(node):
-    _splits_windows_over_result_limit(node, 1, "filter matches too many events, try a more restricted filter")
-
-
-def test_forest_result_limit(node):
-    _splits_windows_over_result_limit(
-        node,
-        -32603,
-        "filter matches too many events across multiple tipsets (maximum {limit}); narrow the block range",
-    )
-
-
-def test_venus_result_limit(node):
-    _splits_windows_over_result_limit(node, 1, "too many events")
+@pytest.mark.parametrize("code, message", RESULT_LIMITS.values(), ids=RESULT_LIMITS.keys())
+def test_result_limit_splits_windows(node, code, message):
+    """Blocks 200-399 hold a log each, twice the cap; the rest hold none."""
+    _log_at(node, *range(200, 400))
+    node.get_logs_limit = _result_limit(code, message)
+    blocks, sent = _scan(node, 0, 9999)
+    assert blocks == list(range(200, 400))
+    # Halved, never cut to the cap's number, until (0, 155) fits; then windows of
+    # 156 blocks, of which (156, 311) holds 112 logs and splits in two.
+    assert sent == [
+        (0, 9999), (0, 4999), (0, 2499), (0, 1249), (0, 624), (0, 311), (0, 155),
+        _windows(156, 9999, 156),
+        [(156, 233), (234, 311)],
+    ]
 
 
 # -- without limits, and other errors -----------------------------------------
@@ -459,56 +415,28 @@ def _history_from(code, message, cutoff=CUTOFF):
 BISECT_TO_CUTOFF = [(b, b) for b in (999, 499, 749, 624, 561, 592, 608, 600, 596, 598, 599)]
 
 
-def _reports_missing_history(node, code, message):
+MISSING_HISTORY = {
+    # Also op-geth, bor, bsc: the EIP-4444 code.
+    "geth, reth": (4444, "pruned history unavailable"),
+    "nethermind, besu": (4444, "Pruned history unavailable"),
+    # A client may word EIP-4444's error its own way.
+    "code alone": (4444, "history expired"),
+    # A proxy may replace the code and keep only the message.
+    "words alone": (-32000, "pruned history unavailable"),
+    "lotus events not indexed": (1, "failed to get events for filter: failed to get events for filter from chain indexer: not found in index"),
+    "lotus index requires backfill": (1, "failed to get events for filter: failed to get events for filter from chain indexer: chain index requires backfill"),
+    "lotus-gateway lookback": (1, "bad tipset height: lookbacks of more than 24h0m0s are disallowed"),
+}
+
+
+@pytest.mark.parametrize("code, message", MISSING_HISTORY.values(), ids=MISSING_HISTORY.keys())
+def test_missing_history(node, code, message):
     _log_at(node, 100, 700, 999)
     node.get_logs_limit = _history_from(code, message)
     blocks, missing, sent = _scan_history(node, 0, 999)
     assert missing == [(0, CUTOFF - 1)]
     assert blocks == [700, 999]
     assert sent == [(0, 999), *BISECT_TO_CUTOFF, (CUTOFF, 999)]
-
-
-def test_geth_pruned_history(node):
-    # Also op-geth, bor, bsc: the EIP-4444 code.
-    _reports_missing_history(node, 4444, "pruned history unavailable")
-
-
-def test_reth_pruned_history(node):
-    _reports_missing_history(node, 4444, "pruned history unavailable")
-
-
-def test_nethermind_pruned_history(node):
-    _reports_missing_history(node, 4444, "Pruned history unavailable")
-
-
-def test_besu_pruned_history(node):
-    _reports_missing_history(node, 4444, "Pruned history unavailable")
-
-
-def test_pruned_history_code_alone(node):
-    # A client may word EIP-4444's error its own way.
-    _reports_missing_history(node, 4444, "history expired")
-
-
-def test_pruned_history_words_alone(node):
-    # A proxy may replace the code and keep only the message.
-    _reports_missing_history(node, -32000, "pruned history unavailable")
-
-
-def test_lotus_events_not_indexed(node):
-    _reports_missing_history(
-        node, 1, "failed to get events for filter: failed to get events for filter from chain indexer: not found in index"
-    )
-
-
-def test_lotus_index_requires_backfill(node):
-    _reports_missing_history(
-        node, 1, "failed to get events for filter: failed to get events for filter from chain indexer: chain index requires backfill"
-    )
-
-
-def test_lotus_gateway_lookback(node):
-    _reports_missing_history(node, 1, "bad tipset height: lookbacks of more than 24h0m0s are disallowed")
 
 
 def test_lotus_gateway_lookback_under_its_range_limit(node):
