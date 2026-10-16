@@ -36,6 +36,7 @@ from .deploy import (
     facet_initcode,
     facet_selectors,
     keccak_hex,
+    misencoded_declarations,
     recorded_facet,
 )
 from .erc8167 import SELECTORS_SELECTOR, generated_selectors, selectors_method
@@ -422,14 +423,6 @@ def _check_storage_history(proxy, states, head, baselines, findings) -> list[str
     return lines
 
 
-def _encodes(arg: dict, value) -> bool:
-    try:
-        abi_encode([canonical_type(arg)], [coerce_input(arg, value)])
-    except (EncodingError, ValueError, TypeError, KeyError):
-        return False
-    return True
-
-
 def _initcode_hash(
     facet, root, recorded: dict, declared: dict, proxy: str, findings: Findings
 ) -> tuple[str | None, list[str], dict | None]:
@@ -453,8 +446,7 @@ def _initcode_hash(
         findings.fail(f"{proxy} {source_id}: {e.message.removeprefix(f'{source_id}: ')}")
         return None, [], None
     except (EncodingError, ValueError, TypeError, KeyError) as e:
-        # A declared name can mean different types in different facets.
-        bad = [arg["name"] for arg in inputs if arg["name"] in declared and not _encodes(arg, declared[arg["name"]])]
+        bad = misencoded_declarations(inputs, declared)
         if bad:
             findings.fail(
                 f"{proxy} {source_id}: declared constructorArgs {', '.join(bad)} do not encode: {e}; "

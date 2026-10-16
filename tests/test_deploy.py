@@ -17,7 +17,7 @@ from eth_utils import keccak, to_checksum_address
 
 from josuke import broadcast, deploy, facet as facet_module
 from josuke.ledger import validate_ledger
-from josuke.deploy import coerce_arg, coerce_input, keccak_hex
+from josuke.deploy import coerce_arg, coerce_input, facet_initcode, keccak_hex
 from josuke.evm import Replay
 from josuke.facet import Facet, resolve_facets
 
@@ -258,6 +258,20 @@ def test_run_deploy_fails_on_empty_facet_src(stub_chain, monkeypatch, tmp_path):
 
     with pytest.raises(click.ClickException, match="facetSrc is empty"):
         deploy.run_deploy(path)
+    assert stub_chain["deployed"] == []
+
+
+def test_run_deploy_points_misencoded_declarations_at_facet_overrides(stub_chain, monkeypatch, tmp_path):
+    monkeypatch.setattr(facet_module, "get_forge_config", lambda root: {"out": "out"})
+    monkeypatch.setattr(deploy, "facet_initcode", facet_initcode)
+    _artifact(tmp_path, "a.sol", "A", _INTERVAL_ABI)
+    monkeypatch.setattr(deploy, "resolve_facets", lambda facet_src, root: [_facet("a.sol:A")])
+    entry = {"address": PROXY, "facetSrc": ["a.sol:A"], "constructorArgs": {"updateInterval": "hourly", "owner": _OWNER}}
+    path = _write(tmp_path, [entry])
+
+    with pytest.raises(click.ClickException, match="a.sol:A: declared constructorArgs updateInterval do not encode") as e:
+        deploy.run_deploy(path)
+    assert "override them for this facet in facetConstructorArgs" in e.value.message
     assert stub_chain["deployed"] == []
 
 

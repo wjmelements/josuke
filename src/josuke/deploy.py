@@ -5,6 +5,7 @@ from os import environ
 
 import click
 from eth_abi import encode as abi_encode
+from eth_abi.exceptions import EncodingError
 from eth_utils import keccak, to_checksum_address
 
 from .broadcast import broadcast_session, create
@@ -120,6 +121,19 @@ def declared_constructor_args(entry: dict, chain: str | None, source_id: str) ->
         | entry.get("facetConstructorArgs", {}).get(source_id, {})
         | deployment.get("facetConstructorArgs", {}).get(source_id, {})
     )
+
+
+def misencoded_declarations(inputs: list, declared: dict) -> list[str]:
+    """Declared args that do not encode as this constructor's inputs: a declared
+    name can mean different types in different facets."""
+    bad = []
+    for arg in inputs:
+        if arg["name"] in declared:
+            try:
+                abi_encode([canonical_type(arg)], [coerce_input(arg, declared[arg["name"]])])
+            except (EncodingError, ValueError, TypeError, KeyError):
+                bad.append(arg["name"])
+    return bad
 
 
 def facet_initcode(facet: Facet, root: pathlib.Path, recorded_args, prompt: bool = True):
@@ -530,8 +544,17 @@ def run_deploy(ledger_path, redeploy_all: bool = False):
             for facet in facets:
                 recorded = recorded_facet(facet.source_id, current_facets, prior_proposed_facets)
                 # Declarations win, so editing one redeploys; the record keeps what was deployed.
-                args = (recorded.get("constructorArgs") or {}) | declared_constructor_args(entry, chain, facet.source_id)
-                initcode, args = facet_initcode(facet, root, args)
+                declared = declared_constructor_args(entry, chain, facet.source_id)
+                try:
+                    initcode, args = facet_initcode(facet, root, (recorded.get("constructorArgs") or {}) | declared)
+                except (EncodingError, ValueError, TypeError, KeyError) as e:
+                    bad = misencoded_declarations(constructor_inputs(facet, root), declared) if facet.kind == "sol" else []
+                    if not bad:
+                        raise
+                    raise click.ClickException(
+                        f"{proxy} {facet.source_id}: declared constructorArgs {', '.join(bad)} do not encode: {e}; "
+                        "override them for this facet in facetConstructorArgs"
+                    )
                 initcode_hash = keccak_hex(initcode)
 
                 existing, shared = existing_deployment(
