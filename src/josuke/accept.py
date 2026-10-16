@@ -5,7 +5,7 @@ import click
 from eth_utils import to_checksum_address
 
 from .ethjsonrpc import chain_id
-from .ledger import load_ledger, write_ledger
+from .ledger import load_ledger, on_chain, write_ledger
 from .storage import ProxyStorage, slot_address as _slot_address
 from .deploy import selector_owners
 from .verify import Report
@@ -111,14 +111,15 @@ def run_accept(ledger_path):
     root = pathlib.Path.cwd()
     ledger = load_ledger(ledger_path)
     chain = chain_id()
+    proxies = on_chain(ledger, chain)
     report = Report()
 
     pending = []  # (proxy, history, accepted_state)
     with SourceTrees(root) as trees:
-        for entry in ledger:
+        for entry in proxies:
             report.proxy = proxy = to_checksum_address(entry["address"])
-            history = entry.get("deployments", {}).get(chain)
-            proposed = history.get("proposed") if history else None
+            history = entry["deployments"][chain]
+            proposed = history.get("proposed")
             if not proposed:
                 click.echo(f"{proxy}: no proposed deployment on chain {chain}")
                 continue

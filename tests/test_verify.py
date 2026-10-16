@@ -8,6 +8,7 @@ import json
 import pathlib
 import shutil
 
+import click
 import pytest
 from eth_utils import to_checksum_address
 
@@ -537,13 +538,28 @@ def test_run_verify_requires_rpc_url(monkeypatch, tmp_path):
         verify.run_verify(_ledger(tmp_path, []))
 
 
-def test_run_verify_skips_chain_without_deployment(monkeypatch, tmp_path, stub_trees, capsys):
+def test_run_verify_fails_when_no_proxy_is_on_the_chain(monkeypatch, tmp_path, stub_trees):
     monkeypatch.setenv("ETH_RPC_URL", "http://mock.rpc")
     monkeypatch.chdir(tmp_path)
-    path = _ledger(tmp_path, [{"address": PROXY, "facetSrc": ["*.sol"], "deployments": {}}])
+    path = _ledger(tmp_path, [{"address": PROXY, "facetSrc": ["*.sol"], "deployments": {"1": {}}}])
+
+    with pytest.raises(click.ClickException, match="no proxy in the ledger is on chain 314"):
+        verify.run_verify(path)
+
+
+def test_run_verify_is_silent_about_proxies_on_other_chains(monkeypatch, tmp_path, stub_trees, capsys):
+    monkeypatch.setenv("ETH_RPC_URL", "http://mock.rpc")
+    monkeypatch.chdir(tmp_path)
+    other = "0x" + "33" * 20
+    path = _ledger(tmp_path, [
+        {"address": PROXY, "facetSrc": ["*.sol"], "deployments": {"1": {}}},
+        {"address": other, "facetSrc": ["*.sol"], "deployments": {"314": {}}},
+    ])
 
     verify.run_verify(path)
-    assert "nothing recorded on chain 314" in capsys.readouterr().out
+    out = capsys.readouterr().out
+    assert PROXY not in out
+    assert "0/1 proxy entry" in out
 
 
 def test_run_verify_reports_failures(monkeypatch, tmp_path, stub_trees):

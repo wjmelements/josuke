@@ -281,12 +281,24 @@ def test_duplicate_proxy_fails(tmp_path):
     assert f"{PROXY} is listed 2 times" in result.output
 
 
-def test_chain_option_checks_a_chain_with_nothing_recorded(tmp_path):
+def test_chain_option_fails_when_no_proxy_is_on_the_chain(tmp_path):
     ledger = [_entry(["src/facets/*.sol"], current={OWNABLE: _record(OWNABLE, "0x" + "0a" * 20)})]
     result = _check(tmp_path, ledger, "--chain", "31415926")
+    assert result.exit_code == 1
+    assert "no proxy in the ledger is on chain 31415926" in result.output
+    assert "chain 31415926  ·" not in result.output
+
+
+def test_each_proxy_is_checked_only_on_its_chains(tmp_path):
+    elsewhere = _entry([COUNTER], address=OTHER)
+    elsewhere["deployments"] = {"314159": {}}
+    ledger = [_entry(["src/facets/*.sol"], current={OWNABLE: _record(OWNABLE, "0x" + "0a" * 20)}), elsewhere]
+    result = _check(tmp_path, ledger)
     assert result.exit_code == 0, result.output
-    assert "chain 31415926  ·  nothing current" in result.output
-    assert f"NEW        {OWNABLE}" in result.output
+    assert f"{PROXY}  chain 314  ·" in result.output
+    assert f"{OTHER}  chain 314159  ·" in result.output
+    assert f"{PROXY}  chain 314159" not in result.output
+    assert f"{OTHER}  chain 314  " not in result.output
 
 
 def test_markdown_wraps_the_report(tmp_path):

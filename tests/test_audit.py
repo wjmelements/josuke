@@ -340,11 +340,25 @@ def test_run_audit_requires_rpc_url(monkeypatch, tmp_path):
         audit.run_audit(_ledger(tmp_path, []))
 
 
-def test_run_audit_reports_nothing_recorded(monkeypatch, tmp_path, stub, capsys):
+def test_run_audit_fails_when_no_proxy_is_on_the_chain(monkeypatch, tmp_path, stub):
     monkeypatch.chdir(tmp_path)
-    entry = {"address": PROXY, "facetSrc": ["*.sol"], "deployments": {}}
-    audit.run_audit(_ledger(tmp_path, [entry]))
-    assert "nothing recorded on chain 314" in capsys.readouterr().out
+    entry = {"address": PROXY, "facetSrc": ["*.sol"], "deployments": {"1": {}}}
+    with pytest.raises(click.ClickException, match="no proxy in the ledger is on chain 314"):
+        audit.run_audit(_ledger(tmp_path, [entry]))
+
+
+def test_run_audit_is_silent_about_proxies_on_other_chains(monkeypatch, tmp_path, stub, capsys):
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr(audit, "get_logs", lambda *a: ([], []))
+    other = "0x" + "33" * 20
+    ledger = [
+        {"address": PROXY, "facetSrc": ["*.sol"], "deployments": {"1": {}}},
+        {"address": other, "facetSrc": ["*.sol"], "deployments": {"314": {"current": {"gitCommit": "c0", "facets": {}}}}},
+    ]
+    audit.run_audit(_ledger(tmp_path, ledger), from_block=0)
+    out = capsys.readouterr().out
+    assert PROXY not in out
+    assert "1/1 proxy entry clean" in out
 
 
 def test_run_audit_fails_on_unrecorded_delegate(monkeypatch, tmp_path, stub):

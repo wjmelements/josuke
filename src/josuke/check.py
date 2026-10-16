@@ -656,7 +656,14 @@ def check_ledger(ledger_path, root: pathlib.Path, chain: str | None) -> tuple[li
     try:
         for c in chains:
             run_deployed: dict = {}  # initcodeHash -> record, shared across proxies as `deploy` does
-            for entry, r, storage_line in zip(ledger, resolved, storage_lines):
+            proxies = [
+                (entry, r, storage_line)
+                for entry, r, storage_line in zip(ledger, resolved, storage_lines)
+                if c is None or c in entry.get("deployments", {})
+            ]
+            if not proxies:
+                findings.fail(f"no proxy in the ledger is on chain {c}")
+            for entry, r, storage_line in proxies:
                 if r is None:
                     lines.extend(["", f"{to_checksum_address(entry['address'])}  ·  facetSrc does not resolve"])
                     continue

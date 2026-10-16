@@ -6,6 +6,7 @@ fabricated ledger states and a fake ProxyStorage.
 
 import json
 
+import click
 import pytest
 from eth_utils import to_checksum_address
 
@@ -375,3 +376,25 @@ def test_run_accept_reports_when_nothing_proposed(monkeypatch, tmp_path, stub, c
 
     accept.run_accept(path)
     assert "no proposed deployment on chain 314" in capsys.readouterr().out
+
+
+def test_run_accept_fails_when_no_proxy_is_on_the_chain(monkeypatch, tmp_path, stub):
+    monkeypatch.chdir(tmp_path)
+    path = _ledger(tmp_path, [{"address": PROXY, "facetSrc": ["*.sol"], "deployments": {"1": {}}}])
+
+    with pytest.raises(click.ClickException, match="no proxy in the ledger is on chain 314"):
+        accept.run_accept(path)
+
+
+def test_run_accept_is_silent_about_proxies_on_other_chains(monkeypatch, tmp_path, stub, capsys):
+    monkeypatch.chdir(tmp_path)
+    other = "0x" + "33" * 20
+    path = _ledger(tmp_path, [
+        {"address": PROXY, "facetSrc": ["*.sol"], "deployments": {"1": {}}},
+        {"address": other, "facetSrc": ["*.sol"], "deployments": {"314": {}}},
+    ])
+
+    accept.run_accept(path)
+    out = capsys.readouterr().out
+    assert PROXY not in out
+    assert "nothing to accept" in out

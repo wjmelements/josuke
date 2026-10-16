@@ -17,7 +17,7 @@ from .ethjsonrpc import chain_id, eth_get_code, prefetch_code
 from .broadcast import create_address
 from .evm import Replay, replay_create
 from .facet import facet_from_source_id, resolve_facets
-from .ledger import load_ledger
+from .ledger import load_ledger, on_chain
 from .migration import InvalidMigration, Migration
 from .storage import ProxyStorage, slot_address as _slot_address
 from .summary import summarize_upgrade
@@ -242,26 +242,21 @@ def run_verify(ledger_path):
     root = pathlib.Path.cwd()
     ledger = load_ledger(ledger_path)
     chain = chain_id()
+    proxies = on_chain(ledger, chain)
     report = Report()
     verified: list[str] = []
     rpc_cache: dict = {}  # shared by every relay in the run: one snapshot of the chain
 
-    recorded = [entry.get("deployments", {}).get(chain) or {} for entry in ledger]
+    recorded = [entry["deployments"][chain] for entry in proxies]
     prefetch_code(
         address
-        for entry, history in zip(ledger, recorded)
-        if history
+        for entry, history in zip(proxies, recorded)
         for address in [entry["address"], *code_addresses(history.get("current")), *code_addresses(history.get("proposed"))]
     )
 
     with SourceTrees(root) as trees:
-        for entry in ledger:
+        for entry, history in zip(proxies, recorded):
             report.proxy = proxy = to_checksum_address(entry["address"])
-            history = entry.get("deployments", {}).get(chain)
-            if not history:
-                click.echo(f"{proxy}: nothing recorded on chain {chain}")
-                continue
-
             current = history.get("current")
             proposed = history.get("proposed")
             current_tree = trees.get(current["gitCommit"]) if current else None
@@ -303,7 +298,7 @@ def run_verify(ledger_path):
             + "\n".join(f"  - {failure}" for failure in report.failures)
         )
     click.secho(
-        f"✓ verified chain {chain}: {len(verified)}/{len(ledger)} "
-        f"proxy entr{'y' if len(ledger) == 1 else 'ies'} confirmed current",
+        f"✓ verified chain {chain}: {len(verified)}/{len(proxies)} "
+        f"proxy entr{'y' if len(proxies) == 1 else 'ies'} confirmed current",
         fg="green", bold=True,
     )
