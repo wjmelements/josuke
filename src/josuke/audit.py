@@ -152,9 +152,14 @@ def _narrow(error, lo: int, hi: int) -> tuple[list[tuple[int, int]], bool]:
         retry_to = int(match[2])
         return [(lo, retry_to), *_windows(retry_to + 1, hi, retry_to - lo + 1)], True
     if lo == hi:
-        raise RpcError(f"eth_getLogs block {lo}: {error}")
+        raise _block_error(lo, error)
     half = (hi - lo + 1) // 2
     return [(lo, lo + half - 1), (lo + half, hi)], False
+
+
+def _block_error(block: int, error) -> RpcError:
+    """`error` to a single-block query, which fits any range or result cap."""
+    return RpcError(f"eth_getLogs block {block}: {error}")
 
 
 def _history_start(holds, error, lo: int, hi: int) -> int:
@@ -223,11 +228,10 @@ def get_logs(proxy: str, from_block: int, to_block: int) -> tuple[list[dict], li
     topics = [[SELECTOR_DELEGATED_TOPIC, DIAMOND_DELEGATE_CALL_TOPIC]]
 
     def holds(block: int) -> bool:
-        """Whether the node holds `block`'s history. A single block fits any range or
-        result cap, so another error is real and propagates."""
+        """Whether the node holds `block`'s history; any other error propagates."""
         error = post_request(eth_get_logs_request(proxy, topics, block, block)).get("error")
         if error and not _missing_history(error):
-            raise RpcError(f"eth_getLogs block {block}: {error}")
+            raise _block_error(block, error)
         return not error
 
     logs: list[dict] = []

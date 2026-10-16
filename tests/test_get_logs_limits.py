@@ -22,9 +22,9 @@ from unittest.mock import patch
 
 import pytest
 import requests
-from urllib3.exceptions import ConnectTimeoutError, MaxRetryError, ProtocolError, ReadTimeoutError
+from urllib3.exceptions import ProtocolError, ReadTimeoutError
 
-from ethrpc_mock import FakeResponse, MockEthRpc, chained
+from ethrpc_mock import FakeResponse, MockEthRpc, chained, connect_timeout
 from josuke import audit, ethjsonrpc
 from josuke.ethjsonrpc import RpcError
 
@@ -286,10 +286,8 @@ DROPPED = {
     "body late": lambda: chained(
         requests.ConnectionError("read timed out"), ReadTimeoutError(None, "", "read timed out"), TimeoutError()
     ),
-    "reset": lambda: chained(
-        requests.exceptions.ChunkedEncodingError("connection broken"),
-        ProtocolError("Connection broken", ConnectionResetError(54, "Connection reset by peer")),
-        ConnectionResetError(54, "Connection reset by peer"),
+    "reset": lambda reset=ConnectionResetError(54, "Connection reset by peer"): chained(
+        requests.exceptions.ChunkedEncodingError("connection broken"), ProtocolError("Connection broken", reset), reset
     ),
 }
 
@@ -297,31 +295,13 @@ DROPPED = {
 @pytest.mark.parametrize("failure", DROPPED.values(), ids=DROPPED.keys())
 def test_dropped_query_halves(node, failure):
     _log_at(node, 0, 30)
-    answer = node.__call__
-
-    def gateway(url, *args, **kwargs):
-        query = kwargs["json"]
-        if isinstance(query, dict) and _range(query)[1] - _range(query)[0] >= 25:
-            node.calls.append(query)
-            raise failure()
-        return answer(url, *args, **kwargs)
-
-    with patch("josuke.ethjsonrpc.post", gateway):
+    with _failing_over_http(node, failure, lambda ranges: ranges[0][1] - ranges[0][0] >= 25):
         assert _scan(node, 0, 49) == ([0, 30], [(0, 49), (0, 24), [(25, 49)]])
 
 
 def test_node_too_slow_to_connect_to_is_not_narrowed(node):
     # requests' ConnectTimeout is a Timeout, but no query was sent, so a narrower one can't help.
-    def gateway(url, *args, **kwargs):
-        node.calls.append(kwargs["json"])
-        raise chained(
-            requests.ConnectTimeout("connect timed out"),
-            MaxRetryError(None, ""),
-            ConnectTimeoutError("connect timed out"),
-            TimeoutError("timed out"),
-        )
-
-    with patch("josuke.ethjsonrpc.post", gateway):
+    with _failing_over_http(node, connect_timeout, lambda ranges: True):
         with pytest.raises(RpcError, match="cannot reach the node: timed out"):
             audit.get_logs(PROXY, 0, 999)
     assert len(node.calls) == 1
@@ -329,7 +309,7 @@ def test_node_too_slow_to_connect_to_is_not_narrowed(node):
 
 def _failing_over_http(node, status, fails):
     """`node` behind a gateway answering `status` to any POST `fails` picks out by its
-    queries' (fromBlock, toBlock)s."""
+    queries' (fromBlock, toBlock)s; `status` may instead make the error `post` raises."""
     answer = node.__call__
 
     def gateway(url, *args, **kwargs):
@@ -337,6 +317,8 @@ def _failing_over_http(node, status, fails):
         ranges = [_range(r) for r in payload] if isinstance(payload, list) else [_range(payload)]
         if fails(ranges):
             node.calls.append(payload)
+            if callable(status):
+                raise status()
             return FakeResponse(status, "")
         return answer(url, *args, **kwargs)
 
@@ -613,23 +595,19 @@ def test_a_probe_finding_history_too_low_is_sought_past(node):
     assert sent[-1] == [(cutoff, 699)]
 
 
-@pytest.mark.parametrize(
-    "probe_fails",
-    [
-        lambda node: _failing_over_http(node, 429, lambda ranges: ranges[0][0] == ranges[0][1]),
-        lambda node: patch.object(node, "get_logs_limit", _probes_fail(node.get_logs_limit)),
-    ],
-    ids=["HTTP 429", "JSON-RPC rate limit"],
-)
-def test_a_failed_probe_fails(node, probe_fails):
+def test_a_probe_failing_over_http_fails(node):
     # Taking it for a block held would report too little history missing.
     _log_at(node, 100, 700, 999)
     node.get_logs_limit = _history_from(4444, "pruned history unavailable")
-    with probe_fails(node):
-        with pytest.raises(RpcError, match="429|block 999: .*Too many requests"):
+    with _failing_over_http(node, 429, lambda ranges: ranges[0][0] == ranges[0][1]):
+        with pytest.raises(RpcError, match="HTTP 429"):
             audit.get_logs(PROXY, 0, 999)
 
 
-def _probes_fail(answer):
-    """`answer`, but a rate limit to any single-block query."""
-    return lambda lo, hi, logs: {"code": -32005, "message": "Too many requests"} if lo == hi else answer(lo, hi, logs)
+def test_a_probe_failing_otherwise_fails(node):
+    _log_at(node, 100, 700, 999)
+    history = _history_from(4444, "pruned history unavailable")
+    rate_limit = {"code": -32005, "message": "Too many requests"}
+    node.get_logs_limit = lambda lo, hi, logs: rate_limit if lo == hi else history(lo, hi, logs)
+    with pytest.raises(RpcError, match="block 999: .*Too many requests"):
+        audit.get_logs(PROXY, 0, 999)

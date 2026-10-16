@@ -26,6 +26,19 @@ def chained(*errors: BaseException) -> BaseException:
     return errors[0]
 
 
+def connect_timeout() -> BaseException:
+    """How requests fails a POST to a node it couldn't connect to in time."""
+    from requests import ConnectTimeout
+    from urllib3.exceptions import ConnectTimeoutError, MaxRetryError
+
+    return chained(
+        ConnectTimeout("HTTPConnectionPool(host='node', port=80): /SECRET"),
+        MaxRetryError(None, "/SECRET"),
+        ConnectTimeoutError("Connection to node timed out. (connect timeout=0.05)"),
+        TimeoutError("timed out"),
+    )
+
+
 def norm_addr(a: str) -> str:
     return a.lower()
 
