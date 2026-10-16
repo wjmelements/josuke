@@ -14,7 +14,7 @@ from .ethjsonrpc import chain_id, eth_get_code, prefetch_code
 from .evm import Replay, evm_artifact, replay_create
 from .facet import Facet, facet_artifact, facet_from_source_id, resolve_facets
 from .forge import get_forge_config
-from .ledger import load_ledger, write_ledger
+from .ledger import load_ledger, on_chain, write_ledger
 from .migration import Migration, SetDelegate
 from .proc import run
 from .rehearsal import rehearse_migration
@@ -469,6 +469,7 @@ def run_deploy(ledger_path, redeploy_all: bool = False):
     root = pathlib.Path.cwd()
     ledger = load_ledger(ledger_path)
     chain = chain_id()
+    proxies = on_chain(ledger, chain)
     commit = git_commit(root)
 
     run(["forge", "build"], root)
@@ -486,10 +487,10 @@ def run_deploy(ledger_path, redeploy_all: bool = False):
     with keystore_session(), broadcast_session(chain) as broadcast, SourceTrees(root) as trees:
         # The code planning compares against: each proxy's (for its rehearsal) and its
         # prior selectors() and migration.
-        recorded = [entry.get("deployments", {}).get(chain) or {} for entry in ledger]
+        recorded = [entry["deployments"][chain] for entry in proxies]
         prefetch_code(
             address
-            for entry, history in zip(ledger, recorded)
+            for entry, history in zip(proxies, recorded)
             for address in [
                 entry["address"],
                 ((history.get("current") or {}).get("selectors") or {}).get("address"),
@@ -498,10 +499,9 @@ def run_deploy(ledger_path, redeploy_all: bool = False):
             ]
             if address
         )
-        for entry in ledger:
+        for entry in proxies:
             proxy = to_checksum_address(entry["address"])
-            deployments = entry.setdefault("deployments", {})
-            history = deployments.setdefault(chain, {})
+            history = entry["deployments"][chain]
             current = history.get("current", {})
             current_facets = current.get("facets", {})
             prior_proposed = history.get("proposed", {})

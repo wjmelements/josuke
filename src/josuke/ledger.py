@@ -24,6 +24,13 @@ def load_ledger(ledger_path) -> list:
         raise click.ClickException(f"{ledger_path} is not valid JSON: {e}")
 
 
+def on_chain(ledger, chain: str) -> list:
+    entries = [entry for entry in ledger if chain in entry.get("deployments", {})]
+    if not entries:
+        raise click.ClickException(f"no proxy in the ledger is on chain {chain}")
+    return entries
+
+
 def write_ledger(ledger_path, ledger) -> None:
     ledger_path.write_text(json.dumps(ledger, indent=4) + "\n")
 

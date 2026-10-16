@@ -35,7 +35,7 @@ from .ethjsonrpc import (
     post_request,
     prefetch_code,
 )
-from .ledger import load_ledger
+from .ledger import load_ledger, on_chain
 from .migration import SELECTOR_DELEGATED_SIG
 from .verify import Report, SourceTrees, code_addresses, verify_facets, verify_selectors
 
@@ -432,13 +432,14 @@ def run_audit(ledger_path, from_block: int | None = None):
     root = pathlib.Path.cwd()
     ledger = load_ledger(ledger_path)
     chain = chain_id()
+    proxies = on_chain(ledger, chain)
     latest = eth_block_number()  # fixed up front so every proxy is audited through the same block
     report = Report()
     rpc_cache: dict = {}
     audited = 0
     unaccepted = 0
 
-    recorded = [entry.get("deployments", {}).get(chain) or {} for entry in ledger]
+    recorded = [entry["deployments"][chain] for entry in proxies]
     prefetch_code(
         address
         for history in recorded
@@ -446,12 +447,8 @@ def run_audit(ledger_path, from_block: int | None = None):
     )
 
     with SourceTrees(root) as trees:
-        for entry in ledger:
+        for entry, history in zip(proxies, recorded):
             report.proxy = proxy = to_checksum_address(entry["address"])
-            history = entry.get("deployments", {}).get(chain)
-            if not history:
-                click.echo(f"{proxy}: nothing recorded on chain {chain}")
-                continue
             before = len(report.failures)
             unaccepted += audit_proxy(
                 proxy, history, chain, latest, from_block, trees, report, rpc_cache
@@ -473,7 +470,7 @@ def run_audit(ledger_path, from_block: int | None = None):
             + "\n".join(f"  - {failure}" for failure in report.failures)
         )
     click.secho(
-        f"✓ audited chain {chain} through block {latest}: {audited}/{len(ledger)} "
-        f"proxy entr{'y' if len(ledger) == 1 else 'ies'} clean",
+        f"✓ audited chain {chain} through block {latest}: {audited}/{len(proxies)} "
+        f"proxy entr{'y' if len(proxies) == 1 else 'ies'} clean",
         fg="green", bold=True,
     )

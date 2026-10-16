@@ -206,7 +206,7 @@ DEPLOYER = to_checksum_address("0x" + "de" * 20)  # cast-receipt `from`, per fak
 
 def test_run_deploy_first_time_deploys_all_into_proposed(stub_chain, monkeypatch, tmp_path):
     _resolve_to(monkeypatch, ["a.evm", "b.evm"])
-    path = _write(tmp_path, [{"address": PROXY, "facetSrc": ["*.evm"]}])
+    path = _write(tmp_path, [{"address": PROXY, "facetSrc": ["*.evm"], "deployments": {"314": {}}}])
 
     deploy.run_deploy(path)
 
@@ -221,16 +221,47 @@ def test_run_deploy_first_time_deploys_all_into_proposed(stub_chain, monkeypatch
 
 def test_run_deploy_fails_on_empty_facet_src(stub_chain, monkeypatch, tmp_path):
     _resolve_to(monkeypatch, [])
-    path = _write(tmp_path, [{"address": PROXY, "facetSrc": []}])
+    path = _write(tmp_path, [{"address": PROXY, "facetSrc": [], "deployments": {"314": {}}}])
 
     with pytest.raises(click.ClickException, match="facetSrc is empty"):
         deploy.run_deploy(path)
     assert stub_chain["deployed"] == []
 
 
+def test_run_deploy_skips_proxies_on_other_chains(stub_chain, monkeypatch, tmp_path, capsys):
+    _resolve_to(monkeypatch, ["a.evm"])
+    other = "0x" + "33" * 20
+    ledger = [
+        {"address": PROXY, "facetSrc": ["*.evm"], "deployments": {"1": {}}},
+        {"address": other, "facetSrc": ["*.evm"], "deployments": {"314": {}}},
+    ]
+    path = _write(tmp_path, ledger)
+
+    deploy.run_deploy(path)
+
+    entries = json.loads(path.read_text())
+    assert entries[0] == ledger[0]
+    assert "proposed" in entries[1]["deployments"]["314"]
+    assert PROXY not in capsys.readouterr().out
+
+
+def test_run_deploy_fails_before_building_when_no_proxy_is_on_the_chain(stub_chain, monkeypatch, tmp_path):
+    ran = []
+    monkeypatch.setattr(deploy, "run", lambda *a, **k: ran.append(a) or "")
+    ledger = [{"address": PROXY, "facetSrc": ["*.evm"]}, {"address": "0x" + "33" * 20, "facetSrc": ["*.evm"], "deployments": {"1": {}}}]
+    path = _write(tmp_path, ledger)
+
+    with pytest.raises(click.ClickException, match="no proxy in the ledger is on chain 314"):
+        deploy.run_deploy(path)
+
+    assert ran == []
+    assert stub_chain["prefetched"] == []
+    assert json.loads(path.read_text()) == ledger
+
+
 def test_run_deploy_records_create_tx_hash(stub_chain, monkeypatch, tmp_path):
     _resolve_to(monkeypatch, ["a.evm"])
-    path = _write(tmp_path, [{"address": PROXY, "facetSrc": ["*.evm"]}])
+    path = _write(tmp_path, [{"address": PROXY, "facetSrc": ["*.evm"], "deployments": {"314": {}}}])
 
     def recorded():
         return json.loads(path.read_text())[0]["deployments"]["314"]["proposed"]["facets"]["a.evm"]
@@ -336,7 +367,7 @@ def test_run_deploy_all_redeploys_unchanged_facets(stub_chain, monkeypatch, tmp_
 
 def test_run_deploy_is_idempotent_before_promotion(stub_chain, monkeypatch, tmp_path):
     _resolve_to(monkeypatch, ["a.evm", "b.evm"])
-    path = _write(tmp_path, [{"address": PROXY, "facetSrc": ["*.evm"]}])
+    path = _write(tmp_path, [{"address": PROXY, "facetSrc": ["*.evm"], "deployments": {"314": {}}}])
 
     deploy.run_deploy(path)
     first = json.loads(path.read_text())[0]["deployments"]["314"]["proposed"]
@@ -353,8 +384,8 @@ def test_run_deploy_shares_one_deployment_across_proxies(stub_chain, monkeypatch
     path = _write(
         tmp_path,
         [
-            {"address": PROXY, "facetSrc": ["*.evm"]},
-            {"address": "0x" + "33" * 20, "facetSrc": ["*.evm"]},
+            {"address": PROXY, "facetSrc": ["*.evm"], "deployments": {"314": {}}},
+            {"address": "0x" + "33" * 20, "facetSrc": ["*.evm"], "deployments": {"314": {}}},
         ],
     )
 
@@ -405,7 +436,7 @@ def _deployed_facet(stub_chain, monkeypatch, tmp_path, replay=None):
     _resolve_to(monkeypatch, ["a.evm"])
     if replay is not None:
         stub_chain["replay"] = replay
-    path = _write(tmp_path, [{"address": PROXY, "facetSrc": ["*.evm"]}])
+    path = _write(tmp_path, [{"address": PROXY, "facetSrc": ["*.evm"], "deployments": {"314": {}}}])
     deploy.run_deploy(path)
     return json.loads(path.read_text())[0]["deployments"]["314"]["proposed"]["facets"]["a.evm"]
 
@@ -491,7 +522,7 @@ def test_run_deploy_does_not_carry_from_forward_on_redeploy(stub_chain, monkeypa
 def test_run_deploy_records_then_fails_when_the_replayed_constructor_reverts(stub_chain, monkeypatch, tmp_path):
     _resolve_to(monkeypatch, ["a.evm"])
     stub_chain["replay"] = Replay(None, False, False, {}, "08c379a0")
-    path = _write(tmp_path, [{"address": PROXY, "facetSrc": ["*.evm"]}])
+    path = _write(tmp_path, [{"address": PROXY, "facetSrc": ["*.evm"], "deployments": {"314": {}}}])
 
     with pytest.raises(click.ClickException, match="a.evm @0x0+1: constructor reverted with 0x08c379a0"):
         deploy.run_deploy(path)
@@ -503,7 +534,7 @@ def test_run_deploy_records_then_fails_when_the_replayed_constructor_reverts(stu
 def test_run_deploy_records_then_fails_when_replay_does_not_reproduce(stub_chain, monkeypatch, tmp_path):
     _resolve_to(monkeypatch, ["a.evm"])
     stub_chain["replay"] = Replay("6001", False, False, {})  # not what code_hash reports
-    path = _write(tmp_path, [{"address": PROXY, "facetSrc": ["*.evm"]}])
+    path = _write(tmp_path, [{"address": PROXY, "facetSrc": ["*.evm"], "deployments": {"314": {}}}])
 
     with pytest.raises(click.ClickException, match="did not reproduce"):
         deploy.run_deploy(path)
@@ -517,7 +548,7 @@ def test_run_deploy_aborts_before_sending_when_the_rehearsal_fails(stub_chain, m
     sent = []
     monkeypatch.setattr(broadcast.Broadcast, "send_all", lambda self, root: sent.append(root))
     stub_chain["rehearsal"] = ["0x11111111 reverts, expected 0x" + "01" * 20]
-    ledger = [{"address": PROXY, "facetSrc": ["*.evm"]}]
+    ledger = [{"address": PROXY, "facetSrc": ["*.evm"], "deployments": {"314": {}}}]
     path = _write(tmp_path, ledger)
 
     with pytest.raises(click.ClickException, match="0x11111111 reverts"):
@@ -539,7 +570,7 @@ def test_run_deploy_verifies_new_sol_facets_on_sourcify(stub_chain, monkeypatch,
             (facet.source_id, address, chain, tx_hash)
         ),
     )
-    path = _write(tmp_path, [{"address": PROXY, "facetSrc": ["*.sol"]}])
+    path = _write(tmp_path, [{"address": PROXY, "facetSrc": ["*.sol"], "deployments": {"314": {}}}])
 
     deploy.run_deploy(path)
 
@@ -552,7 +583,7 @@ def test_run_deploy_does_not_reverify_reused_sol_facets(stub_chain, monkeypatch,
     )
     calls = []
     monkeypatch.setattr(deploy, "verify_sourcify", lambda *a, **k: calls.append(a))
-    path = _write(tmp_path, [{"address": PROXY, "facetSrc": ["*.sol"]}])
+    path = _write(tmp_path, [{"address": PROXY, "facetSrc": ["*.sol"], "deployments": {"314": {}}}])
 
     deploy.run_deploy(path)  # first run deploys + verifies
     deploy.run_deploy(path)  # nothing changed: reused, must not re-verify
@@ -579,7 +610,7 @@ def test_run_deploy_warns_once_about_metadata_hash_for_sol_facets(stub_chain, mo
     monkeypatch.setattr(deploy, "resolve_facets", lambda facet_src, root: [_facet("a.sol:A")])
     monkeypatch.setattr(deploy, "verify_sourcify", lambda *a, **k: None)
     other = "0x" + "33" * 20
-    path = _write(tmp_path, [{"address": PROXY, "facetSrc": ["*.sol"]}, {"address": other, "facetSrc": ["*.sol"]}])
+    path = _write(tmp_path, [{"address": PROXY, "facetSrc": ["*.sol"], "deployments": {"314": {}}}, {"address": other, "facetSrc": ["*.sol"], "deployments": {"314": {}}}])
 
     deploy.run_deploy(path)
 
@@ -589,7 +620,7 @@ def test_run_deploy_warns_once_about_metadata_hash_for_sol_facets(stub_chain, mo
 def test_run_deploy_skips_metadata_hash_warning_without_sol_facets(stub_chain, monkeypatch, tmp_path, capsys):
     monkeypatch.setattr(deploy, "get_forge_config", lambda root: {"bytecode_hash": "ipfs"})
     _resolve_to(monkeypatch, ["a.evm"])
-    path = _write(tmp_path, [{"address": PROXY, "facetSrc": ["*.evm"]}])
+    path = _write(tmp_path, [{"address": PROXY, "facetSrc": ["*.evm"], "deployments": {"314": {}}}])
 
     deploy.run_deploy(path)
 
@@ -851,7 +882,7 @@ def test_selectors_runtime_generates_from_the_facet_set(monkeypatch):
 def test_run_deploy_synthesizes_and_records_selectors(stub_chain, monkeypatch, tmp_path, capsys):
     _resolve_to(monkeypatch, ["a.evm"])
     monkeypatch.setattr(deploy, "selectors_runtime", lambda facets, root: b"\x60\x00")
-    path = _write(tmp_path, [{"address": PROXY, "facetSrc": ["*.evm"]}])
+    path = _write(tmp_path, [{"address": PROXY, "facetSrc": ["*.evm"], "deployments": {"314": {}}}])
 
     deploy.run_deploy(path)
 
@@ -864,7 +895,7 @@ def test_run_deploy_synthesizes_and_records_selectors(stub_chain, monkeypatch, t
 def test_run_deploy_omits_selectors_when_a_facet_owns_it(stub_chain, monkeypatch, tmp_path):
     _resolve_to(monkeypatch, ["a.evm"])
     monkeypatch.setattr(deploy, "selectors_runtime", lambda facets, root: None)
-    path = _write(tmp_path, [{"address": PROXY, "facetSrc": ["*.evm"]}])
+    path = _write(tmp_path, [{"address": PROXY, "facetSrc": ["*.evm"], "deployments": {"314": {}}}])
 
     deploy.run_deploy(path)
 
@@ -953,7 +984,7 @@ def test_run_deploy_records_migration(stub_chain, monkeypatch, tmp_path):
     monkeypatch.setattr(
         deploy, "deploy_migration", lambda m, prior, root: {"address": "0x" + "99" * 20}
     )
-    path = _write(tmp_path, [{"address": PROXY, "facetSrc": ["*.evm"]}])
+    path = _write(tmp_path, [{"address": PROXY, "facetSrc": ["*.evm"], "deployments": {"314": {}}}])
 
     deploy.run_deploy(path)
 
@@ -964,7 +995,7 @@ def test_run_deploy_records_migration(stub_chain, monkeypatch, tmp_path):
 def test_run_deploy_omits_proposed_when_no_migration_needed(stub_chain, monkeypatch, tmp_path):
     _resolve_to(monkeypatch, ["a.evm"])
     monkeypatch.setattr(deploy, "build_migration", lambda *a, **k: None)
-    path = _write(tmp_path, [{"address": PROXY, "facetSrc": ["*.evm"]}])
+    path = _write(tmp_path, [{"address": PROXY, "facetSrc": ["*.evm"], "deployments": {"314": {}}}])
 
     deploy.run_deploy(path)
 
