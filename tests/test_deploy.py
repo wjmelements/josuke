@@ -17,7 +17,7 @@ from eth_utils import keccak, to_checksum_address
 
 from josuke import broadcast, deploy, facet as facet_module
 from josuke.ledger import validate_ledger
-from josuke.deploy import coerce_arg, coerce_input, keccak_hex
+from josuke.deploy import coerce_arg, coerce_input, facet_initcode, keccak_hex
 from josuke.evm import Replay
 from josuke.facet import Facet, resolve_facets
 
@@ -118,6 +118,39 @@ def test_facet_initcode_uses_evm_artifact(tmp_path, monkeypatch):
     initcode, args = deploy.facet_initcode(Facet("evm", "impl.evm", None, "impl.evm"), tmp_path, None)
     assert initcode == "deadbeef"
     assert args is None
+
+
+_INTERVAL_ABI = [
+    {"type": "constructor", "inputs": [
+        {"name": "updateInterval", "type": "uint64"}, {"name": "owner", "type": "address"},
+    ]},
+]
+_OWNER = "0x" + "12" * 20
+_OTHER = "0x" + "34" * 20
+
+
+def test_facet_initcode_records_only_the_args_its_constructor_takes(tmp_path, monkeypatch):
+    monkeypatch.setattr(facet_module, "get_forge_config", lambda root: {"out": "out"})
+    _artifact(tmp_path, "a.sol", "A", _INTERVAL_ABI)
+    given = {"updateInterval": 60, "owner": _OWNER, "unrelated": 1}
+    _, args = deploy.facet_initcode(_facet("a.sol:A"), tmp_path, given, prompt=False)
+    assert args == {"updateInterval": 60, "owner": _OWNER}
+
+
+def test_declared_constructor_args_most_specific_wins():
+    entry = {
+        "constructorArgs": {"updateInterval": 60, "owner": _OWNER},
+        "facetConstructorArgs": {"a.sol:A": {"updateInterval": 120}},
+        "deployments": {"314": {
+            "constructorArgs": {"updateInterval": 3600, "owner": _OTHER},
+            "facetConstructorArgs": {"b.sol:B": {"owner": _OWNER}},
+        }},
+    }
+    assert deploy.declared_constructor_args(entry, "314", "a.sol:A") == {"updateInterval": 120, "owner": _OTHER}
+    assert deploy.declared_constructor_args(entry, "314", "b.sol:B") == {"updateInterval": 3600, "owner": _OWNER}
+    assert deploy.declared_constructor_args(entry, "1", "b.sol:B") == {"updateInterval": 60, "owner": _OWNER}
+    assert deploy.declared_constructor_args(entry, None, "a.sol:A") == {"updateInterval": 120, "owner": _OWNER}
+    assert deploy.declared_constructor_args({}, "314", "a.sol:A") == {}
 
 
 # -- run_deploy decision logic -----------------------------------------------
@@ -257,6 +290,20 @@ def test_run_deploy_fails_before_building_when_no_proxy_is_on_the_chain(stub_cha
     assert ran == []
     assert stub_chain["prefetched"] == []
     assert json.loads(path.read_text()) == ledger
+
+
+def test_run_deploy_points_misencoded_declarations_at_facet_overrides(stub_chain, monkeypatch, tmp_path):
+    monkeypatch.setattr(facet_module, "get_forge_config", lambda root: {"out": "out"})
+    monkeypatch.setattr(deploy, "facet_initcode", facet_initcode)
+    _artifact(tmp_path, "a.sol", "A", _INTERVAL_ABI)
+    monkeypatch.setattr(deploy, "resolve_facets", lambda facet_src, root: [_facet("a.sol:A")])
+    entry = {"address": PROXY, "facetSrc": ["a.sol:A"], "constructorArgs": {"updateInterval": "hourly", "owner": _OWNER}, "deployments": {"314": {}}}
+    path = _write(tmp_path, [entry])
+
+    with pytest.raises(click.ClickException, match="a.sol:A: declared constructorArgs updateInterval do not encode") as e:
+        deploy.run_deploy(path)
+    assert "override them for this facet in facetConstructorArgs" in e.value.message
+    assert stub_chain["deployed"] == []
 
 
 def test_run_deploy_records_create_tx_hash(stub_chain, monkeypatch, tmp_path):
@@ -429,6 +476,36 @@ def test_run_deploy_records_constructor_args(stub_chain, monkeypatch, tmp_path):
 
     facet = json.loads(path.read_text())[0]["deployments"]["314"]["proposed"]["facets"]["a.evm"]
     assert facet["constructorArgs"] == {"owner": "0x" + "12" * 20}
+
+
+def test_run_deploy_declarations_win_over_the_record(stub_chain, monkeypatch, tmp_path):
+    _resolve_to(monkeypatch, ["a.evm"])
+    seen = []
+    monkeypatch.setattr(deploy, "facet_initcode", lambda facet, root, args: seen.append(args) or ("6000", args))
+    path = _write(
+        tmp_path,
+        [{
+            "address": PROXY,
+            "facetSrc": ["*.evm"],
+            "constructorArgs": {"updateInterval": 3600},
+            "deployments": {"314": {"current": {
+                "gitCommit": "e" * 40,
+                "facets": {"a.evm": {
+                    "address": "0x" + "ab" * 20,
+                    "codeHash": "0x" + "11" * 32,
+                    "initcodeHash": "0x" + "00" * 32,
+                    "constructorArgs": {"updateInterval": 60, "owner": _OWNER},
+                }},
+            }}},
+        }],
+    )
+
+    deploy.run_deploy(path)
+
+    assert seen == [{"updateInterval": 3600, "owner": _OWNER}]
+    facet = json.loads(path.read_text())[0]["deployments"]["314"]["proposed"]["facets"]["a.evm"]
+    assert facet["address"] != "0x" + "ab" * 20
+    assert facet["constructorArgs"] == {"updateInterval": 3600, "owner": _OWNER}
 
 
 def _deployed_facet(stub_chain, monkeypatch, tmp_path, replay=None):
