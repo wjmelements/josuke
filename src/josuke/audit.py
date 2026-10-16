@@ -137,24 +137,24 @@ def _windows(lo: int, hi: int, span: int) -> list[tuple[int, int]]:
     return [(start, min(start + span - 1, hi)) for start in range(lo, hi + 1, span)]
 
 
-def _narrow(error, lo: int, hi: int) -> tuple[list[tuple[int, int]], bool]:
-    """Windows covering `lo`..`hi` after the node rejected it with `error`, and
-    whether the first is known to fit: a stated range cap or reth's named range.
-    Anything else halves: bor's and besu's range caps, which state no N, every
-    other result cap, whose number counts logs, not blocks, and errors not
-    recognised as either. A single block that fails can't narrow, and propagates.
+def _narrow(error, lo: int, hi: int) -> list[tuple[int, int]]:
+    """Windows covering `lo`..`hi` after the node rejected it with `error`: of a
+    stated range cap's width, or from reth's named range. Anything else halves:
+    bor's and besu's range caps, which state no N, every other result cap, whose
+    number counts logs, not blocks, and errors not recognised as either. A single
+    block that fails can't narrow, and propagates.
     """
     message = _message(error)
     for pattern in _STATED_RANGE_LIMITS:
         if (match := pattern.search(message)) and int(match[1]) < hi - lo:
-            return _windows(lo, hi, int(match[1]) + 1), True
+            return _windows(lo, hi, int(match[1]) + 1)
     if (match := _RETRY_RANGE.search(message)) and int(match[1]) == lo and lo <= int(match[2]) < hi:
         retry_to = int(match[2])
-        return [(lo, retry_to), *_windows(retry_to + 1, hi, retry_to - lo + 1)], True
+        return [(lo, retry_to), *_windows(retry_to + 1, hi, retry_to - lo + 1)]
     if lo == hi:
         raise _block_error(lo, error)
     half = (hi - lo + 1) // 2
-    return [(lo, lo + half - 1), (lo + half, hi)], False
+    return [(lo, lo + half - 1), (lo + half, hi)]
 
 
 def _block_error(block: int, error) -> RpcError:
@@ -212,12 +212,11 @@ def get_logs(proxy: str, from_block: int, to_block: int) -> tuple[list[dict], li
     history it lacks.
 
     Nodes cap the block range or the result count of one `eth_getLogs`, each in
-    its own words. One query at a time narrows the range until a query succeeds
-    or a window is known to fit (see `_narrow`); the rest is sent as windows of
-    that width in batches, one round trip each. A window rejected in a batch
-    narrows the same way into the next batch, so a stretch dense with logs
-    doesn't shrink the windows elsewhere. A query or batch that fails over HTTP, times
-    out or is dropped narrows too (see `_narrowable`).
+    its own words. The whole range is queried first; each window the node rejects
+    narrows (see `_narrow`), and the windows go out together in the next batch, one
+    round trip each, so a stretch dense with logs doesn't shrink the windows
+    elsewhere. A batch that fails over HTTP, times out or is dropped narrows each of
+    its windows (see `_narrowable`).
 
     Missing history (pruned, or events never indexed) is assumed missing from the
     start: blocks before the first one held are reported, and the rest scanned. A
@@ -236,44 +235,19 @@ def get_logs(proxy: str, from_block: int, to_block: int) -> tuple[list[dict], li
 
     logs: list[dict] = []
     missing: list[tuple[int, int]] = []
-    queue: list[tuple[int, int]] = []
+    queue = [(from_block, to_block)]
     first_held: int | None = None  # lowest block a query succeeded from
-    lo, span = from_block, to_block - from_block + 1
-    while lo <= to_block:
-        hi = min(lo + span - 1, to_block)
-        try:
-            answer = post_request(eth_get_logs_request(proxy, topics, lo, hi))
-            error = answer.get("error")
-        except RpcError as e:
-            if not _narrowable(e):
-                raise
-            error = e.message
-        if not error:
-            logs.extend(_log_list(answer, lo, hi))
-            first_held = lo
-            queue = _windows(hi + 1, to_block, span)
-            break
-        if _missing_history(error):
-            start = _history_start(holds, error, lo, to_block)
-            missing.append((lo, start - 1))
-            lo = start
-            continue
-        windows, fits = _narrow(error, lo, hi)
-        span = windows[0][1] - windows[0][0] + 1
-        if fits:
-            queue = windows + _windows(hi + 1, to_block, span)
-            break
-
     while queue:
         requests = [eth_get_logs_request(proxy, topics, a, b, i) for i, (a, b) in enumerate(queue)]
         try:
-            answers = post_batch(requests)
+            # One window needs no batch, which some providers refuse.
+            answers = post_batch(requests) if len(requests) > 1 else {0: post_request(requests[0])}
         except RpcError as e:
             # The batch failed, not any one window, so a single block rides along
             # while the rest narrow; once all are single blocks, nothing narrows.
             if not _narrowable(e) or all(a == b for a, b in queue):
                 raise
-            queue = [window for a, b in queue for window in (_narrow(e.message, a, b)[0] if a < b else [(a, b)])]
+            queue = [window for a, b in queue for window in (_narrow(e.message, a, b) if a < b else [(a, b)])]
             continue
         retry, lacking = [], []
         for i, (a, b) in enumerate(queue):
@@ -283,7 +257,7 @@ def get_logs(proxy: str, from_block: int, to_block: int) -> tuple[list[dict], li
             elif _missing_history(error):
                 lacking.append((a, b, error))
             else:
-                retry.extend(_narrow(error, a, b)[0])
+                retry.extend(_narrow(error, a, b))
         # Below first_held is the missing start, where only the highest window can be
         # partly held; above it, gaps.
         start_windows = [(a, b, e) for a, b, e in lacking if first_held is None or b < first_held]

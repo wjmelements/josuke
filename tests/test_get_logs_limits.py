@@ -7,10 +7,10 @@ theirs. A result cap depends on how many logs a stretch of blocks holds, not on
 its width, and its number is no range. Reth's names the largest range from
 `fromBlock` that fits.
 
-`get_logs` probes one query at a time until one succeeds or a range is known to
-fit, then sends the remaining windows in batches: a batch costs one round trip
-however many windows it holds, so their width hardly matters. A window rejected
-for its results splits, in halves or as reth names, into the next batch.
+`get_logs` queries the whole range, then sends the windows each rejection
+narrows to in batches: a batch costs one round trip however many windows it
+holds, so their width hardly matters. Only rejected windows narrow, in halves,
+to a stated cap's width, or as reth names, into the next batch.
 
 A node may also lack the history asked for, which no narrower query fixes; see
 "missing history" below.
@@ -70,6 +70,11 @@ def _scan(node, lo, hi):
 
 def _windows(lo, hi, span):
     return [(start, min(start + span - 1, hi)) for start in range(lo, hi + 1, span)]
+
+
+def _halved(windows):
+    """Each of `windows` in halves, as a window that states no cap narrows."""
+    return [half for a, b in windows for half in ((a, (a + b - 1) // 2), ((a + b + 1) // 2, b))]
 
 
 def _range_limit(code, message, limit=LIMIT):
@@ -149,8 +154,11 @@ def test_unstated_range_limit_halves(node, code, message):
     _log_at(node, 0, 500, 999)
     node.get_logs_limit = _range_limit(code, message)
     blocks, sent = _scan(node, 0, 999)
-    # 1000 blocks halve to 500, 250, 125, then 62, the first that fits.
-    assert sent == [(0, 999), (0, 499), (0, 249), (0, 124), (0, 61), _windows(62, 999, 62)]
+    # Every window halves at once: 1000 blocks to 500, 250, 125, then 62 or 63, which fit.
+    rounds = [[(0, 999)]]
+    while len(rounds) < 5:
+        rounds.append(_halved(rounds[-1]))
+    assert sent == [(0, 999), *rounds[1:]]
     assert blocks == [0, 500, 999]
 
 
@@ -196,11 +204,17 @@ def test_result_limit_splits_windows(node, code, message):
     node.get_logs_limit = _result_limit(code, message)
     blocks, sent = _scan(node, 0, 9999)
     assert blocks == list(range(200, 400))
-    # Halved, never cut to the cap's number, until (0, 155) fits; then windows of
-    # 156 blocks, of which (156, 311) holds 112 logs and splits in two.
+    # Halved, never cut to the cap's number; only the half holding the dense
+    # stretch halves again, until (0, 155) and (312, 624) fit, and (156, 311),
+    # with 112 logs, splits once more.
     assert sent == [
-        (0, 9999), (0, 4999), (0, 2499), (0, 1249), (0, 624), (0, 311), (0, 155),
-        _windows(156, 9999, 156),
+        (0, 9999),
+        [(0, 4999), (5000, 9999)],
+        [(0, 2499), (2500, 4999)],
+        [(0, 1249), (1250, 2499)],
+        [(0, 624), (625, 1249)],
+        [(0, 311), (312, 624)],
+        [(0, 155), (156, 311)],
         [(156, 233), (234, 311)],
     ]
 
@@ -216,7 +230,7 @@ def test_one_query_when_nothing_is_rejected(node):
 def test_unrecognised_error_halves(node):
     _log_at(node, 0, 30, 99)
     node.get_logs_limit = lambda lo, hi, logs: {"code": -32000, "message": "too many results"} if hi - lo >= 25 else None
-    assert _scan(node, 0, 99) == ([0, 30, 99], [(0, 99), (0, 49), (0, 24), _windows(25, 99, 25)])
+    assert _scan(node, 0, 99) == ([0, 30, 99], [(0, 99), [(0, 49), (50, 99)], _windows(0, 99, 25)])
 
 
 def test_http_failure_halves(node):
@@ -233,7 +247,7 @@ def test_http_failure_halves(node):
 
     with patch("josuke.ethjsonrpc.post", gateway):
         # A 504 is resent once before the query narrows.
-        assert _scan(node, 0, 49) == ([0, 30], [(0, 49), (0, 49), (0, 24), [(25, 49)]])
+        assert _scan(node, 0, 49) == ([0, 30], [(0, 49), (0, 49), [(0, 24), (25, 49)]])
 
 
 # How requests fails a POST the node took but didn't answer in full: a timeout or a reset
@@ -252,7 +266,7 @@ DROPPED = {
 def test_dropped_query_halves(node, failure):
     _log_at(node, 0, 30)
     with _failing_over_http(node, failure, lambda ranges: ranges[0][1] - ranges[0][0] >= 25):
-        assert _scan(node, 0, 49) == ([0, 30], [(0, 49), (0, 24), [(25, 49)]])
+        assert _scan(node, 0, 49) == ([0, 30], [(0, 49), [(0, 24), (25, 49)]])
 
 
 def test_node_too_slow_to_connect_to_is_not_narrowed(node):
@@ -491,7 +505,7 @@ def test_missing_history_under_a_range_limit(node):
     probes = sent[2:-1]
     assert all(isinstance(p, tuple) and p[0] == p[1] and 4144008 <= p[0] <= 4144368 for p in probes)
     assert len(probes) <= 10
-    assert sent[-1] == [(cutoff, 4144368)]
+    assert sent[-1] == (cutoff, 4144368)
 
 
 def test_missing_history_in_a_batched_window_is_reported_whole(node):
@@ -520,7 +534,7 @@ def test_a_probe_finding_history_too_low_is_sought_past(node):
     blocks, missing, sent = _scan_history(node, 0, 999)
     assert missing == [(0, cutoff - 1)]
     assert blocks == [660, 999]
-    assert sent[-1] == [(cutoff, 699)]
+    assert sent[-1] == (cutoff, 699)
 
 
 def test_a_probe_failing_over_http_fails(node):
