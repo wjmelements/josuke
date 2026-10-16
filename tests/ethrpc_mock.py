@@ -11,6 +11,34 @@ Patch it over ``josuke.ethjsonrpc.post``, which sends every request, e.g.::
 import json
 
 
+class RpcFault(Exception):
+    """Raised by a handler to answer with a JSON-RPC `error` object instead of a result."""
+
+    def __init__(self, error: dict):
+        self.error = error
+
+
+def chained(*errors: BaseException) -> BaseException:
+    """The first of `errors`, as if raised while handling the second, and so on, as
+    requests raises its errors over urllib3's over the socket's."""
+    for outer, inner in zip(errors, errors[1:]):
+        outer.__context__ = inner
+    return errors[0]
+
+
+def connect_timeout() -> BaseException:
+    """How requests fails a POST to a node it couldn't connect to in time."""
+    from requests import ConnectTimeout
+    from urllib3.exceptions import ConnectTimeoutError, MaxRetryError
+
+    return chained(
+        ConnectTimeout("HTTPConnectionPool(host='node', port=80): /SECRET"),
+        MaxRetryError(None, "/SECRET"),
+        ConnectTimeoutError("Connection to node timed out. (connect timeout=0.05)"),
+        TimeoutError("timed out"),
+    )
+
+
 def norm_addr(a: str) -> str:
     return a.lower()
 
@@ -20,9 +48,10 @@ def norm_slot(s: str) -> str:
 
 
 class FakeResponse:
-    def __init__(self, status_code, text):
+    def __init__(self, status_code, text, headers=None):
         self.status_code = status_code
         self.text = text
+        self.headers = headers or {}
 
     def json(self):
         return json.loads(self.text)
@@ -38,6 +67,10 @@ class MockEthRpc:
         self.storage = {}
         self.nonce = {}
         self.balance = {}
+        self.logs = []  # list of raw eth_getLogs-shaped dicts, address already lowercased
+        # (from_block, to_block, matching logs) -> a JSON-RPC error object to answer
+        # eth_getLogs with, or None to answer normally: a node's query limits.
+        self.get_logs_limit = None
 
     # -- request plumbing ----------------------------------------------------
 
@@ -70,7 +103,10 @@ class MockEthRpc:
         handler = getattr(self, f"_rpc_{method}", None)
         if handler is None:
             raise AssertionError(f"unexpected JSON-RPC method: {method}")
-        return {"jsonrpc": "2.0", "id": req.get("id"), "result": handler(params)}
+        try:
+            return {"jsonrpc": "2.0", "id": req.get("id"), "result": handler(params)}
+        except RpcFault as fault:
+            return {"jsonrpc": "2.0", "id": req.get("id"), "error": fault.error}
 
     def _rpc_eth_blockNumber(self, params):
         return hex(self.block_number)
@@ -105,6 +141,34 @@ class MockEthRpc:
         except KeyError:
             return "0x" + "00" * 32
 
+    def _rpc_eth_getLogs(self, params):
+        query = params[0]
+        address = norm_addr(query["address"])
+        from_block = int(query["fromBlock"], 16)
+        to_block = int(query["toBlock"], 16)
+        topic_filters = query.get("topics", [])
+        out = []
+        for log in self.logs:
+            if norm_addr(log["address"]) != address:
+                continue
+            if not (from_block <= int(log["blockNumber"], 16) <= to_block):
+                continue
+            if self._topics_match(log["topics"], topic_filters):
+                out.append(log)
+        if self.get_logs_limit and (error := self.get_logs_limit(from_block, to_block, out)):
+            raise RpcFault(error)
+        return out
+
+    @staticmethod
+    def _topics_match(topics: list, filters: list) -> bool:
+        for i, wanted in enumerate(filters):
+            if wanted is None:
+                continue
+            alternatives = wanted if isinstance(wanted, list) else [wanted]
+            if i >= len(topics) or topics[i] not in alternatives:
+                return False
+        return True
+
     # -- test helpers ------------------------------------------------------
 
     def set_code(self, address: str, code: str):
@@ -112,6 +176,28 @@ class MockEthRpc:
 
     def set_storage(self, address: str, slot: str, value: str):
         self.storage[(norm_addr(address), norm_slot(slot))] = value
+
+    def add_log(
+        self,
+        address: str,
+        topics: list,
+        data: str = "0x",
+        block: int = 1,
+        tx_hash: str | None = None,
+        log_index: int = 0,
+        removed: bool = False,
+    ):
+        self.logs.append(
+            {
+                "address": norm_addr(address),
+                "topics": topics,
+                "data": data,
+                "blockNumber": hex(block),
+                "transactionHash": tx_hash or ("0x" + f"{len(self.logs):064x}"),
+                "logIndex": hex(log_index),
+                "removed": removed,
+            }
+        )
 
     def requests_for(self, method: str):
         out = []

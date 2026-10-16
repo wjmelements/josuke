@@ -89,59 +89,6 @@ def test_find_deploy_block_wraps_rpc_error(monkeypatch):
         audit.find_deploy_block(PROXY, 10)
 
 
-# -- get_logs ----------------------------------------------------------------
-
-
-def test_get_logs_single_span(monkeypatch):
-    seen = []
-
-    def fake_get_logs(address, topics, lo, hi):
-        seen.append((lo, hi))
-        return [_delegated_log("0x11111111", A1, block=lo)]
-
-    monkeypatch.setattr(audit, "eth_get_logs", fake_get_logs)
-    logs = audit.get_logs(PROXY, 0, 100)
-    assert seen == [(0, 100)]
-    assert len(logs) == 1
-
-
-def test_get_logs_halves_span_on_error_and_recovers(monkeypatch):
-    calls = []
-
-    def fake_get_logs(address, topics, lo, hi):
-        calls.append((lo, hi))
-        if hi - lo + 1 > 25:
-            raise RpcError("too many results")
-        return [_delegated_log("0x11111111", A1, block=lo)]
-
-    monkeypatch.setattr(audit, "eth_get_logs", fake_get_logs)
-    logs = audit.get_logs(PROXY, 0, 99)
-    # 100 halves to 50, halves to 25 (both from lo=0, retried in place); once a
-    # span succeeds it is reused, unshrunk, for the rest of the scan.
-    assert calls == [(0, 99), (0, 49), (0, 24), (25, 49), (50, 74), (75, 99)]
-    assert len(logs) == 4
-
-
-def test_get_logs_propagates_single_block_failure(monkeypatch):
-    def boom(address, topics, lo, hi):
-        raise RpcError("node error")
-
-    monkeypatch.setattr(audit, "eth_get_logs", boom)
-    with pytest.raises(RpcError):
-        audit.get_logs(PROXY, 5, 5)
-
-
-def test_get_logs_sorts_by_block_then_index(monkeypatch):
-    unordered = [
-        _delegated_log("0x22222222", A1, block=2, log_index=0),
-        _delegated_log("0x11111111", A1, block=1, log_index=1),
-        _delegated_log("0x33333333", A1, block=1, log_index=0),
-    ]
-    monkeypatch.setattr(audit, "eth_get_logs", lambda *a: unordered)
-    logs = audit.get_logs(PROXY, 0, 10)
-    assert [log["topics"][1][:10] for log in logs] == ["0x33333333", "0x11111111", "0x22222222"]
-
-
 # -- parse_logs ---------------------------------------------------------------
 
 
@@ -260,7 +207,7 @@ def _no_worktrees(monkeypatch):
 
 
 def test_audit_proxy_passes_when_delegate_is_current(monkeypatch, _no_worktrees):
-    monkeypatch.setattr(audit, "get_logs", lambda *a: [_delegated_log("0x11111111", A1)])
+    monkeypatch.setattr(audit, "get_logs", lambda *a: ([_delegated_log("0x11111111", A1)], []))
     monkeypatch.setattr(audit, "verify_facets", lambda *a, **k: None)
     monkeypatch.setattr(audit, "verify_selectors", lambda *a: None)
 
@@ -275,7 +222,7 @@ def test_audit_proxy_passes_when_delegate_is_current(monkeypatch, _no_worktrees)
 
 
 def test_audit_proxy_flags_unrecorded_delegate(monkeypatch, _no_worktrees):
-    monkeypatch.setattr(audit, "get_logs", lambda *a: [_delegated_log("0x11111111", A1)])
+    monkeypatch.setattr(audit, "get_logs", lambda *a: ([_delegated_log("0x11111111", A1)], []))
 
     history = {"current": _state({})}
     report = _report()
@@ -285,7 +232,7 @@ def test_audit_proxy_flags_unrecorded_delegate(monkeypatch, _no_worktrees):
 
 
 def test_audit_proxy_counts_delegate_recorded_only_in_proposed(monkeypatch, _no_worktrees):
-    monkeypatch.setattr(audit, "get_logs", lambda *a: [_delegated_log("0x11111111", A1)])
+    monkeypatch.setattr(audit, "get_logs", lambda *a: ([_delegated_log("0x11111111", A1)], []))
 
     history = {"proposed": _state({"a.sol:A": {"address": A1}})}
     report = _report()
@@ -298,10 +245,10 @@ def test_audit_proxy_counts_delegate_recorded_only_in_proposed(monkeypatch, _no_
 def test_audit_proxy_ignores_removal_delegations(monkeypatch, _no_worktrees):
     monkeypatch.setattr(
         audit, "get_logs",
-        lambda *a: [
-            _delegated_log("0x11111111", A1, block=1),
-            _delegated_log("0x11111111", ZERO, block=2),
-        ],
+        lambda *a: (
+            [_delegated_log("0x11111111", A1, block=1), _delegated_log("0x11111111", ZERO, block=2)],
+            [],
+        ),
     )
     history = {"proposed": _state({"a.sol:A": {"address": A1}})}
     report = _report()
@@ -317,7 +264,7 @@ def test_audit_proxy_finds_deploy_block_when_not_given(monkeypatch, _no_worktree
 
     def fake_get_logs(p, lo, hi):
         seen["range"] = (lo, hi)
-        return []
+        return [], []
 
     monkeypatch.setattr(audit, "get_logs", fake_get_logs)
 
@@ -338,7 +285,7 @@ def test_audit_proxy_propagates_find_deploy_block_failure(monkeypatch, _no_workt
 def test_audit_proxy_verifies_current_and_each_history_entry(monkeypatch, _no_worktrees):
     monkeypatch.setattr(
         audit, "get_logs",
-        lambda *a: [_delegated_log("0x11111111", OLD, block=1), _delegated_log("0x11111111", A1, block=2)],
+        lambda *a: ([_delegated_log("0x11111111", OLD, block=1), _delegated_log("0x11111111", A1, block=2)], []),
     )
     calls = []
     monkeypatch.setattr(
@@ -402,7 +349,7 @@ def test_run_audit_reports_nothing_recorded(monkeypatch, tmp_path, stub, capsys)
 
 def test_run_audit_fails_on_unrecorded_delegate(monkeypatch, tmp_path, stub):
     monkeypatch.chdir(tmp_path)
-    monkeypatch.setattr(audit, "get_logs", lambda *a: [_delegated_log("0x11111111", A1)])
+    monkeypatch.setattr(audit, "get_logs", lambda *a: ([_delegated_log("0x11111111", A1)], []))
     entry = {
         "address": PROXY,
         "facetSrc": ["*.sol"],
@@ -414,7 +361,7 @@ def test_run_audit_fails_on_unrecorded_delegate(monkeypatch, tmp_path, stub):
 
 def test_run_audit_passes_clean_ledger(monkeypatch, tmp_path, stub, capsys):
     monkeypatch.chdir(tmp_path)
-    monkeypatch.setattr(audit, "get_logs", lambda *a: [_delegated_log("0x11111111", A1)])
+    monkeypatch.setattr(audit, "get_logs", lambda *a: ([_delegated_log("0x11111111", A1)], []))
     entry = {
         "address": PROXY,
         "facetSrc": ["*.sol"],
@@ -427,11 +374,35 @@ def test_run_audit_passes_clean_ledger(monkeypatch, tmp_path, stub, capsys):
     assert "every installed delegate is recorded and verified" in out
 
 
+def test_run_audit_fails_on_missing_history_after_auditing_the_rest(monkeypatch, tmp_path, stub, capsys):
+    # The node lacks blocks 0-5: the audit covers 6-10, says so in red, and fails.
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr(audit, "get_logs", lambda *a: ([_delegated_log("0x11111111", A1, block=7)], [(0, 5)]))
+    styled = []
+    secho = click.secho
+    monkeypatch.setattr(click, "secho", lambda message, **kw: styled.append((message, kw.get("fg"))) or secho(message, **kw))
+    entry = {
+        "address": PROXY,
+        "facetSrc": ["*.sol"],
+        "deployments": {
+            "314": {"current": {"gitCommit": "c0", "facets": {"a.sol:A": {"address": A1}}}}
+        },
+    }
+    with pytest.raises(click.ClickException, match="1 audit failure") as failure:
+        audit.run_audit(_ledger(tmp_path, [entry]), from_block=0)
+    assert "blocks 0-5" in failure.value.message
+    red = [message for message, fg in styled if fg == "red"]
+    assert len(red) == 1 and "blocks 0-5" in red[0] and "history" in red[0]
+    out = capsys.readouterr().out
+    assert f"delegate {A1} current a.sol:A: 1 selector install(s), first at block 7" in out
+    assert "every installed delegate is recorded and verified" not in out
+
+
 def test_run_audit_prefetches_recorded_code_first(monkeypatch, tmp_path, stub):
     monkeypatch.chdir(tmp_path)
     events = []
     monkeypatch.setattr(audit, "prefetch_code", lambda addresses: events.append(set(addresses)))
-    monkeypatch.setattr(audit, "get_logs", lambda *a: events.append("get_logs") or [])
+    monkeypatch.setattr(audit, "get_logs", lambda *a: (events.append("get_logs"), ([], []))[1])
     selectors = "0x" + "51" * 20
     entry = {
         "address": PROXY,
@@ -450,7 +421,7 @@ def test_run_audit_prefetches_recorded_code_first(monkeypatch, tmp_path, stub):
 
 def test_run_audit_suggests_accept_once_for_proposed_delegates(monkeypatch, tmp_path, stub, capsys):
     monkeypatch.chdir(tmp_path)
-    monkeypatch.setattr(audit, "get_logs", lambda *a: [_delegated_log("0x11111111", A1)])
+    monkeypatch.setattr(audit, "get_logs", lambda *a: ([_delegated_log("0x11111111", A1)], []))
     entry = {
         "address": PROXY,
         "facetSrc": ["*.sol"],
@@ -465,7 +436,7 @@ def test_run_audit_suggests_accept_once_for_proposed_delegates(monkeypatch, tmp_
 
 def test_run_audit_does_not_suggest_accept_for_current_delegates(monkeypatch, tmp_path, stub, capsys):
     monkeypatch.chdir(tmp_path)
-    monkeypatch.setattr(audit, "get_logs", lambda *a: [_delegated_log("0x11111111", A1)])
+    monkeypatch.setattr(audit, "get_logs", lambda *a: ([_delegated_log("0x11111111", A1)], []))
     entry = {
         "address": PROXY,
         "facetSrc": ["*.sol"],

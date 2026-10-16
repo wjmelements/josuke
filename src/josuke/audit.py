@@ -14,6 +14,7 @@ the live routing.
 """
 
 import pathlib
+import re
 from dataclasses import dataclass
 from os import environ
 
@@ -22,7 +23,18 @@ from eth_abi import decode as abi_decode
 from eth_abi.exceptions import DecodingError
 from eth_utils import keccak, to_checksum_address
 
-from .ethjsonrpc import RpcError, chain_id, eth_block_number, eth_get_code, eth_get_logs, prefetch_code
+from .ethjsonrpc import (
+    RpcError,
+    RpcTimeout,
+    brief,
+    chain_id,
+    eth_block_number,
+    eth_get_code,
+    eth_get_logs_request,
+    post_batch,
+    post_request,
+    prefetch_code,
+)
 from .ledger import load_ledger
 from .migration import SELECTOR_DELEGATED_SIG
 from .verify import Report, SourceTrees, code_addresses, verify_facets, verify_selectors
@@ -86,29 +98,183 @@ def find_deploy_block(proxy: str, latest: int) -> int:
     return lo
 
 
-def get_logs(proxy: str, from_block: int, to_block: int) -> list[dict]:
-    """Every SelectorDelegated / DiamondDelegateCall log `proxy` emitted in the
-    inclusive range, oldest first.
+# eth_getLogs range caps that state their N, in each client's words. Each rejects
+# `toBlock - fromBlock > N`, so windows of N + 1 blocks fit.
+_STATED_RANGE_LIMITS = [
+    re.compile(r"exceed maximum block range:? (\d+)"),  # geth, op-geth, bsc
+    re.compile(r"query block range exceeds server limit, narrow your filter: (\d+)"),  # erigon
+    re.compile(r"query exceeds max block range (\d+)"),  # reth
+    re.compile(r"maximum \[from, to\] blocks distance: (\d+)"),  # ethermint
+    re.compile(r"block range exceeds maximum of (\d+)"),  # lotus >= v1.36, forest >= v0.33
+    re.compile(r"invalid epoch range: .* \(maximum: (\d+)\)"),  # venus, lotus < v1.36, forest < v0.33
+]
+# Reth's result cap names the most that fits from `fromBlock`.
+_RETRY_RANGE = re.compile(r"query exceeds max results \d+, retry with the range (\d+)-(\d+)")
+# Missing history: EIP-4444's code (geth and forks, reth, nethermind, besu), or
+# lotus's, lotus-gateway's and erigon's words; erigon's names its first block.
+# Lotus-gateway refuses blocks older than its lookback window, 24 hours by default.
+_PRUNED_HISTORY_CODE = 4444
+_MISSING_HISTORY = re.compile(
+    r"pruned history unavailable|not found in index|chain index requires backfill|old data not available due to pruning"
+    r"|lookbacks of more than .* are disallowed",
+    re.IGNORECASE,
+)
+_HISTORY_FROM = re.compile(r"blocks are available from block (\d+)")
 
-    Nodes cap the block span (or result count) of one `eth_getLogs`, and the cap
-    isn't discoverable, so an errored span is halved and retried. The span never
-    grows back, so once the cap is found the rest of the scan runs at it. A
-    single-block failure is real and propagates.
+
+def _message(error) -> str:
+    return str(error.get("message", "")) if isinstance(error, dict) else str(error)
+
+
+def _missing_history(error) -> bool:
+    return isinstance(error, dict) and error.get("code") == _PRUNED_HISTORY_CODE or bool(
+        _MISSING_HISTORY.search(_message(error))
+    )
+
+
+def _windows(lo: int, hi: int, span: int) -> list[tuple[int, int]]:
+    return [(start, min(start + span - 1, hi)) for start in range(lo, hi + 1, span)]
+
+
+def _narrow(error, lo: int, hi: int) -> list[tuple[int, int]]:
+    """Windows covering `lo`..`hi` after the node rejected it with `error`: of a
+    stated range cap's width, or from reth's named range. Anything else halves:
+    bor's and besu's range caps, which state no N, every other result cap, whose
+    number counts logs, not blocks, and errors not recognised as either. A single
+    block that fails can't narrow, and propagates.
+    """
+    message = _message(error)
+    for pattern in _STATED_RANGE_LIMITS:
+        if (match := pattern.search(message)) and int(match[1]) < hi - lo:
+            return _windows(lo, hi, int(match[1]) + 1)
+    if (match := _RETRY_RANGE.search(message)) and int(match[1]) == lo and lo <= int(match[2]) < hi:
+        retry_to = int(match[2])
+        return [(lo, retry_to), *_windows(retry_to + 1, hi, retry_to - lo + 1)]
+    if lo == hi:
+        raise _block_error(lo, error)
+    half = (hi - lo + 1) // 2
+    return [(lo, lo + half - 1), (lo + half, hi)]
+
+
+def _block_error(block: int, error) -> RpcError:
+    """`error` to a single-block query, which fits any range or result cap."""
+    return RpcError(f"eth_getLogs block {block}: {error}")
+
+
+def _history_start(holds, error, lo: int, hi: int) -> int:
+    """The first block of `lo`..`hi` the node holds (`hi + 1` if none), given it
+    lacks `lo`. Assumes history is missing from the start; single-block probes fit
+    any range or result cap."""
+    if match := _HISTORY_FROM.search(_message(error)):
+        return min(max(int(match[1]), lo + 1), hi + 1)
+    if not holds(hi):
+        return hi + 1
+    missing, held = lo, hi
+    while held - missing > 1:
+        mid = (missing + held) // 2
+        if holds(mid):
+            held = mid
+        else:
+            missing = mid
+    return held
+
+
+def _merged(ranges: list[tuple[int, int]]) -> list[tuple[int, int]]:
+    merged: list[tuple[int, int]] = []
+    for lo, hi in sorted(ranges):
+        if merged and lo <= merged[-1][1] + 1:
+            merged[-1] = (merged[-1][0], max(merged[-1][1], hi))
+        else:
+            merged.append((lo, hi))
+    return merged
+
+
+def _log_list(answer: dict, lo: int, hi: int) -> list[dict]:
+    """The logs of an `eth_getLogs` answer with no error. Anything but a list is a bad
+    response, not an empty scan, and no narrower query fixes it."""
+    result = answer.get("result")
+    if not isinstance(result, list):
+        raise RpcError(f"eth_getLogs blocks {lo}-{hi}: bad response: {brief(answer)}")
+    return result
+
+
+def _narrowable(e: RpcError) -> bool:
+    """Whether a narrower query may avoid `e`, which outlasted resends: only no answer in
+    time, from the node or a gateway's 504, as for a query too heavy to answer. A node
+    that is down, overloaded or rate-limiting fails the same at any width."""
+    return isinstance(e, RpcTimeout) or e.status == 504
+
+
+def get_logs(proxy: str, from_block: int, to_block: int) -> tuple[list[dict], list[tuple[int, int]]]:
+    """Every SelectorDelegated / DiamondDelegateCall log `proxy` emitted in the
+    inclusive range that the node holds, oldest first, and the block ranges whose
+    history it lacks.
+
+    Nodes cap the block range or the result count of one `eth_getLogs`, each in
+    its own words. The whole range is queried first; each window the node rejects
+    narrows (see `_narrow`), and the windows go out together in the next batch, one
+    round trip each, so a stretch dense with logs doesn't shrink the windows
+    elsewhere. A batch without an answer in time narrows the windows it sent (see
+    `_narrowable`); those not yet sent wait, so a node that never answers fails
+    before the queue grows by more than one batch a round.
+
+    Missing history (pruned, or events never indexed) is assumed missing from the
+    start: blocks before the first one held are reported, and the rest scanned. A
+    missing window above one a query succeeded from is a gap, reported whole; below
+    it, the first block held is sought again, as a probe may find one too low, e.g.
+    a Lotus null round, which has no events to lack.
     """
     topics = [[SELECTOR_DELEGATED_TOPIC, DIAMOND_DELEGATE_CALL_TOPIC]]
+
+    def holds(block: int) -> bool:
+        """Whether the node holds `block`'s history; any other error propagates."""
+        error = post_request(eth_get_logs_request(proxy, topics, block, block)).get("error")
+        if error and not _missing_history(error):
+            raise _block_error(block, error)
+        return not error
+
     logs: list[dict] = []
-    lo, span = from_block, to_block - from_block + 1
-    while lo <= to_block:
-        hi = min(lo + span - 1, to_block)
+    missing: list[tuple[int, int]] = []
+    queue = [(from_block, to_block)]
+    first_held: int | None = None  # lowest block a query succeeded from
+    while queue:
+        requests = [eth_get_logs_request(proxy, topics, a, b, i) for i, (a, b) in enumerate(queue)]
+        unanswered: set[int] = set()  # sent in a batch without an answer in time
         try:
-            logs.extend(eth_get_logs(proxy, topics, lo, hi))
-        except RpcError:
-            if span == 1:
+            # One window needs no batch, which some providers refuse.
+            answers = post_batch(requests) if len(requests) > 1 else {0: post_request(requests[0])}
+        except RpcError as e:
+            # The batch failed, not any one window, so a single block rides along while the
+            # rest narrow; once all are single blocks, nothing narrows. Windows the node
+            # answered before it are kept, and those not yet sent wait as they are.
+            failed = e.failed or [0]
+            if not _narrowable(e) or all(queue[i][0] == queue[i][1] for i in failed):
                 raise
-            span //= 2
-            continue
-        lo = hi + 1
-    return sorted(logs, key=lambda log: (int(log["blockNumber"], 16), int(log["logIndex"], 16)))
+            answers, unanswered, timeout = e.answers, set(failed), e.message
+        retry, lacking = [], []
+        for i, (a, b) in enumerate(queue):
+            if i not in answers:
+                retry.extend(_narrow(timeout, a, b) if i in unanswered and a < b else [(a, b)])
+            elif not (error := answers[i].get("error")):
+                logs.extend(_log_list(answers[i], a, b))
+                first_held = a if first_held is None else min(first_held, a)
+            elif _missing_history(error):
+                lacking.append((a, b, error))
+            else:
+                retry.extend(_narrow(error, a, b))
+        # Below first_held is the missing start, where only the highest window can be
+        # partly held; above it, gaps.
+        start_windows = [(a, b, e) for a, b, e in lacking if first_held is None or b < first_held]
+        missing.extend((a, b) for a, b, _ in lacking if first_held is not None and b >= first_held)
+        if start_windows:
+            a, b, error = max(start_windows)
+            start = _history_start(holds, error, a, b)
+            missing.append((min(w[0] for w in start_windows), start - 1))
+            if start <= b:
+                retry.append((start, b))
+        queue = retry
+    logs.sort(key=lambda log: (int(log["blockNumber"], 16), int(log["logIndex"], 16)))
+    return logs, _merged(missing)
 
 
 def parse_logs(logs: list[dict], report: Report) -> tuple[list[Delegation], list[MigrationCall]]:
@@ -203,7 +369,12 @@ def audit_proxy(
         origin = f"from block {from_block} (--from-block)"
     click.echo(f"{proxy} chain {chain}: {origin}, scanning through block {latest}")
 
-    delegations, calls = parse_logs(get_logs(proxy, from_block, latest), report)
+    logs, missing = get_logs(proxy, from_block, latest)
+    for lo, hi in missing:
+        message = f"audit: blocks {lo}-{hi} are missing from ETH_RPC_URL's history; their delegations are unaudited"
+        click.secho(f"error: {proxy} {message}", fg="red", err=True)
+        report.fail(message)
+    delegations, calls = parse_logs(logs, report)
 
     for call in calls:
         detail = f", calldata 0x{call.calldata.hex()}" if call.calldata else ""
