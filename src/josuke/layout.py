@@ -12,6 +12,7 @@ import os
 import pathlib
 import posixpath
 import re
+import tempfile
 
 import click
 from eth_utils import keccak
@@ -36,8 +37,31 @@ def _svm_dirs() -> list[pathlib.Path]:
     ]
 
 
+def _installed_solc(version: str) -> pathlib.Path | None:
+    for svm in _svm_dirs():
+        binary = svm / version / f"solc-{version}"
+        if binary.exists():
+            return binary
+    return None
+
+
+@functools.cache
+def _install_solc(version: str) -> None:
+    """Have forge install `version` into its svm cache, isolated from any project:
+    with nothing to compile it installs the compiler and exits."""
+    with tempfile.TemporaryDirectory() as scratch:
+        (pathlib.Path(scratch) / "foundry.toml").write_text("[profile.default]\n")
+        try:
+            run(["forge", "build", "--use", version], pathlib.Path(scratch))
+        except click.ClickException as error:
+            raise click.ClickException(
+                f"installing solc {version} (the first install needs network access): {error.message}"
+            )
+
+
 def solc_binary(root: pathlib.Path, config: dict, fallback_version: str | None = None) -> str:
-    """Locate the configured compiler or a version resolved from this checkout."""
+    """Locate the configured compiler or a version resolved from this checkout,
+    installing a missing version."""
     version = config.get("solc") or fallback_version
     if not version:
         raise click.ClickException(
@@ -46,11 +70,13 @@ def solc_binary(root: pathlib.Path, config: dict, fallback_version: str | None =
     version = version.split("+", 1)[0]
     if not _VERSION.match(version):
         return str(root / version)  # a path; joining keeps an absolute one as it is
-    for svm in _svm_dirs():
-        binary = svm / version / f"solc-{version}"
-        if binary.exists():
-            return str(binary)
-    raise click.ClickException(f"solc {version} is not installed; a `forge build` that uses it installs it")
+    if binary := _installed_solc(version):
+        return str(binary)
+    _install_solc(version)
+    if binary := _installed_solc(version):
+        return str(binary)
+    searched = ", ".join(str(svm) for svm in _svm_dirs())
+    raise click.ClickException(f"solc {version}: forge installed it, but it is not in {searched}")
 
 
 def _walk(node, kind: str):

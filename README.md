@@ -157,7 +157,7 @@ and `--format markdown` suits `$GITHUB_STEP_SUMMARY`. It trusts the recorded
 hashes; `verify` is what ties them to the chain.
 For ordinary pull requests, run without `--strict`: source changes relative to a
 deployment are expected. CI needs the recorded commits, submodules and their
-Solidity compiler versions available locally. Build scripts and sources are
+Solidity compiler versions: `check` installs a missing compiler with `forge build --use`, so the first run on a fresh machine needs network access. Build scripts and sources are
 executed, so run untrusted pull requests without credentials.
 
 `abi` prints a proxy's ABI, merged from the facets its `facetSrc` resolves to in
