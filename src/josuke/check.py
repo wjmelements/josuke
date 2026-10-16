@@ -9,10 +9,10 @@ not resolve to buildable facets; two facets `deploy` would put at different
 addresses export one selector; two signatures share a 4-byte selector; two
 facets declare different variables over the same storage bytes; storage that a
 recorded deployment (`legacy`, `current`, `proposed` or `history`) declares
-reads back differently at HEAD; a facet's recorded constructor args don't encode.
+reads back differently at HEAD; a facet's constructor args don't encode.
 
 Warned about: a variable renamed, or dropped with its data left behind; storage
-holding an internal function.
+holding an internal function; a declared constructor arg no facet takes.
 
 Reported, and blocking only with `--strict`: HEAD differs from the deployment
 the ledger stages (`proposed`, else `current`).
@@ -31,10 +31,12 @@ from eth_utils import to_checksum_address
 from .deploy import (
     constructor_inputs,
     coerce_input,
+    declared_constructor_args,
     existing_deployment,
     facet_initcode,
     facet_selectors,
     keccak_hex,
+    misencoded_declarations,
     recorded_facet,
 )
 from .erc8167 import SELECTORS_SELECTOR, generated_selectors, selectors_method
@@ -421,11 +423,15 @@ def _check_storage_history(proxy, states, head, baselines, findings) -> list[str
     return lines
 
 
-def _initcode_hash(facet, root, recorded: dict, proxy: str, findings: Findings) -> tuple[str | None, list[str]]:
+def _initcode_hash(
+    facet, root, recorded: dict, declared: dict, proxy: str, findings: Findings
+) -> tuple[str | None, list[str], dict | None]:
     """(keccak of the creation code `deploy` would send, constructor args it
-    would prompt for). The hash is None when args are missing, or on a failure."""
+    would prompt for, those it would use). The hash is None when args are
+    missing, or on a failure."""
     source_id = facet.source_id
-    args = recorded.get("constructorArgs") or {}
+    args = (recorded.get("constructorArgs") or {}) | declared
+    inputs = []
     try:
         if facet.kind == "sol":
             inputs = constructor_inputs(facet, root)
@@ -434,23 +440,62 @@ def _initcode_hash(facet, root, recorded: dict, proxy: str, findings: Findings) 
                 for arg in inputs:
                     if arg["name"] in args:
                         abi_encode([canonical_type(arg)], [coerce_input(arg, args[arg["name"]])])
-                return None, missing
-        initcode, _ = facet_initcode(facet, root, args, prompt=False)
+                return None, missing, None
+        initcode, args = facet_initcode(facet, root, args, prompt=False)
     except click.ClickException as e:
         findings.fail(f"{proxy} {source_id}: {e.message.removeprefix(f'{source_id}: ')}")
-        return None, []
+        return None, [], None
     except (EncodingError, ValueError, TypeError, KeyError) as e:
-        findings.fail(f"{proxy} {source_id}: recorded constructorArgs do not encode: {e}")
-        return None, []
+        bad = misencoded_declarations(inputs, declared)
+        if bad:
+            findings.fail(
+                f"{proxy} {source_id}: declared constructorArgs {', '.join(bad)} do not encode: {e}; "
+                "override them for this facet in facetConstructorArgs"
+            )
+        else:
+            findings.fail(f"{proxy} {source_id}: recorded constructorArgs do not encode: {e}")
+        return None, [], None
     try:
         code = bytes.fromhex(initcode)
     except ValueError:
         findings.fail(f"{proxy} {source_id}: creation code is not hex")
-        return None, []
+        return None, [], None
     if not code:
         findings.fail(f"{proxy} {source_id}: no creation code (an interface or abstract contract?)")
-        return None, []
-    return keccak_hex(initcode), []
+        return None, [], None
+    return keccak_hex(initcode), [], args
+
+
+def _arg_changes(old: dict, new: dict | None) -> str:
+    new = new or {}
+    changes = [f"{name} {old[name]} -> {value}" for name, value in new.items() if name in old and old[name] != value]
+    changes += [f"+{name} {value}" for name, value in new.items() if name not in old]
+    changes += [f"-{name} {old[name]}" for name in old if name not in new]
+    return f"  args {'; '.join(changes)}" if changes else ""
+
+
+def _check_declarations(entry, chain, resolved, root, findings) -> None:
+    """Warn of declared constructor args that no facet takes, such as a misspelt name."""
+    proxy = to_checksum_address(entry["address"])
+    params = {}  # source_id -> its constructor's parameter names
+    for source_id, (facet, _, _) in resolved.items():
+        try:
+            params[source_id] = {arg["name"] for arg in constructor_inputs(facet, root)} if facet.kind == "sol" else set()
+        except click.ClickException:
+            return  # an unbuilt facet might take any of them; its failure is reported elsewhere
+    taken = set().union(*params.values())
+    deployment = (entry.get("deployments", {}).get(chain) or {}) if chain else {}
+    for where, declarations in [(proxy, entry), (f"{proxy} chain {chain}", deployment)]:
+        for name in declarations.get("constructorArgs", {}):
+            if name not in taken:
+                findings.warn(f"{where} constructorArgs {name}: no facet takes it")
+        for source_id, args in declarations.get("facetConstructorArgs", {}).items():
+            if source_id not in params:
+                findings.warn(f"{where} facetConstructorArgs {source_id}: not a facet of this proxy")
+                continue
+            for name in args:
+                if name not in params[source_id]:
+                    findings.warn(f"{where} facetConstructorArgs {source_id} {name}: its constructor takes no {name}")
 
 
 def _differences(head: dict, reference: dict) -> list[str]:
@@ -487,9 +532,15 @@ def _check_proxy(entry, chain, resolved, head, storage_line, root, run_deployed,
     owners = {}  # selector -> (source_id, deployment address)
     fresh = set()  # initcodeHashes `deploy` would deploy
     prompts = 0  # facets whose constructor args `deploy` would ask for
+    _check_declarations(entry, chain, resolved, root, findings)
     for source_id, (facet, selectors, _) in resolved.items():
-        initcode_hash, missing = _initcode_hash(
-            facet, root, recorded_facet(source_id, current_facets, proposed_facets), proxy, findings
+        initcode_hash, missing, args = _initcode_hash(
+            facet,
+            root,
+            recorded_facet(source_id, current_facets, proposed_facets),
+            declared_constructor_args(entry, chain, source_id),
+            proxy,
+            findings,
         )
         note = ""
         if missing:
@@ -518,6 +569,7 @@ def _check_proxy(entry, chain, resolved, head, storage_line, root, run_deployed,
                 status = "NEW"
             elif current_facets[source_id].get("initcodeHash") != initcode_hash:
                 status = "CHANGED"
+                note = _arg_changes(current_facets[source_id].get("constructorArgs") or {}, args)
             else:
                 status = "UNCHANGED"
 

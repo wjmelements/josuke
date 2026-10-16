@@ -6,8 +6,19 @@
             "lib/erc8169/implementation.evm",
             "lib/diamond-std/Admin.sol:Owned"
         ],
+        "constructorArgs": {
+            "threshold": 2
+        },
+        "facetConstructorArgs": {
+            "lib/diamond-std/Admin.sol:Owned": {
+                "owner": "0x0000000000000000000000000000000000000000"
+            }
+        },
         "deployments": {
             "314": {
+                "constructorArgs": {
+                    "pendingOwner": "0x4a6f6B9fF1fc974096f9063a45Fd12bD5B928AD1"
+                },
                 "current": {
                     "gitCommit": "e910ce4ca320c7c67e71af36b4a7bd2b2a76666a",
                     "facets": {
